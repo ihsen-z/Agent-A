@@ -1,0 +1,5 @@
+reference,statut,id_piece_rattachee,motif
+OP000123,justifie,P-00417,
+OP000125,manquant,,piece jamais transmise par le client
+OP000126,hors_perimetre,,salaires
+OP000127,partiel,P-00418,acompte de 30 % sur facture 4800 EUR

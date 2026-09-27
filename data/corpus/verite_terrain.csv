@@ -1,0 +1,285 @@
+reference,statut,id_piece_rattachee,motif
+OP000001,justifie,P-00001,
+OP000002,justifie,P-00002,
+OP000003,justifie,P-00003,
+OP000004,justifie,P-00004,
+OP000005,manquant,,piece jamais transmise par le client
+OP000006,justifie,P-00005,
+OP000007,justifie,P-00006,
+OP000008,justifie,P-00007,
+OP000009,manquant,,piece jamais transmise par le client
+OP000010,justifie,P-00008,
+OP000011,justifie,P-00009,
+OP000012,justifie,P-00010,
+OP000013,hors_perimetre,,charges_sociales
+OP000014,hors_perimetre,,emprunts
+OP000015,hors_perimetre,,impots_taxes
+OP000016,hors_perimetre,,mouvements_internes
+OP000017,hors_perimetre,,impots_taxes
+OP000018,hors_perimetre,,impots_taxes
+OP000019,hors_perimetre,,mouvements_internes
+OP000020,hors_perimetre,,mouvements_internes
+OP000021,hors_perimetre,,impots_taxes
+OP000022,hors_perimetre,,mouvements_internes
+OP000023,hors_perimetre,,charges_sociales
+OP000024,hors_perimetre,,charges_sociales
+OP000025,hors_perimetre,,encaissements_clients
+OP000026,hors_perimetre,,encaissements_clients
+OP000027,hors_perimetre,,encaissements_clients
+OP000028,justifie,P-00011,
+OP000029,manquant,,piece jamais transmise par le client
+OP000030,manquant,,piece jamais transmise par le client
+OP000031,manquant,,piece jamais transmise par le client
+OP000032,justifie,P-00012,
+OP000033,justifie,P-00013,
+OP000034,justifie,P-00014,
+OP000035,justifie,P-00015,
+OP000036,justifie,P-00016,
+OP000037,justifie,P-00017,
+OP000038,justifie,P-00018,
+OP000039,justifie,P-00019,
+OP000040,justifie,P-00020,
+OP000041,hors_perimetre,,impots_taxes
+OP000042,hors_perimetre,,charges_sociales
+OP000043,hors_perimetre,,charges_sociales
+OP000044,hors_perimetre,,mouvements_internes
+OP000045,hors_perimetre,,impots_taxes
+OP000046,hors_perimetre,,emprunts
+OP000047,hors_perimetre,,salaires
+OP000048,hors_perimetre,,frais_bancaires
+OP000049,hors_perimetre,,salaires
+OP000050,hors_perimetre,,impots_taxes
+OP000051,hors_perimetre,,charges_sociales
+OP000052,hors_perimetre,,salaires
+OP000053,hors_perimetre,,emprunts
+OP000054,hors_perimetre,,charges_sociales
+OP000055,hors_perimetre,,charges_sociales
+OP000056,hors_perimetre,,charges_sociales
+OP000057,hors_perimetre,,impots_taxes
+OP000058,hors_perimetre,,salaires
+OP000059,hors_perimetre,,encaissements_clients
+OP000060,hors_perimetre,,encaissements_clients
+OP000061,hors_perimetre,,encaissements_clients
+OP000062,hors_perimetre,,encaissements_clients
+OP000063,hors_perimetre,,encaissements_clients
+OP000064,manquant,,piece jamais transmise par le client
+OP000065,manquant,,piece jamais transmise par le client
+OP000066,justifie,P-00021,
+OP000067,justifie,P-00022,
+OP000068,justifie,P-00023,
+OP000069,manquant,,piece jamais transmise par le client
+OP000070,justifie,P-00024,
+OP000071,manquant,,piece jamais transmise par le client
+OP000072,justifie,P-00025,
+OP000073,justifie,P-00026,
+OP000074,justifie,P-00027,
+OP000075,manquant,,piece jamais transmise par le client
+OP000076,justifie,P-00028,
+OP000077,hors_perimetre,,impots_taxes
+OP000078,hors_perimetre,,emprunts
+OP000079,hors_perimetre,,charges_sociales
+OP000080,hors_perimetre,,mouvements_internes
+OP000081,hors_perimetre,,salaires
+OP000082,hors_perimetre,,salaires
+OP000083,hors_perimetre,,frais_bancaires
+OP000084,hors_perimetre,,salaires
+OP000085,hors_perimetre,,charges_sociales
+OP000086,hors_perimetre,,impots_taxes
+OP000087,hors_perimetre,,frais_bancaires
+OP000088,hors_perimetre,,salaires
+OP000089,hors_perimetre,,charges_sociales
+OP000090,hors_perimetre,,emprunts
+OP000091,hors_perimetre,,salaires
+OP000092,hors_perimetre,,charges_sociales
+OP000093,hors_perimetre,,encaissements_clients
+OP000094,hors_perimetre,,encaissements_clients
+OP000095,hors_perimetre,,encaissements_clients
+OP000096,hors_perimetre,,encaissements_clients
+OP000097,justifie,P-00029,
+OP000098,justifie,P-00030,
+OP000099,justifie,P-00031,
+OP000100,justifie,P-00032,
+OP000101,manquant,,piece jamais transmise par le client
+OP000102,justifie,P-00033,
+OP000103,justifie,P-00034,
+OP000104,justifie,P-00035,
+OP000105,justifie,P-00036,
+OP000106,justifie,P-00037,
+OP000107,justifie,P-00038,
+OP000108,justifie,P-00039,
+OP000109,justifie,P-00040,
+OP000110,hors_perimetre,,mouvements_internes
+OP000111,hors_perimetre,,impots_taxes
+OP000112,hors_perimetre,,mouvements_internes
+OP000113,hors_perimetre,,frais_bancaires
+OP000114,hors_perimetre,,salaires
+OP000115,hors_perimetre,,charges_sociales
+OP000116,hors_perimetre,,impots_taxes
+OP000117,hors_perimetre,,emprunts
+OP000118,hors_perimetre,,charges_sociales
+OP000119,hors_perimetre,,salaires
+OP000120,hors_perimetre,,salaires
+OP000121,hors_perimetre,,salaires
+OP000122,hors_perimetre,,frais_bancaires
+OP000123,hors_perimetre,,charges_sociales
+OP000124,hors_perimetre,,encaissements_clients
+OP000125,hors_perimetre,,encaissements_clients
+OP000126,hors_perimetre,,encaissements_clients
+OP000127,hors_perimetre,,encaissements_clients
+OP000128,hors_perimetre,,encaissements_clients
+OP000129,justifie,P-00041,
+OP000130,justifie,P-00042,
+OP000131,justifie,P-00043,
+OP000132,justifie,P-00044,
+OP000133,manquant,,piece jamais transmise par le client
+OP000134,justifie,P-00045,
+OP000135,justifie,P-00046,
+OP000136,justifie,P-00047,
+OP000137,justifie,P-00048,
+OP000138,hors_perimetre,,frais_bancaires
+OP000139,hors_perimetre,,impots_taxes
+OP000140,hors_perimetre,,mouvements_internes
+OP000141,hors_perimetre,,charges_sociales
+OP000142,hors_perimetre,,charges_sociales
+OP000143,hors_perimetre,,frais_bancaires
+OP000144,hors_perimetre,,impots_taxes
+OP000145,hors_perimetre,,mouvements_internes
+OP000146,hors_perimetre,,charges_sociales
+OP000147,hors_perimetre,,salaires
+OP000148,hors_perimetre,,charges_sociales
+OP000149,hors_perimetre,,frais_bancaires
+OP000150,hors_perimetre,,impots_taxes
+OP000151,hors_perimetre,,frais_bancaires
+OP000152,hors_perimetre,,charges_sociales
+OP000153,hors_perimetre,,encaissements_clients
+OP000154,hors_perimetre,,encaissements_clients
+OP000155,hors_perimetre,,encaissements_clients
+OP000156,hors_perimetre,,encaissements_clients
+OP000157,hors_perimetre,,encaissements_clients
+OP000158,manquant,,piece jamais transmise par le client
+OP000159,justifie,P-00049,
+OP000160,manquant,,piece jamais transmise par le client
+OP000161,justifie,P-00050,
+OP000162,manquant,,piece jamais transmise par le client
+OP000163,justifie,P-00051,
+OP000164,justifie,P-00052,
+OP000165,manquant,,piece jamais transmise par le client
+OP000166,manquant,,piece jamais transmise par le client
+OP000167,justifie,P-00053,
+OP000168,manquant,,piece jamais transmise par le client
+OP000169,manquant,,piece jamais transmise par le client
+OP000170,justifie,P-00054,
+OP000171,hors_perimetre,,salaires
+OP000172,hors_perimetre,,frais_bancaires
+OP000173,hors_perimetre,,charges_sociales
+OP000174,hors_perimetre,,frais_bancaires
+OP000175,hors_perimetre,,frais_bancaires
+OP000176,hors_perimetre,,frais_bancaires
+OP000177,hors_perimetre,,salaires
+OP000178,hors_perimetre,,frais_bancaires
+OP000179,hors_perimetre,,impots_taxes
+OP000180,hors_perimetre,,emprunts
+OP000181,hors_perimetre,,salaires
+OP000182,hors_perimetre,,frais_bancaires
+OP000183,hors_perimetre,,salaires
+OP000184,hors_perimetre,,mouvements_internes
+OP000185,hors_perimetre,,frais_bancaires
+OP000186,hors_perimetre,,encaissements_clients
+OP000187,hors_perimetre,,encaissements_clients
+OP000188,hors_perimetre,,encaissements_clients
+OP000189,hors_perimetre,,encaissements_clients
+OP000190,justifie,P-00055,
+OP000191,justifie,P-00056,
+OP000192,justifie,P-00057,
+OP000193,manquant,,piece jamais transmise par le client
+OP000194,justifie,P-00058,
+OP000195,justifie,P-00059,
+OP000196,justifie,P-00060,
+OP000197,justifie,P-00061,
+OP000198,justifie,P-00062,
+OP000199,justifie,P-00063,
+OP000200,hors_perimetre,,frais_bancaires
+OP000201,hors_perimetre,,frais_bancaires
+OP000202,hors_perimetre,,salaires
+OP000203,hors_perimetre,,impots_taxes
+OP000204,hors_perimetre,,frais_bancaires
+OP000205,hors_perimetre,,frais_bancaires
+OP000206,hors_perimetre,,impots_taxes
+OP000207,hors_perimetre,,salaires
+OP000208,hors_perimetre,,charges_sociales
+OP000209,hors_perimetre,,salaires
+OP000210,hors_perimetre,,charges_sociales
+OP000211,hors_perimetre,,salaires
+OP000212,hors_perimetre,,frais_bancaires
+OP000213,hors_perimetre,,encaissements_clients
+OP000214,hors_perimetre,,encaissements_clients
+OP000215,hors_perimetre,,encaissements_clients
+OP000216,hors_perimetre,,encaissements_clients
+OP000217,hors_perimetre,,encaissements_clients
+OP000218,manquant,,piece jamais transmise par le client
+OP000219,manquant,,piece jamais transmise par le client
+OP000220,justifie,P-00064,
+OP000221,justifie,P-00065,
+OP000222,justifie,P-00066,
+OP000223,justifie,P-00067,
+OP000224,justifie,P-00068,
+OP000225,justifie,P-00069,
+OP000226,justifie,P-00070,
+OP000227,hors_perimetre,,impots_taxes
+OP000228,hors_perimetre,,impots_taxes
+OP000229,hors_perimetre,,frais_bancaires
+OP000230,hors_perimetre,,frais_bancaires
+OP000231,hors_perimetre,,salaires
+OP000232,hors_perimetre,,emprunts
+OP000233,hors_perimetre,,mouvements_internes
+OP000234,hors_perimetre,,mouvements_internes
+OP000235,hors_perimetre,,impots_taxes
+OP000236,hors_perimetre,,salaires
+OP000237,hors_perimetre,,impots_taxes
+OP000238,hors_perimetre,,salaires
+OP000239,hors_perimetre,,impots_taxes
+OP000240,hors_perimetre,,charges_sociales
+OP000241,hors_perimetre,,charges_sociales
+OP000242,hors_perimetre,,salaires
+OP000243,hors_perimetre,,mouvements_internes
+OP000244,hors_perimetre,,frais_bancaires
+OP000245,hors_perimetre,,encaissements_clients
+OP000246,hors_perimetre,,encaissements_clients
+OP000247,hors_perimetre,,encaissements_clients
+OP000248,hors_perimetre,,encaissements_clients
+OP000249,hors_perimetre,,encaissements_clients
+OP000250,justifie,P-00071,
+OP000251,justifie,P-00072,
+OP000252,justifie,P-00073,
+OP000253,justifie,P-00074,
+OP000254,justifie,P-00075,
+OP000255,justifie,P-00076,
+OP000256,justifie,P-00077,
+OP000257,justifie,P-00078,
+OP000258,manquant,,piece jamais transmise par le client
+OP000259,hors_perimetre,,frais_bancaires
+OP000260,hors_perimetre,,mouvements_internes
+OP000261,hors_perimetre,,charges_sociales
+OP000262,hors_perimetre,,mouvements_internes
+OP000263,hors_perimetre,,impots_taxes
+OP000264,hors_perimetre,,salaires
+OP000265,hors_perimetre,,charges_sociales
+OP000266,hors_perimetre,,salaires
+OP000267,hors_perimetre,,frais_bancaires
+OP000268,hors_perimetre,,charges_sociales
+OP000269,hors_perimetre,,impots_taxes
+OP000270,hors_perimetre,,frais_bancaires
+OP000271,hors_perimetre,,frais_bancaires
+OP000272,hors_perimetre,,charges_sociales
+OP000273,hors_perimetre,,frais_bancaires
+OP000274,hors_perimetre,,impots_taxes
+OP000275,hors_perimetre,,charges_sociales
+OP000276,hors_perimetre,,encaissements_clients
+OP000277,hors_perimetre,,encaissements_clients
+OP000278,hors_perimetre,,encaissements_clients
+OP000279,hors_perimetre,,encaissements_clients
+OP000280,hors_perimetre,,encaissements_clients
+OP010280,justifie,P-G000 + P-G001 + P-G002,paiement groupe de 3 factures
+OP010281,partiel,P-A001,acompte de 30 % sur facture 4800 EUR
+OP010282,justifie,P-CB01,credit-bail : facture obligatoire malgre le libelle d'echeance
+OP010283,justifie,P-R001,"ecart d'arrondi de 0,01 EUR"

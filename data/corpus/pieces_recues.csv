@@ -1,0 +1,85 @@
+id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc,devise,date_reception,canal
+P-00001,MARTIN-BTP,2026-02-point-p-materiaux.pdf,Point P Materiaux,2026-02-11,713.80,EUR,2026-02-23,whatsapp
+P-00002,MARTIN-BTP,2026-02-edf-entreprises.pdf,EDF Entreprises,2026-02-10,216.26,EUR,2026-02-20,drive
+P-00003,MARTIN-BTP,2026-02-orange-france.pdf,Orange France,2026-02-05,174.54,EUR,2026-02-25,email
+P-00004,MARTIN-BTP,2026-02-loxam-location.pdf,Loxam Location,2026-02-01,523.47,EUR,2026-02-04,drive
+P-00005,MARTIN-BTP,2026-02-assurance-axa-pro.pdf,Assurance AXA Pro,2026-02-02,122.19,EUR,2026-02-11,whatsapp
+P-00006,MARTIN-BTP,2026-02-ovh-sas.pdf,OVH SAS,2026-02-01,94.81,EUR,2026-02-06,email
+P-00007,MARTIN-BTP,2026-02-total-energies.pdf,Total Energies,2026-02-02,71.14,EUR,2026-02-04,whatsapp
+P-00008,MARTIN-BTP,2026-02-leroy-merlin.pdf,Leroy Merlin,2026-02-03,666.49,EUR,2026-02-07,email
+P-00009,MARTIN-BTP,2026-02-bureau-vallee.pdf,Bureau Vallee,2026-02-25,95.44,EUR,2026-03-06,whatsapp
+P-00010,MARTIN-BTP,2026-02-total-energies.pdf,Total Energies,2026-02-23,102.29,EUR,2026-02-28,email
+P-00011,MARTIN-BTP,2026-03-sodexo-pass-france.pdf,Sodexo Pass France,2026-03-07,250.66,EUR,2026-03-08,drive
+P-00012,MARTIN-BTP,2026-03-bureau-vallee.pdf,Bureau Vallee,2026-03-22,36.42,EUR,2026-03-27,whatsapp
+P-00013,MARTIN-BTP,2026-03-orange-france.pdf,Orange France,2026-03-02,66.54,EUR,2026-03-14,whatsapp
+P-00014,MARTIN-BTP,2026-03-sodexo-pass-france.pdf,Sodexo Pass France,2026-03-15,344.21,EUR,2026-04-03,email
+P-00015,MARTIN-BTP,2026-03-loxam-location.pdf,Loxam Location,2026-03-18,1739.43,EUR,2026-04-01,drive
+P-00016,MARTIN-BTP,2026-03-orange-france.pdf,Orange France,2026-03-04,114.98,EUR,2026-03-23,drive
+P-00017,MARTIN-BTP,2026-03-total-energies.pdf,Total Energies,2026-03-10,107.94,EUR,2026-03-23,drive
+P-00018,MARTIN-BTP,2026-03-bureau-vallee.pdf,Bureau Vallee,2026-03-17,56.77,EUR,2026-03-18,drive
+P-00019,MARTIN-BTP,2026-03-edf-entreprises.pdf,EDF Entreprises,2026-03-24,98.76,EUR,2026-03-29,whatsapp
+P-00020,MARTIN-BTP,2026-03-leroy-merlin.pdf,Leroy Merlin,2026-03-04,518.49,EUR,2026-03-23,whatsapp
+P-00021,MARTIN-BTP,2026-04-ovh-sas.pdf,OVH SAS,2026-04-10,68.46,EUR,2026-04-17,whatsapp
+P-00022,MARTIN-BTP,2026-04-amazon-eu-sarl.pdf,Amazon EU Sarl,2026-04-09,84.38,EUR,2026-04-16,whatsapp
+P-00023,MARTIN-BTP,2026-04-bureau-vallee.pdf,Bureau Vallee,2026-04-25,99.54,EUR,2026-05-13,drive
+P-00024,MARTIN-BTP,2026-04-loxam-location.pdf,Loxam Location,2026-04-06,974.51,EUR,2026-04-08,email
+P-00025,MARTIN-BTP,2026-04-loxam-location.pdf,Loxam Location,2026-04-15,1239.22,EUR,2026-04-26,whatsapp
+P-00026,MARTIN-BTP,2026-04-amazon-eu-sarl.pdf,Amazon EU Sarl,2026-04-22,198.64,EUR,2026-04-28,drive
+P-00027,MARTIN-BTP,2026-04-edf-entreprises.pdf,EDF Entreprises,2026-04-01,107.75,EUR,2026-04-08,email
+P-00028,MARTIN-BTP,2026-04-point-p-materiaux.pdf,Point P Materiaux,2026-04-21,3363.16,EUR,2026-04-25,drive
+P-00029,LOPEZ-CONSEIL,2026-02-orange-france.pdf,Orange France,2026-02-12,151.39,EUR,2026-02-16,whatsapp
+P-00030,LOPEZ-CONSEIL,2026-02-loxam-location.pdf,Loxam Location,2026-02-15,830.01,EUR,2026-02-26,email
+P-00031,LOPEZ-CONSEIL,2026-02-point-p-materiaux.pdf,Point P Materiaux,2026-02-16,2195.33,EUR,2026-02-21,drive
+P-00032,LOPEZ-CONSEIL,2026-02-edf-entreprises.pdf,EDF Entreprises,2026-02-24,308.16,EUR,2026-02-28,drive
+P-00033,LOPEZ-CONSEIL,2026-02-leroy-merlin.pdf,Leroy Merlin,2026-02-15,710.40,EUR,2026-03-01,whatsapp
+P-00034,LOPEZ-CONSEIL,2026-02-edf-entreprises.pdf,EDF Entreprises,2026-02-03,174.45,EUR,2026-02-18,drive
+P-00035,LOPEZ-CONSEIL,2026-02-ovh-sas.pdf,OVH SAS,2026-02-04,95.53,EUR,2026-02-18,drive
+P-00036,LOPEZ-CONSEIL,2026-02-leroy-merlin.pdf,Leroy Merlin,2026-02-14,328.38,EUR,2026-02-19,drive
+P-00037,LOPEZ-CONSEIL,2026-02-leroy-merlin.pdf,Leroy Merlin,2026-02-22,668.34,EUR,2026-03-08,whatsapp
+P-00038,LOPEZ-CONSEIL,2026-02-orange-france.pdf,Orange France,2026-02-21,107.48,EUR,2026-03-09,email
+P-00039,LOPEZ-CONSEIL,2026-02-orange-france.pdf,Orange France,2026-02-17,91.20,EUR,2026-03-07,whatsapp
+P-00040,LOPEZ-CONSEIL,2026-02-ovh-sas.pdf,OVH SAS,2026-02-10,95.62,EUR,2026-02-11,drive
+P-00041,LOPEZ-CONSEIL,2026-03-amazon-eu-sarl.pdf,Amazon EU Sarl,2026-03-23,468.97,EUR,2026-04-01,whatsapp
+P-00042,LOPEZ-CONSEIL,2026-03-societe-generale-credit-bail.pdf,Societe Generale Credit-Bail,2026-03-18,580.04,EUR,2026-03-23,whatsapp
+P-00043,LOPEZ-CONSEIL,2026-03-total-energies.pdf,Total Energies,2026-03-01,59.34,EUR,2026-03-02,drive
+P-00044,LOPEZ-CONSEIL,2026-03-ovh-sas.pdf,OVH SAS,2026-03-14,17.79,EUR,2026-03-23,whatsapp
+P-00045,LOPEZ-CONSEIL,2026-03-bureau-vallee.pdf,Bureau Vallee,2026-03-19,122.15,EUR,2026-03-31,whatsapp
+P-00046,LOPEZ-CONSEIL,2026-03-loxam-location.pdf,Loxam Location,2026-03-20,1041.94,EUR,2026-04-06,whatsapp
+P-00047,LOPEZ-CONSEIL,2026-03-sodexo-pass-france.pdf,Sodexo Pass France,2026-03-03,318.89,EUR,2026-03-16,whatsapp
+P-00048,LOPEZ-CONSEIL,2026-03-amazon-eu-sarl.pdf,Amazon EU Sarl,2026-03-14,314.56,EUR,2026-03-20,drive
+P-00049,LOPEZ-CONSEIL,2026-04-sodexo-pass-france.pdf,Sodexo Pass France,2026-04-25,212.37,EUR,2026-05-04,email
+P-00050,LOPEZ-CONSEIL,2026-04-total-energies.pdf,Total Energies,2026-04-09,105.26,EUR,2026-04-16,whatsapp
+P-00051,LOPEZ-CONSEIL,2026-04-total-energies.pdf,Total Energies,2026-04-03,102.10,EUR,2026-04-11,drive
+P-00052,LOPEZ-CONSEIL,2026-04-assurance-axa-pro.pdf,Assurance AXA Pro,2026-04-02,216.30,EUR,2026-04-19,drive
+P-00053,LOPEZ-CONSEIL,2026-04-ovh-sas.pdf,OVH SAS,2026-04-20,23.99,EUR,2026-04-22,drive
+P-00054,LOPEZ-CONSEIL,2026-04-bureau-vallee.pdf,Bureau Vallee,2026-04-10,55.14,EUR,2026-04-19,whatsapp
+P-00055,ATELIER-9,2026-02-leroy-merlin.pdf,Leroy Merlin,2026-02-09,346.61,EUR,2026-02-21,drive
+P-00056,ATELIER-9,2026-02-edf-entreprises.pdf,EDF Entreprises,2026-02-02,407.66,EUR,2026-02-10,drive
+P-00057,ATELIER-9,2026-02-point-p-materiaux.pdf,Point P Materiaux,2026-02-15,1523.96,EUR,2026-02-28,whatsapp
+P-00058,ATELIER-9,2026-02-point-p-materiaux.pdf,Point P Materiaux,2026-02-11,3521.87,EUR,2026-03-01,drive
+P-00059,ATELIER-9,2026-02-loxam-location.pdf,Loxam Location,2026-02-20,1220.89,EUR,2026-03-10,drive
+P-00060,ATELIER-9,2026-02-loxam-location.pdf,Loxam Location,2026-02-18,724.76,EUR,2026-03-09,email
+P-00061,ATELIER-9,2026-02-edf-entreprises.pdf,EDF Entreprises,2026-02-07,594.27,EUR,2026-02-17,email
+P-00062,ATELIER-9,2026-02-edf-entreprises.pdf,EDF Entreprises,2026-02-16,579.32,EUR,2026-03-08,whatsapp
+P-00063,ATELIER-9,2026-02-sodexo-pass-france.pdf,Sodexo Pass France,2026-02-26,192.06,EUR,2026-03-08,email
+P-00064,ATELIER-9,2026-03-assurance-axa-pro.pdf,Assurance AXA Pro,2026-03-03,163.92,EUR,2026-03-07,whatsapp
+P-00065,ATELIER-9,2026-03-bureau-vallee.pdf,Bureau Vallee,2026-03-18,173.30,EUR,2026-04-02,email
+P-00066,ATELIER-9,2026-03-bureau-vallee.pdf,Bureau Vallee,2026-03-12,180.34,EUR,2026-03-29,whatsapp
+P-00067,ATELIER-9,2026-03-ovh-sas.pdf,OVH SAS,2026-03-12,49.61,EUR,2026-03-13,whatsapp
+P-00068,ATELIER-9,2026-03-ovh-sas.pdf,OVH SAS,2026-03-25,86.84,EUR,2026-04-05,drive
+P-00069,ATELIER-9,2026-03-sodexo-pass-france.pdf,Sodexo Pass France,2026-03-12,288.93,EUR,2026-03-28,drive
+P-00070,ATELIER-9,2026-03-ovh-sas.pdf,OVH SAS,2026-03-03,53.44,EUR,2026-03-04,drive
+P-00071,ATELIER-9,2026-04-societe-generale-credit-bail.pdf,Societe Generale Credit-Bail,2026-04-17,405.53,EUR,2026-04-18,drive
+P-00072,ATELIER-9,2026-04-loxam-location.pdf,Loxam Location,2026-04-23,222.07,EUR,2026-04-24,email
+P-00073,ATELIER-9,2026-04-loxam-location.pdf,Loxam Location,2026-04-06,373.65,EUR,2026-04-25,whatsapp
+P-00074,ATELIER-9,2026-04-amazon-eu-sarl.pdf,Amazon EU Sarl,2026-04-04,454.30,EUR,2026-04-20,email
+P-00075,ATELIER-9,2026-04-orange-france.pdf,Orange France,2026-04-06,98.91,EUR,2026-04-17,whatsapp
+P-00076,ATELIER-9,2026-04-assurance-axa-pro.pdf,Assurance AXA Pro,2026-04-22,136.08,EUR,2026-05-03,whatsapp
+P-00077,ATELIER-9,2026-04-edf-entreprises.pdf,EDF Entreprises,2026-04-05,461.11,EUR,2026-04-18,whatsapp
+P-00078,ATELIER-9,2026-04-leroy-merlin.pdf,Leroy Merlin,2026-04-10,427.71,EUR,2026-04-19,whatsapp
+P-G000,MARTIN-BTP,2026-03-point-p-0.pdf,Point P Materiaux,2026-03-22,567.32,EUR,2026-03-22,email
+P-G001,MARTIN-BTP,2026-03-point-p-1.pdf,Point P Materiaux,2026-03-18,241.87,EUR,2026-03-18,email
+P-G002,MARTIN-BTP,2026-03-point-p-2.pdf,Point P Materiaux,2026-03-14,480.52,EUR,2026-03-14,email
+P-A001,MARTIN-BTP,2026-04-loxam-chantier.pdf,Loxam Location,2026-04-08,4800.00,EUR,2026-04-08,email
+P-CB01,LOPEZ-CONSEIL,2026-04-sg-credit-bail.pdf,Societe Generale Credit-Bail,2026-04-05,612.44,EUR,2026-04-05,email
+P-R001,ATELIER-9,2026-04-ovh.pdf,OVH SAS,2026-04-12,83.99,EUR,2026-04-12,email
