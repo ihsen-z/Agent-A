@@ -1,0 +1,499 @@
+<title>Relance des Justificatifs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Public+Sans:wght@400;500;600;700&display=swap">
+<style>
+  *{ box-sizing:border-box; }
+  :root{
+    color-scheme: light;
+    --paper:#f3f5f8; --card:#ffffff; --card-2:#fafbfc;
+    --ink:#111820; --ink-2:#48545f; --ink-3:#74808c;
+    --rule:#d9e0e7; --rule-soft:#e8ecf0;
+    --accent:#104281; --accent-2:#1c5cab; --accent-soft:#e6eefa;
+    --s1:#86b6ef; --s2:#5598e7; --s3:#2a78d6; --s4:#1c5cab; --s5:#104281;
+    --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b;
+    --shadow:0 1px 2px rgba(17,24,32,.05), 0 8px 24px -16px rgba(17,24,32,.18);
+    --sans:"Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --serif:"Newsreader", Georgia, "Times New Roman", serif;
+    --mono:"IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      color-scheme: dark;
+      --paper:#0f1317; --card:#171c22; --card-2:#1b2128;
+      --ink:#e9eef3; --ink-2:#a6b2be; --ink-3:#7c8793;
+      --rule:#29313a; --rule-soft:#212932;
+      --accent:#86b6ef; --accent-2:#5598e7; --accent-soft:#19232f;
+      --s1:#9ec5f4; --s2:#6da7ec; --s3:#3987e5; --s4:#256abf; --s5:#184f95;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --paper:#0f1317; --card:#171c22; --card-2:#1b2128;
+    --ink:#e9eef3; --ink-2:#a6b2be; --ink-3:#7c8793;
+    --rule:#29313a; --rule-soft:#212932;
+    --accent:#86b6ef; --accent-2:#5598e7; --accent-soft:#19232f;
+    --s1:#9ec5f4; --s2:#6da7ec; --s3:#3987e5; --s4:#256abf; --s5:#184f95;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.7);
+  }
+
+  body{ background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.6; }
+  .wrap{ max-width:940px; margin:0 auto; padding-inline:16px; padding-block:28px 56px; display:flex; flex-direction:column; gap:26px; }
+  h1,h2,h3{ font-family:var(--serif); font-weight:500; text-wrap:balance; margin:0; letter-spacing:-.01em; }
+  h1{ font-size:clamp(28px,5.4vw,42px); line-height:1.12; }
+  h2{ font-size:clamp(20px,3.2vw,26px); line-height:1.2; }
+  h3{ font-size:17px; }
+  p{ margin:0; max-width:66ch; }
+  strong{ font-weight:600; }
+  .eyebrow{ font-family:var(--mono); font-size:11px; letter-spacing:.11em; text-transform:uppercase; color:var(--ink-3); }
+  .lede{ font-size:17px; color:var(--ink-2); max-width:62ch; }
+  .muted{ color:var(--ink-2); }
+  .small{ font-size:13px; }
+  .mono{ font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  /* header */
+  .masthead{ background:var(--card); border:1px solid var(--rule); border-radius:3px; box-shadow:var(--shadow);
+    padding:clamp(22px,4vw,38px); display:flex; flex-direction:column; gap:18px; }
+  .masthead .top{ display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; align-items:baseline;
+    border-bottom:1px solid var(--rule-soft); padding-bottom:14px; }
+  .brand{ display:flex; align-items:baseline; gap:10px; }
+  .brand .sq{ width:10px; height:10px; background:var(--accent); border-radius:2px; }
+  .brand b{ font-family:var(--sans); font-weight:700; font-size:14px; letter-spacing:.02em; }
+  .who{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px 24px; padding-top:4px; }
+  .who div{ display:flex; flex-direction:column; gap:2px; }
+  .who dt{ font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); }
+  .who dd{ margin:0; font-size:14px; color:var(--ink); }
+
+  section{ background:var(--card); border:1px solid var(--rule); border-radius:3px; box-shadow:var(--shadow);
+    padding:clamp(20px,3.4vw,32px); display:flex; flex-direction:column; gap:16px; }
+  .sec-head{ display:flex; flex-direction:column; gap:6px; }
+
+  /* pipeline */
+  .flow{ display:flex; flex-wrap:wrap; gap:8px; align-items:stretch; }
+  .step{ flex:1 1 148px; min-width:0; background:var(--card-2); border:1px solid var(--rule-soft); border-radius:3px;
+    padding:12px 13px; display:flex; flex-direction:column; gap:5px; }
+  .step .n{ font-family:var(--mono); font-size:10.5px; color:var(--accent); letter-spacing:.08em; }
+  .step b{ font-size:13.5px; font-weight:600; }
+  .step span{ font-size:12.5px; color:var(--ink-2); line-height:1.45; }
+  .step.out{ background:var(--accent-soft); border-color:color-mix(in srgb, var(--accent) 22%, transparent); }
+
+  /* stat tiles */
+  .tiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+  .tile{ border:1px solid var(--rule-soft); border-radius:3px; padding:16px; display:flex; flex-direction:column; gap:7px; background:var(--card-2); }
+  .tile .k{ font-family:var(--mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); }
+  .tile .v{ font-family:var(--sans); font-weight:700; font-size:34px; line-height:1; letter-spacing:-.02em; }
+  .tile .d{ font-size:12.5px; color:var(--ink-2); }
+  .meter{ height:5px; border-radius:3px; background:var(--rule); position:relative; overflow:visible; }
+  .meter i{ position:absolute; inset:0 auto 0 0; border-radius:3px; background:var(--good); }
+  .meter u{ position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--ink-3); }
+  .flag{ display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; }
+  .flag svg{ flex:none; }
+  .flag.ok{ color:var(--good); }
+
+  /* figures */
+  figure{ margin:0; border:1px solid var(--rule-soft); border-radius:3px; background:var(--card-2); padding:16px; display:flex; flex-direction:column; gap:14px; }
+  figcaption{ display:flex; flex-direction:column; gap:3px; }
+  figcaption b{ font-size:14px; font-weight:600; }
+  figcaption span{ font-size:12.5px; color:var(--ink-2); }
+  .stack{ display:grid; gap:2px; height:46px; grid-template-columns:
+      minmax(7px,179fr) minmax(7px,74fr) minmax(7px,23fr) minmax(7px,1fr) minmax(7px,7fr); }
+  .stack > *{ border:0; padding:0; font:inherit; color:#fff; display:flex; align-items:center; justify-content:center;
+    cursor:default; min-width:0; }
+  .stack > *:first-child{ border-radius:4px 0 0 4px; }
+  .stack > *:last-child{ border-radius:0 4px 4px 0; }
+  .stack .lbl{ font-family:var(--mono); font-size:11.5px; font-weight:500; }
+  .sw1{ background:var(--s1); } .sw2{ background:var(--s2); } .sw3{ background:var(--s3); }
+  .sw4{ background:var(--s4); } .sw5{ background:var(--s5); }
+  .stack .sw1 .lbl, .stack .sw2 .lbl{ color:#0d2440; }
+  .legend{ display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:8px 16px; }
+  .legend div{ display:flex; align-items:baseline; gap:8px; font-size:12.5px; }
+  .legend i{ width:9px; height:9px; border-radius:2px; flex:none; translate:0 -1px; }
+  .legend em{ font-style:normal; color:var(--ink-3); font-family:var(--mono); font-size:11.5px; margin-left:auto; padding-left:8px; }
+
+  .bars{ display:flex; flex-direction:column; gap:9px; }
+  .bar{ display:grid; grid-template-columns:minmax(96px,150px) 1fr auto; gap:10px; align-items:center; }
+  .bar .name{ font-size:12.5px; color:var(--ink-2); overflow-wrap:anywhere; }
+  .bar .track{ height:13px; background:var(--rule-soft); border-radius:3px; }
+  .bar .track i{ display:block; height:100%; background:var(--s3); border-radius:0 4px 4px 0; }
+  .bar .val{ font-family:var(--mono); font-size:12px; font-variant-numeric:tabular-nums; color:var(--ink); min-width:2.6ch; text-align:right; }
+
+  details{ border-top:1px solid var(--rule-soft); padding-top:10px; }
+  summary{ cursor:pointer; font-size:12.5px; color:var(--accent-2); font-weight:600; }
+  summary:focus-visible, .stack>*:focus-visible, .bar .track:focus-visible{ outline:2px solid var(--accent-2); outline-offset:2px; }
+  .tablewrap{ overflow-x:auto; margin-top:10px; }
+  table{ border-collapse:collapse; width:100%; font-size:12.5px; }
+  th,td{ text-align:left; padding:6px 10px 6px 0; border-bottom:1px solid var(--rule-soft); white-space:nowrap; }
+  th{ font-family:var(--mono); font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:400; }
+  td.num, th.num{ text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  .grid2{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+  .note{ border-left:3px solid var(--warn); background:var(--card-2); padding:13px 15px; border-radius:0 3px 3px 0;
+    display:flex; flex-direction:column; gap:6px; }
+  .note b{ font-size:13px; }
+  .note p{ font-size:13px; color:var(--ink-2); }
+  pre{ font-family:var(--mono); font-size:12px; line-height:1.65; background:var(--card-2); border:1px solid var(--rule-soft);
+    border-radius:3px; padding:14px; overflow-x:auto; margin:0; color:var(--ink-2); }
+  pre b{ color:var(--ink); font-weight:500; }
+  ul{ margin:0; padding-left:18px; display:flex; flex-direction:column; gap:7px; max-width:66ch; }
+  li::marker{ color:var(--ink-3); }
+  .no{ display:flex; flex-direction:column; gap:10px; }
+  .no div{ display:grid; grid-template-columns:22px 1fr; gap:10px; align-items:start; font-size:14px; }
+  .no .x{ font-family:var(--mono); color:var(--crit); font-size:13px; }
+  .todo{ font-family:var(--mono); font-size:11px; letter-spacing:.04em; background:var(--accent-soft); color:var(--accent-2);
+    border:1px dashed color-mix(in srgb, var(--accent) 40%, transparent); border-radius:2px; padding:1px 6px; white-space:nowrap; }
+  .weeks{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; }
+  .week{ border:1px solid var(--rule-soft); border-radius:3px; padding:13px; background:var(--card-2); display:flex; flex-direction:column; gap:5px; }
+  .week .w{ font-family:var(--mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--accent); }
+  .week b{ font-size:13.5px; }
+  .week span{ font-size:12.5px; color:var(--ink-2); }
+  footer{ display:flex; flex-direction:column; gap:10px; padding-inline:4px; }
+  footer .line{ display:flex; flex-wrap:wrap; gap:8px 18px; font-size:13px; color:var(--ink-2); }
+  #tip{ position:fixed; z-index:9; pointer-events:none; background:var(--ink); color:var(--paper); font-size:12px;
+    padding:7px 9px; border-radius:3px; max-width:250px; line-height:1.4; box-shadow:0 6px 20px -8px rgba(0,0,0,.5); }
+  #tip b{ font-family:var(--mono); font-weight:500; }
+  @media (prefers-reduced-motion:reduce){ *{ animation:none!important; transition:none!important; } }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="top">
+      <div class="brand"><span class="sq"></span><b>RELANCE DES JUSTIFICATIFS</b></div>
+      <span class="eyebrow">Document commercial &middot; v0.1 &middot; 27 septembre 2026</span>
+    </div>
+    <h1>La chasse aux pièces manquantes, faite chaque matin, sans fausse alerte.</h1>
+    <p class="lede">Nous lisons le relevé bancaire d'un dossier et l'inventaire des pièces reçues,
+      et nous produisons trois choses : la liste des paiements sans justificatif, un email de relance
+      prêt à partir par client, et un tableau de suivi où chaque décision porte le nom de la règle
+      qui l'a tranchée.</p>
+    <dl class="who">
+      <div><dt>Pour qui</dt><dd>Cabinets d'expertise comptable et centres de production offshore</dd></div>
+      <div><dt>Périmètre</dt><dd>Dossiers d'entreprises françaises (PME, TPE)</dd></div>
+      <div><dt>Entrées</dt><dd>Relevé CSV, OFX ou CAMT.053 + inventaire des pièces</dd></div>
+      <div><dt>Ce que ça ne touche pas</dt><dd>Ni grand livre, ni saisie, ni déclaration</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Le constat</span>
+      <h2>Le travail pénible n'est pas de rapprocher, c'est d'exclure</h2>
+    </div>
+    <p>Sur un relevé de PME française, <strong>60 à 70 % des opérations n'exigent légitimement
+      aucune facture fournisseur</strong> : salaires, URSSAF, DGFIP, frais bancaires, échéances de prêt,
+      virements internes, encaissements clients.</p>
+    <p>C'est pour cette raison qu'un rapprochement naïf ne survit pas à sa première semaine : il signale
+      tout ce qu'il ne sait pas apparier, le comptable reçoit des dizaines d'alertes injustifiées, et
+      l'outil se fait débrancher. Notre produit, ce n'est pas l'appariement — c'est le référentiel
+      d'exclusions qui décide, opération par opération, ce qui n'a jamais eu besoin d'une facture.</p>
+    <div class="tiles">
+      <div class="tile">
+        <span class="k">Lignes closes sans intervention</span>
+        <span class="v">89,1 %</span>
+        <span class="d">Sur un cycle de 284 opérations : 253 lignes tranchées, 31 laissées au comptable.</span>
+      </div>
+      <div class="tile">
+        <span class="k">Ce qui reste humain</span>
+        <span class="v">31</span>
+        <span class="d">23 pièces à réclamer (relances déjà rédigées), 7 cas ambigus, 1 paiement partiel.</span>
+      </div>
+      <div class="tile">
+        <span class="k">Délai de traitement</span>
+        <span class="v">&lt; 1 min</span>
+        <span class="d">Déterministe : mêmes entrées, mêmes sorties. Déclenché par <span class="mono">cron</span> chaque matin.</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Le cycle</span>
+      <h2>Ce qui se passe entre le relevé et l'email</h2>
+    </div>
+    <div class="flow">
+      <div class="step"><span class="n">01</span><b>Entrées</b><span>Relevé du mois + liste des pièces reçues, au format pivot CSV. La conversion se fait à l'entrée, pas dans le moteur.</span></div>
+      <div class="step"><span class="n">02</span><b>Normalisation</b><span>Les libellés bancaires abrégés sont nettoyés et rapprochés d'un fournisseur connu via les alias du dossier.</span></div>
+      <div class="step"><span class="n">03</span><b>Exclusions</b><span>Les opérations sans justificatif attendu sortent du périmètre, règles générales puis règles apprises du dossier.</span></div>
+      <div class="step"><span class="n">04</span><b>Appariement</b><span>Affectation globale : les couples les plus sûrs d'abord, tolérance d'arrondi 0,02 € ou 0,5 %, paiements groupés et acomptes sous conditions strictes.</span></div>
+      <div class="step out"><span class="n">05</span><b>Sorties</b><span>Tableau de suivi ligne à ligne, un brouillon de relance par dossier client, statistiques du cycle.</span></div>
+    </div>
+    <p class="small muted">Aucun cas ambigu n'est tranché à la place du comptable : une combinaison
+      incertaine reste signalée. Relancer un client qui a déjà envoyé la pièce coûte un email ;
+      ne pas le relancer coûte une déclaration incomplète.</p>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Mesures</span>
+      <h2>Un cycle complet, ligne par ligne</h2>
+    </div>
+    <figure>
+      <figcaption>
+        <b>Figure 1 — Répartition des 284 opérations d'un cycle</b>
+        <span>De l'automatique (clair) vers ce qui demande un œil humain (foncé). 3 dossiers clients, 84 pièces reçues.</span>
+      </figcaption>
+      <div class="stack" role="img" aria-label="179 opérations hors périmètre, 74 justifiées, 23 pièces manquantes, 1 paiement partiel, 7 à vérifier, sur 284">
+        <div class="sw1" tabindex="0" data-tip="<b>179 opérations</b> hors périmètre — aucune facture fournisseur attendue (63,0 %)"><span class="lbl">63,0 %</span></div>
+        <div class="sw2" tabindex="0" data-tip="<b>74 opérations</b> justifiées — pièce trouvée et rattachée (26,1 %)"><span class="lbl">26,1 %</span></div>
+        <div class="sw3" tabindex="0" data-tip="<b>23 pièces manquantes</b> — 12 959,46 € à réclamer (8,1 %)"></div>
+        <div class="sw4" tabindex="0" data-tip="<b>1 paiement partiel</b> — montant réglé inférieur à la facture (0,4 %)"></div>
+        <div class="sw5" tabindex="0" data-tip="<b>7 opérations à vérifier</b> — combinaison ambiguë, décision laissée au comptable (2,5 %)"></div>
+      </div>
+      <div class="legend">
+        <div><i class="sw1"></i>Hors périmètre<em>179</em></div>
+        <div><i class="sw2"></i>Justifiées<em>74</em></div>
+        <div><i class="sw3"></i>Pièces manquantes<em>23</em></div>
+        <div><i class="sw4"></i>Paiement partiel<em>1</em></div>
+        <div><i class="sw5"></i>À vérifier<em>7</em></div>
+      </div>
+      <details>
+        <summary>Voir les chiffres en tableau</summary>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Statut</th><th class="num">Opérations</th><th class="num">Part</th><th>Suite donnée</th></tr></thead>
+            <tbody>
+              <tr><td>Hors périmètre</td><td class="num">179</td><td class="num">63,0 %</td><td>Clos, motif enregistré</td></tr>
+              <tr><td>Justifiées</td><td class="num">74</td><td class="num">26,1 %</td><td>Clos, pièce rattachée</td></tr>
+              <tr><td>Pièces manquantes</td><td class="num">23</td><td class="num">8,1 %</td><td>Relance rédigée (12 959,46 €)</td></tr>
+              <tr><td>Paiement partiel</td><td class="num">1</td><td class="num">0,4 %</td><td>Au comptable</td></tr>
+              <tr><td>À vérifier</td><td class="num">7</td><td class="num">2,5 %</td><td>Au comptable</td></tr>
+              <tr><td><strong>Total</strong></td><td class="num"><strong>284</strong></td><td class="num"><strong>100 %</strong></td><td>31 lignes restantes</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </figure>
+
+    <figure>
+      <figcaption>
+        <b>Figure 2 — Les 179 exclusions, par règle déclenchée</b>
+        <span>Chaque barre est une famille d'opérations qu'un rapprochement naïf aurait signalée à tort. Survolez une barre pour le motif.</span>
+      </figcaption>
+      <div class="bars">
+        <div class="bar"><span class="name">Encaissements clients</span><div class="track" tabindex="0" data-tip="<b>41 opérations</b> — suivi par la facturation de vente, pas par les achats"><i style="width:100%"></i></div><span class="val">41</span></div>
+        <div class="bar"><span class="name">Charges sociales</span><div class="track" tabindex="0" data-tip="<b>31 opérations</b> — URSSAF, retraite, prévoyance : justifié par le bordereau de cotisations"><i style="width:75.6%"></i></div><span class="val">31</span></div>
+        <div class="bar"><span class="name">Frais bancaires</span><div class="track" tabindex="0" data-tip="<b>29 opérations</b> — commissions et cotisations : justifié par le relevé lui-même"><i style="width:70.7%"></i></div><span class="val">29</span></div>
+        <div class="bar"><span class="name">Salaires</span><div class="track" tabindex="0" data-tip="<b>28 opérations</b> — salaires et acomptes de paie : justifié par le bulletin"><i style="width:68.3%"></i></div><span class="val">28</span></div>
+        <div class="bar"><span class="name">Impôts et taxes</span><div class="track" tabindex="0" data-tip="<b>26 opérations</b> — DGFIP, TVA, IS, CFE : justifié par la déclaration"><i style="width:63.4%"></i></div><span class="val">26</span></div>
+        <div class="bar"><span class="name">Mouvements internes</span><div class="track" tabindex="0" data-tip="<b>16 opérations</b> — virements entre comptes du même titulaire"><i style="width:39%"></i></div><span class="val">16</span></div>
+        <div class="bar"><span class="name">Échéances d'emprunt</span><div class="track" tabindex="0" data-tip="<b>8 opérations</b> — justifié par le tableau d'amortissement, pas par une facture"><i style="width:19.5%"></i></div><span class="val">8</span></div>
+      </div>
+      <p class="small muted">Contre-exemple traité volontairement : une échéance de <strong>crédit-bail</strong>
+        ressemble à un remboursement d'emprunt mais exige bien une facture mensuelle. Elle n'est pas exclue.</p>
+    </figure>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Les deux seuls indicateurs qui comptent</span>
+      <h2>Ce sur quoi nous acceptons d'être jugés</h2>
+    </div>
+    <div class="tiles">
+      <div class="tile">
+        <span class="k">Fausses alertes</span>
+        <span class="v">0,00 %</span>
+        <div class="meter"><i style="width:0"></i><u style="left:66.6%"></u></div>
+        <span class="d">0 opération signalée à tort sur 261. Cible &lt; 2 % (repère sur l'échelle).</span>
+        <span class="flag ok"><svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8.6l4 4L14 4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>Cible tenue</span>
+      </div>
+      <div class="tile">
+        <span class="k">Manques ratés</span>
+        <span class="v">0 %</span>
+        <div class="meter"><i style="width:0"></i><u style="left:0"></u></div>
+        <span class="d">0 pièce réellement manquante passée sous silence, sur 23. Cible 0 %, sans tolérance.</span>
+        <span class="flag ok"><svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8.6l4 4L14 4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>Cible tenue</span>
+      </div>
+      <div class="tile">
+        <span class="k">Décisions correctes</span>
+        <span class="v">284<span style="font-size:20px; color:var(--ink-3)">/284</span></span>
+        <span class="d">Vérifié contre la vérité terrain du corpus, à travers plusieurs graines et deux taux de pièces manquantes.</span>
+      </div>
+    </div>
+    <div class="note">
+      <b>Ce que ces chiffres prouvent, et ce qu'ils ne prouvent pas</b>
+      <p>Ils sont mesurés sur un <strong>corpus synthétique</strong>, conçu par le même auteur que le moteur.
+        Ils démontrent l'absence de défaut structurel — pas une exactitude sur vos données. Le chiffre que
+        nous accepterons d'annoncer en clientèle sera mesuré sur un relevé réel accompagné de la liste des
+        pièces manquantes établie par un comptable. C'est exactement l'objet du pilote décrit plus bas.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Auditabilité</span>
+      <h2>Chaque ligne dit qui l'a tranchée</h2>
+    </div>
+    <p>Un comptable ne peut pas défendre une décision qu'il ne peut pas expliquer. Le tableau de suivi
+      porte donc une colonne <span class="mono">regle</span> : le nom de la règle appliquée, et son motif
+      en français. Rien n'est probabiliste, rien n'est à reconstituer.</p>
+    <div class="grid2">
+      <div style="display:flex; flex-direction:column; gap:8px">
+        <h3>Extrait du tableau de suivi</h3>
+        <pre>dossier      <b>ATELIER-9</b>
+reference    OP000204
+date         2026-02-03
+libelle      <b>COMMISSION D INTERVENTION</b>
+montant      8,33 EUR
+statut       <b>hors_perimetre</b>
+confiance    1.00
+motif        Frais bancaire : justifie
+             par le releve lui-meme
+regle        <b>frais_bancaires</b></pre>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:8px">
+        <h3>Relance générée pour le dossier</h3>
+        <pre>A: contact@atelier9.fr
+Objet: Justificatifs - 4 justificatif(s)
+manquant(s) - Atelier 9 SASU
+
+Il s'agit de paiements visibles sur le
+compte bancaire pour lesquels nous n'avons
+pas la facture correspondante :
+
+ - 12/02  <b>1 238,97 EUR</b>  VIR SEPA LOXAM
+ - 13/03  <b>406,34 EUR</b>  PRLV SEPA SODEXO
+ - 30/03  <b>23,73 EUR</b>  CARTE BUREAU VALLEE
+ - 19/04  <b>53,31 EUR</b>  PRLV SEPA OVH
+
+Un envoi par retour de cet email suffit
+(photo lisible acceptee).</pre>
+      </div>
+    </div>
+    <details>
+      <summary>Voir les relances produites par ce cycle</summary>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Dossier</th><th class="num">Pièces réclamées</th><th class="num">Montant</th><th>Destinataire</th></tr></thead>
+          <tbody>
+            <tr><td>Atelier 9</td><td class="num">4</td><td class="num">1 722,35 €</td><td class="mono">contact@atelier9.fr</td></tr>
+            <tr><td>Lopez Conseil</td><td class="num">9</td><td class="num">2 444,24 €</td><td class="mono">s.lopez@lopez-conseil.fr</td></tr>
+            <tr><td>Martin BTP</td><td class="num">10</td><td class="num">8 792,87 €</td><td class="mono">compta@martin-batiment.fr</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted" style="margin-top:8px">Dossiers du corpus de démonstration. Les brouillons
+        sont relus par le comptable avant envoi : le point de validation humaine reste chez vous.</p>
+    </details>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">L'effet cumulatif</span>
+      <h2>L'outil devient le vôtre, mois après mois</h2>
+    </div>
+    <p>Le référentiel d'exclusions a deux niveaux. Les règles générales, valables pour tout dossier
+      français, sont livrées le premier jour. Les <strong>règles apprises par dossier</strong> — le syndic,
+      la cotisation ordinale, la redevance récurrente, l'abréviation bancaire d'un fournisseur habituel —
+      s'ajoutent chaque mois, à mesure que le comptable marque une opération comme hors périmètre.</p>
+    <p>Au bout de six mois, ce référentiel décrit votre portefeuille : c'est lui qui explique pourquoi le
+      taux de fausses alertes baisse encore, et pourquoi il ne se transfère pas dans un autre outil.</p>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Franchise</span>
+      <h2>Ce que nous ne faisons pas</h2>
+    </div>
+    <div class="no">
+      <div><span class="x">✕</span><span><strong>Nous ne lisons pas vos factures.</strong> L'extraction par OCR est déjà produitisée (Dext, Pennylane, Yooz) et porte une responsabilité : une TVA mal extraite devient un problème juridique. Si vous utilisez déjà l'un de ces outils, nous nous y branchons au lieu de le concurrencer.</span></div>
+      <div><span class="x">✕</span><span><strong>Nous ne touchons pas au grand livre.</strong> Aucune écriture, aucune imputation, aucun engagement de responsabilité comptable.</span></div>
+      <div><span class="x">✕</span><span><strong>Nous n'utilisons pas de modèle de langage pour décider.</strong> Comparer des montants, des dates et des libellés n'en demande pas : ce serait plus lent, plus cher, non reproductible et impossible à justifier ligne par ligne. Une IA n'interviendra qu'en option, et jamais sur la décision : identifier un fournisseur derrière un libellé inconnu, adapter le ton des relances, classer les réponses entrantes.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Mise en place</span>
+      <h2>Rien de nouveau à apprendre pour le comptable</h2>
+    </div>
+    <div class="grid2">
+      <div style="display:flex; flex-direction:column; gap:10px">
+        <h3>Interface</h3>
+        <ul>
+          <li>Le tableau de suivi arrive dans <strong>Google Sheets</strong>.</li>
+          <li>Les relances partent depuis <strong>Gmail</strong>, après relecture.</li>
+          <li>Les pièces reçues restent dans <strong>Drive</strong>, selon votre nomenclature.</li>
+          <li>Déclenchement par <span class="mono">cron</span> quotidien, calé sur l'échéance TVA du 15 ou du 24.</li>
+        </ul>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:10px">
+        <h3>Conformité</h3>
+        <ul>
+          <li>Hébergement sur <strong>VPS en Union européenne</strong>, exigé avant le premier dossier réel.</li>
+          <li>Le cabinet est sous-traitant : nous fournissons l'<strong>accord de sous-traitance</strong> nommant l'hébergeur.</li>
+          <li>Anonymisation acceptée pour la phase d'essai : raison sociale et IBAN masqués, <strong>libellés bancaires intacts</strong>.</li>
+          <li>À vérifier de votre côté : votre contrat avec le cabinet français autorise-t-il la sous-traitance à un tiers.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Proposition</span>
+      <h2>Un pilote de quatre semaines, sur un seul dossier</h2>
+    </div>
+    <p>Nous ne vendons pas un taux d'exactitude avant de l'avoir mesuré chez vous. Le pilote produit
+      ce chiffre sur vos données, et vous restez libre de vous arrêter là.</p>
+    <div class="weeks">
+      <div class="week"><span class="w">Semaine 1</span><b>Collecte</b><span>Un relevé d'un mois anonymisé, la liste des pièces manquantes établie par votre comptable pour ce même mois, un fichier d'import de votre logiciel comptable.</span></div>
+      <div class="week"><span class="w">Semaine 2</span><b>Calibrage</b><span>Alias de vos fournisseurs habituels, opérations récurrentes propres à vos dossiers, ton de vos relances existantes.</span></div>
+      <div class="week"><span class="w">Semaine 3</span><b>Mesure</b><span>Passage sur vos données réelles, comparaison avec la liste du comptable : fausses alertes et manques ratés, chiffrés.</span></div>
+      <div class="week"><span class="w">Semaine 4</span><b>Décision</b><span>Cycle complet en conditions réelles, relances relues avant envoi. Vous arbitrez sur des chiffres, pas sur une démonstration.</span></div>
+    </div>
+    <div class="grid2" style="margin-top:4px">
+      <div style="display:flex; flex-direction:column; gap:10px">
+        <h3>Critères de succès, fixés d'avance</h3>
+        <ul>
+          <li>Fausses alertes <strong>&lt; 2 %</strong> sur votre relevé réel.</li>
+          <li>Manques ratés <strong>à 0</strong>, sans tolérance.</li>
+          <li>Si l'un des deux n'est pas atteint, le pilote est un échec et nous le disons.</li>
+        </ul>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:10px">
+        <h3>Conditions commerciales</h3>
+        <ul>
+          <li>Pilote : <span class="todo">tarif à compléter</span></li>
+          <li>Abonnement ensuite, par dossier et par mois : <span class="todo">grille à compléter</span></li>
+          <li>Ce que nous demandons en plus du prix : les trois documents de la semaine 1. Sans la liste du comptable, aucun taux n'est mesurable.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="line">
+      <span><strong>Relance des justificatifs</strong> — document commercial v0.1</span>
+      <span>Contact : <span class="todo">nom, email, téléphone à compléter</span></span>
+    </div>
+    <p class="small muted">Les chiffres des figures 1 et 2 proviennent d'un cycle réel du moteur sur le
+      corpus de démonstration, exécuté le 27 septembre 2026 (284 opérations, 3 dossiers). Ils sont
+      reproductibles à l'identique et ne constituent pas une mesure sur données clientes.</p>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var tip = null;
+  function show(el, ev){
+    if(!tip){ tip = document.createElement('div'); tip.id = 'tip'; document.body.appendChild(tip); }
+    tip.innerHTML = el.getAttribute('data-tip');
+    tip.hidden = false;
+    var r = el.getBoundingClientRect();
+    var x = (ev && ev.clientX !== undefined) ? ev.clientX : r.left + r.width / 2;
+    var w = 250, pad = 10;
+    tip.style.left = Math.max(pad, Math.min(x - 40, window.innerWidth - w - pad)) + 'px';
+    tip.style.top = Math.max(pad, r.top - 12 - tip.offsetHeight) + 'px';
+  }
+  function hide(){ if(tip){ tip.hidden = true; } }
+  document.querySelectorAll('[data-tip]').forEach(function(el){
+    el.addEventListener('mouseenter', function(ev){ show(el, ev); });
+    el.addEventListener('mousemove', function(ev){ show(el, ev); });
+    el.addEventListener('mouseleave', hide);
+    el.addEventListener('focus', function(){ show(el, null); });
+    el.addEventListener('blur', hide);
+  });
+  window.addEventListener('scroll', hide, { passive: true });
+})();
+</script>
