@@ -1,0 +1,755 @@
+<title>Cahier des Charges — Collecte des Pièces</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Public+Sans:wght@400;500;600;700&display=swap">
+<style>
+  *{ box-sizing:border-box; }
+  :root{
+    color-scheme: light;
+    --paper:#f3f5f8; --card:#ffffff; --card-2:#fafbfc;
+    --ink:#111820; --ink-2:#48545f; --ink-3:#74808c;
+    --rule:#d9e0e7; --rule-soft:#e8ecf0;
+    --accent:#104281; --accent-2:#1c5cab; --accent-soft:#e6eefa;
+    --s1:#86b6ef; --s2:#5598e7; --s3:#2a78d6; --s4:#1c5cab; --s5:#104281;
+    --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b;
+    --shadow:0 1px 2px rgba(17,24,32,.05), 0 8px 24px -16px rgba(17,24,32,.18);
+    --sans:"Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --serif:"Newsreader", Georgia, "Times New Roman", serif;
+    --mono:"IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      color-scheme: dark;
+      --paper:#0f1317; --card:#171c22; --card-2:#1b2128;
+      --ink:#e9eef3; --ink-2:#a6b2be; --ink-3:#7c8793;
+      --rule:#29313a; --rule-soft:#212932;
+      --accent:#86b6ef; --accent-2:#5598e7; --accent-soft:#19232f;
+      --s1:#9ec5f4; --s2:#6da7ec; --s3:#3987e5; --s4:#256abf; --s5:#184f95;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --paper:#0f1317; --card:#171c22; --card-2:#1b2128;
+    --ink:#e9eef3; --ink-2:#a6b2be; --ink-3:#7c8793;
+    --rule:#29313a; --rule-soft:#212932;
+    --accent:#86b6ef; --accent-2:#5598e7; --accent-soft:#19232f;
+    --s1:#9ec5f4; --s2:#6da7ec; --s3:#3987e5; --s4:#256abf; --s5:#184f95;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.7);
+  }
+
+  body{ background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.62; }
+  .wrap{ max-width:960px; margin:0 auto; padding-inline:16px; padding-block:28px 56px; display:flex; flex-direction:column; gap:22px; }
+  h1,h2,h3{ font-family:var(--serif); font-weight:500; text-wrap:balance; margin:0; letter-spacing:-.01em; }
+  h1{ font-size:clamp(27px,5.2vw,40px); line-height:1.12; }
+  h2{ font-size:clamp(19px,3vw,25px); line-height:1.2; }
+  h3{ font-size:16.5px; }
+  p{ margin:0; max-width:68ch; }
+  strong{ font-weight:600; }
+  .eyebrow{ font-family:var(--mono); font-size:11px; letter-spacing:.11em; text-transform:uppercase; color:var(--ink-3); }
+  .lede{ font-size:16.5px; color:var(--ink-2); max-width:64ch; }
+  .muted{ color:var(--ink-2); }
+  .small{ font-size:13px; }
+  .mono{ font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  code{ font-family:var(--mono); font-size:.92em; background:var(--card-2); border:1px solid var(--rule-soft); border-radius:2px; padding:0 4px; }
+
+  .masthead{ background:var(--card); border:1px solid var(--rule); border-radius:3px; box-shadow:var(--shadow);
+    padding:clamp(22px,4vw,38px); display:flex; flex-direction:column; gap:18px; }
+  .masthead .top{ display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; align-items:baseline;
+    border-bottom:1px solid var(--rule-soft); padding-bottom:14px; }
+  .brand{ display:flex; align-items:baseline; gap:10px; }
+  .brand .sq{ width:10px; height:10px; background:var(--accent); border-radius:2px; }
+  .brand b{ font-family:var(--sans); font-weight:700; font-size:14px; letter-spacing:.02em; }
+  .ident{ display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:13px 22px; }
+  .ident div{ display:flex; flex-direction:column; gap:2px; }
+  .ident dt{ font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); }
+  .ident dd{ margin:0; font-size:14px; }
+
+  section{ background:var(--card); border:1px solid var(--rule); border-radius:3px; box-shadow:var(--shadow);
+    padding:clamp(20px,3.4vw,32px); display:flex; flex-direction:column; gap:16px; scroll-margin-top:20px; }
+  .sec-head{ display:flex; flex-direction:column; gap:6px; }
+  .num{ font-family:var(--mono); color:var(--accent-2); }
+
+  nav.toc{ background:var(--card); border:1px solid var(--rule); border-radius:3px; box-shadow:var(--shadow); padding:18px 20px;
+    display:flex; flex-direction:column; gap:10px; }
+  nav.toc ol{ margin:0; padding:0; list-style:none; display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:4px 20px; }
+  nav.toc a{ color:var(--ink-2); text-decoration:none; font-size:13.5px; display:flex; gap:8px; padding:2px 0; }
+  nav.toc a span{ font-family:var(--mono); color:var(--accent-2); font-size:12px; min-width:2ch; }
+  nav.toc a:hover{ color:var(--accent-2); text-decoration:underline; }
+
+  .tablewrap{ overflow-x:auto; }
+  table{ border-collapse:collapse; width:100%; font-size:13px; min-width:520px; }
+  th,td{ text-align:left; padding:8px 12px 8px 0; border-bottom:1px solid var(--rule-soft); vertical-align:top; }
+  th{ font-family:var(--mono); font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:400; white-space:nowrap; }
+  td.num, th.num{ text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  td.id{ font-family:var(--mono); font-size:12px; color:var(--accent-2); white-space:nowrap; }
+  tbody tr:last-child td{ border-bottom:0; }
+
+  .dec{ border:1px solid var(--rule-soft); border-left:3px solid var(--accent); border-radius:0 3px 3px 0; background:var(--card-2);
+    padding:14px 16px; display:flex; flex-direction:column; gap:7px; }
+  .dec .h{ display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
+  .dec .h b{ font-size:14.5px; }
+  .dec .h .tag{ font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; color:var(--accent-2);
+    background:var(--accent-soft); border-radius:2px; padding:1px 6px; }
+  .dec p{ font-size:13.5px; color:var(--ink-2); }
+  .dec .cost{ font-size:13px; color:var(--ink); border-top:1px dotted var(--rule); padding-top:7px; }
+  .dec .cost b{ font-weight:600; }
+
+  .chain{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .chain .st{ font-family:var(--mono); font-size:11.5px; letter-spacing:.04em; border:1px solid var(--rule); border-radius:3px;
+    padding:6px 9px; background:var(--card-2); white-space:nowrap; }
+  .chain .st.start{ border-color:var(--accent); color:var(--accent-2); }
+  .chain .st.end{ background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent) 30%,transparent); }
+  .chain .ar{ color:var(--ink-3); font-size:13px; }
+
+  .grid2{ display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:14px; }
+  .box{ border:1px solid var(--rule-soft); border-radius:3px; background:var(--card-2); padding:14px 16px;
+    display:flex; flex-direction:column; gap:8px; }
+  .box h3{ font-family:var(--sans); font-size:13px; font-weight:700; letter-spacing:.02em; text-transform:uppercase; color:var(--ink-3); }
+  .entity b{ font-family:var(--mono); font-size:13px; color:var(--ink); }
+  .entity p{ font-size:12.5px; color:var(--ink-2); }
+  .entity .keys{ font-family:var(--mono); font-size:11.5px; color:var(--ink-3); line-height:1.5; }
+
+  ul{ margin:0; padding-left:18px; display:flex; flex-direction:column; gap:7px; max-width:68ch; }
+  ol.rules{ margin:0; padding-left:20px; display:flex; flex-direction:column; gap:9px; max-width:68ch; font-size:14px; }
+  li::marker{ color:var(--ink-3); }
+
+  .note{ border-left:3px solid var(--warn); background:var(--card-2); padding:13px 15px; border-radius:0 3px 3px 0;
+    display:flex; flex-direction:column; gap:6px; }
+  .note.crit{ border-left-color:var(--crit); }
+  .note b{ font-size:13px; }
+  .note p{ font-size:13px; color:var(--ink-2); }
+
+  /* gantt */
+  .gantt{ display:flex; flex-direction:column; gap:7px; }
+  .grow{ display:grid; grid-template-columns:minmax(92px,150px) 1fr; gap:12px; align-items:center; }
+  .grow .lab{ font-size:12.5px; color:var(--ink-2); }
+  .grow .lab b{ display:block; color:var(--ink); font-size:13px; font-weight:600; }
+  .track{ position:relative; height:19px; background:var(--rule-soft); border-radius:3px; }
+  .track i{ position:absolute; top:0; bottom:0; border-radius:4px; display:flex; align-items:center; padding-inline:7px; }
+  .track i span{ font-family:var(--mono); font-size:10.5px; color:#fff; white-space:nowrap; }
+  .track i.lightbar span{ color:#0d2440; }
+  .b1{ background:var(--s1); } .b2{ background:var(--s2); } .b3{ background:var(--s3); }
+  .b4{ background:var(--s4); } .b5{ background:var(--s5); }
+  .b5{ background:repeating-linear-gradient(135deg, var(--s5) 0 6px, color-mix(in srgb, var(--s5) 55%, transparent) 6px 12px); }
+  .scale{ display:grid; grid-template-columns:minmax(92px,150px) 1fr; gap:12px; }
+  .scale .ticks{ position:relative; height:15px; font-family:var(--mono); font-size:10.5px; color:var(--ink-3); }
+  .scale .ticks span{ position:absolute; top:0; transform:translateX(-50%); }
+  .scale .ticks span.t-first{ transform:none; }
+  .scale .ticks span.t-last{ transform:translateX(-100%); }
+  @media (max-width:640px){ .track i span{ display:none; } }
+
+  .todo{ font-family:var(--mono); font-size:11px; letter-spacing:.04em; background:var(--accent-soft); color:var(--accent-2);
+    border:1px dashed color-mix(in srgb, var(--accent) 40%, transparent); border-radius:2px; padding:1px 6px; white-space:nowrap; }
+  .sign{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; }
+  .sign div{ border:1px solid var(--rule-soft); border-radius:3px; padding:12px 14px; min-height:86px; display:flex; flex-direction:column; gap:4px; background:var(--card-2); }
+  .sign dt{ font-family:var(--mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); }
+  .sign dd{ margin:0; font-size:13px; color:var(--ink-2); }
+  footer{ padding-inline:4px; display:flex; flex-direction:column; gap:8px; }
+  @media (prefers-reduced-motion:reduce){ *{ animation:none!important; transition:none!important; } }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="top">
+      <div class="brand"><span class="sq"></span><b>COLLECTE ET RELANCE DES PIÈCES JUSTIFICATIVES</b></div>
+      <span class="eyebrow">Cahier des charges &middot; v1.0</span>
+    </div>
+    <h1>Ce que le produit doit faire, et comment nous prouverons qu'il le fait.</h1>
+    <p class="lede">Ce document est la référence contractuelle du projet. Toute fonction décrite ici est
+      assortie d'une mesure et d'un seuil ; toute fonction sans mesure n'est pas dans le périmètre.
+      Il remplace toute note de cadrage antérieure, y compris le cahier des charges « AI Client Chaser v2.0 ».</p>
+    <dl class="ident">
+      <div><dt>Version</dt><dd>1.0</dd></div>
+      <div><dt>Date</dt><dd>29 septembre 2026</dd></div>
+      <div><dt>Statut</dt><dd>Proposition — en attente de validation</dd></div>
+      <div><dt>Rédacteur</dt><dd><span class="todo">nom à compléter</span></dd></div>
+      <div><dt>Propriétaire du document</dt><dd><span class="todo">nom à compléter</span></dd></div>
+      <div><dt>Prochaine revue</dt><dd>À la sortie de la phase 0</dd></div>
+    </dl>
+  </header>
+
+  <nav class="toc" aria-label="Sommaire">
+    <span class="eyebrow">Sommaire</span>
+    <ol>
+      <li><a href="#s1"><span>1</span>Objet et positionnement</a></li>
+      <li><a href="#s2"><span>2</span>Décisions structurantes</a></li>
+      <li><a href="#s3"><span>3</span>Périmètre : dedans, dehors</a></li>
+      <li><a href="#s4"><span>4</span>Acteurs et circuit de relance</a></li>
+      <li><a href="#s5"><span>5</span>Modèle de données</a></li>
+      <li><a href="#s6"><span>6</span>Règles de rapprochement</a></li>
+      <li><a href="#s7"><span>7</span>Routage des pièces entrantes</a></li>
+      <li><a href="#s8"><span>8</span>Référentiel d'exclusions</a></li>
+      <li><a href="#s9"><span>9</span>Machines d'états</a></li>
+      <li><a href="#s10"><span>10</span>Calendrier de relance</a></li>
+      <li><a href="#s11"><span>11</span>Critères d'acceptation</a></li>
+      <li><a href="#s12"><span>12</span>Exigences non fonctionnelles</a></li>
+      <li><a href="#s13"><span>13</span>Conformité et sous-traitance</a></li>
+      <li><a href="#s14"><span>14</span>Mesure du ROI</a></li>
+      <li><a href="#s15"><span>15</span>Risques</a></li>
+      <li><a href="#s16"><span>16</span>Feuille de route</a></li>
+      <li><a href="#s17"><span>17</span>État du code existant</a></li>
+      <li><a href="#s18"><span>18</span>Validation</a></li>
+    </ol>
+  </nav>
+
+  <section id="s1">
+    <div class="sec-head"><span class="eyebrow"><span class="num">01</span> &middot; Objet</span>
+      <h2>Ce que nous construisons</h2></div>
+    <p>Un système qui détermine, pour chaque dossier client d'un cabinet comptable, <strong>quelles pièces
+      justificatives manquent réellement</strong>, qui les réclame au bon interlocuteur, et qui suit les
+      réponses jusqu'à la complétude de la période.</p>
+    <p>La différence avec un outil de relance générique tient en une phrase : <strong>l'attendu est déduit
+      d'un fait, pas d'une liste</strong>. Une sortie d'argent sur le compte bancaire prouve qu'une dépense
+      a eu lieu ; c'est elle qui crée l'obligation de pièce. Une checklist statique par type de client,
+      elle, se périme dès que le client change de régime, perd un salarié ou résilie un contrat — et le
+      système se met à réclamer des documents qui n'existent pas. C'est la première cause d'abandon de
+      ce type d'outil.</p>
+    <div class="grid2">
+      <div class="box">
+        <h3>Entrées</h3>
+        <ul class="small">
+          <li>Relevé bancaire du dossier (CSV, OFX ou CAMT.053 — jamais un PDF)</li>
+          <li>Inventaire des pièces déjà reçues</li>
+          <li>Boîte e-mail de collecte du cabinet</li>
+          <li>Référentiel d'exclusions propre au dossier</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h3>Sorties</h3>
+        <ul class="small">
+          <li>Tableau de suivi : une ligne par opération, avec la règle qui l'a tranchée</li>
+          <li>Un brouillon de relance par dossier, soumis à relecture</li>
+          <li>File des pièces entrantes non routées</li>
+          <li>Indicateurs du cycle et journal d'audit</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="eyebrow"><span class="num">02</span> &middot; Décisions</span>
+      <h2>Ce qui est tranché, et ce que cela nous coûte</h2></div>
+    <p>Un cahier des charges qui n'enregistre que des exigences se fait rediscuter à chaque réunion.
+      Les décisions ci-dessous sont fermées pour la v1 ; chacune indique ce qu'elle nous interdit.</p>
+
+    <div class="dec">
+      <div class="h"><b>D1 — L'attendu est dérivé du relevé bancaire</b><span class="tag">STRUCTURANTE</span></div>
+      <p>Une pièce n'est « attendue » que si une opération bancaire la rend obligatoire. Les checklists
+        par type de client servent de complément de contrôle, jamais de source primaire.</p>
+      <p class="cost"><b>Ce que cela nous interdit :</b> traiter un dossier dont nous n'avons pas le relevé.
+        Aucun onboarding n'est possible sans export bancaire exploitable.</p>
+    </div>
+
+    <div class="dec">
+      <div class="h"><b>D2 — Aucune IA dans la décision en v1</b><span class="tag">STRUCTURANTE</span></div>
+      <p>Comparer des montants, des dates et des libellés est déterministe. Chaque décision porte le nom de
+        la règle qui l'a tranchée et doit pouvoir être rejouée à l'identique. Un modèle de langage n'est
+        envisagé qu'en phase 4, sur trois usages bornés : identifier un fournisseur derrière un libellé
+        abrégé inconnu, adapter le ton d'une relance, classer une réponse entrante.</p>
+      <p class="cost"><b>Ce que cela nous interdit :</b> promettre de comprendre un e-mail en texte libre
+        avant la phase 4. Une promesse d'envoi client est saisie par le comptable d'un clic, pas détectée.</p>
+    </div>
+
+    <div class="dec">
+      <div class="h"><b>D3 — Rien ne part sans relecture humaine</b><span class="tag">STRUCTURANTE</span></div>
+      <p>En v1, 100 % des relances sont validées par un humain avant envoi. L'envoi automatique n'est
+        déverrouillé que dossier par dossier, après trois cycles consécutifs sans correction sur ce dossier,
+        et reste révocable par le cabinet.</p>
+      <p class="cost"><b>Ce que cela nous interdit :</b> annoncer un gain de temps proche de 100 %. Le gain
+        vendu est la suppression de la <em>recherche</em> des manquants, pas celle de la relecture.</p>
+    </div>
+
+    <div class="dec">
+      <div class="h"><b>D4 — Une instance isolée par cabinet</b><span class="tag">ARCHITECTURE</span></div>
+      <p>Pas de multi-tenant en v1 : un déploiement par cabinet, base et stockage séparés. L'isolation est
+        physique plutôt que logique, donc non contournable par un défaut de code.</p>
+      <p class="cost"><b>Ce que cela nous interdit :</b> l'auto-inscription en ligne et la marge d'un SaaS
+        pur avant la phase 3. Chaque cabinet coûte une mise en service.</p>
+    </div>
+
+    <div class="dec">
+      <div class="h"><b>D5 — L'interface est celle que le cabinet utilise déjà</b><span class="tag">PRODUIT</span></div>
+      <p>Tableau de suivi dans Google Sheets, relances dans Gmail, pièces dans Drive. Aucune application
+        à apprendre en v1 ; un écran propre n'arrive qu'en phase 3, et seulement si l'usage le réclame.</p>
+      <p class="cost"><b>Ce que cela nous interdit :</b> contrôler finement l'expérience et facturer
+        l'interface. Nous dépendons des quotas et des règles d'API de Google.</p>
+    </div>
+
+    <div class="dec">
+      <div class="h"><b>D6 — L'expéditeur est le cabinet, jamais nous</b><span class="tag">JURIDIQUE</span></div>
+      <p>Les relances partent de la boîte du cabinet, sous sa signature. Le circuit — écrire au client final
+        directement, ou passer par le cabinet donneur d'ordre — est un paramètre obligatoire du dossier,
+        renseigné à l'onboarding et vérifié contractuellement.</p>
+      <p class="cost"><b>Ce que cela nous interdit :</b> déployer chez un centre de production offshore qui
+        n'a pas le mandat d'écrire au client final, tant que le circuit indirect n'est pas implémenté.</p>
+    </div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="eyebrow"><span class="num">03</span> &middot; Périmètre</span>
+      <h2>Dedans, dehors</h2></div>
+    <div class="grid2">
+      <div class="box">
+        <h3>Dans le périmètre v1</h3>
+        <ul class="small">
+          <li>Détection des paiements sans justificatif</li>
+          <li>Exclusion des opérations qui n'en exigent aucun</li>
+          <li>Génération et suivi des relances</li>
+          <li>Routage des pièces reçues par e-mail</li>
+          <li>Tableau de suivi et journal d'audit</li>
+          <li>Apprentissage des exclusions propres au dossier</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h3>Hors périmètre, et pourquoi</h3>
+        <ul class="small">
+          <li><strong>Lecture du contenu des factures (OCR)</strong> — déjà produitisé, coût variable élevé, et une TVA mal extraite devient un problème juridique</li>
+          <li><strong>Écritures comptables, imputation, lettrage</strong> — engagerait notre responsabilité</li>
+          <li><strong>Déclarations fiscales</strong> — hors métier</li>
+          <li><strong>Gestion des litiges et des relances de paiement</strong> — autre processus, autres acteurs</li>
+          <li><strong>Application mobile, WhatsApp</strong> — non nécessaires à la preuve de valeur</li>
+        </ul>
+      </div>
+    </div>
+    <p class="small muted">Si le cabinet utilise déjà Dext, Pennylane ou Yooz, nous nous branchons sur leur
+      inventaire de pièces au lieu de les concurrencer. Cette vérification est un point de passage obligé
+      de la phase 0.</p>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="eyebrow"><span class="num">04</span> &middot; Acteurs</span>
+      <h2>Qui relance qui</h2></div>
+    <p>C'est la question qui peut interdire le projet entier, et elle se tranche avant la première ligne de
+      code. Trois circuits sont possibles ; le dossier en porte un et un seul.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Circuit</th><th>Expéditeur</th><th>Destinataire</th><th>Condition d'usage</th></tr></thead>
+        <tbody>
+          <tr><td class="id">C-DIRECT</td><td>Cabinet producteur</td><td>Client final</td><td>Mandat écrit du donneur d'ordre, ou cabinet en relation directe</td></tr>
+          <tr><td class="id">C-RELAIS</td><td>Cabinet producteur</td><td>Cabinet donneur d'ordre</td><td>Défaut pour toute production offshore sans mandat</td></tr>
+          <tr><td class="id">C-INTERNE</td><td>Cabinet producteur</td><td>Collaborateur du cabinet</td><td>Dossiers dont les pièces transitent par un dirigeant ou un assistant</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Rôle</th><th>Responsabilité</th><th>Droits dans le système</th></tr></thead>
+        <tbody>
+          <tr><td>Responsable de portefeuille</td><td>Paramètre les dossiers, arbitre les cas ambigus</td><td>Tout, y compris l'activation de l'envoi automatique</td></tr>
+          <tr><td>Comptable référent du dossier</td><td>Relit et envoie les relances, enrichit les exclusions</td><td>Valider, corriger, envoyer, proposer une règle</td></tr>
+          <tr><td>Client final ou donneur d'ordre</td><td>Fournit les pièces</td><td>Aucun accès : il répond par e-mail</td></tr>
+          <tr><td>Nous (éditeur)</td><td>Exploitation technique</td><td>Accès aux journaux techniques, jamais aux pièces en clair hors incident tracé</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="eyebrow"><span class="num">05</span> &middot; Données</span>
+      <h2>Modèle de données</h2></div>
+    <p>Sept entités suffisent à la v1. Les identifiants sont stables dans le temps : un rapprochement doit
+      pouvoir être rejoué six mois plus tard avec le même résultat.</p>
+    <div class="grid2">
+      <div class="box entity"><b>Dossier</b><p>Un client du cabinet. Porte le circuit de relance (§4), les contacts et le référentiel d'exclusions propre.</p><span class="keys">clé : code_dossier · 1–N périodes</span></div>
+      <div class="box entity"><b>Période</b><p>Un mois ou un trimestre comptable. Son état est <em>calculé</em> à partir de ses pièces attendues, jamais saisi.</p><span class="keys">clé : code_dossier + AAAA-MM</span></div>
+      <div class="box entity"><b>OperationBancaire</b><p>Une ligne de relevé : date, libellé brut, montant, sens, devise, référence stable.</p><span class="keys">clé : code_dossier + reference · déjà implémentée</span></div>
+      <div class="box entity"><b>PieceAttendue</b><p>Créée par le moteur quand une opération exige un justificatif. Porte son propre état (§9) et le motif de sa création.</p><span class="keys">clé : reference_operation · 0–N pièces reçues</span></div>
+      <div class="box entity"><b>PieceRecue</b><p>Un fichier entré dans le système : origine, empreinte, date de réception, rattachement proposé ou confirmé.</p><span class="keys">clé : empreinte SHA-256 du fichier</span></div>
+      <div class="box entity"><b>Relance</b><p>Un message : dossier, destinataire, liste des pièces réclamées, statut (brouillon, validée, envoyée), horodatage.</p><span class="keys">clé : uuid · 1–N pièces attendues</span></div>
+      <div class="box entity"><b>RegleExclusion</b><p>Générale ou propre au dossier. Porte son nom, son motif en français, son auteur et sa date d'activation.</p><span class="keys">clé : nom + portée · partiellement implémentée</span></div>
+    </div>
+    <div class="note">
+      <b>Invariants à faire respecter par la base, pas par le code applicatif</b>
+      <p>Une pièce reçue ne peut être rattachée qu'à des pièces attendues d'un <strong>même dossier</strong>.
+        Une relance ne peut référencer que des pièces attendues d'un même dossier et d'un même destinataire.
+        Une opération exclue ne peut pas porter de pièce attendue. Toute écriture est horodatée et
+        attribuée à un acteur nommé, humain ou système.</p>
+    </div>
+  </section>
+
+  <section id="s6">
+    <div class="sec-head"><span class="eyebrow"><span class="num">06</span> &middot; Moteur</span>
+      <h2>Règles de rapprochement</h2></div>
+    <ol class="rules">
+      <li><strong>Normalisation</strong> du libellé bancaire : suppression des préfixes de canal, des références techniques et de la ponctuation, avec conservation de la forme préfixée — « VIREMENT INTERNE » perd son sens si l'on retire « virement ».</li>
+      <li><strong>Exclusions</strong> appliquées avant tout appariement, règles propres au dossier d'abord, règles générales ensuite.</li>
+      <li><strong>Appariement au centime</strong>, avec tolérance d'arrondi de 0,02 € ou 0,5 % du montant, la plus petite des deux s'appliquant.</li>
+      <li><strong>Affectation globale</strong> : les couples les plus sûrs sont affectés en premier, afin qu'un paiement traité tôt ne consomme pas la pièce d'un autre.</li>
+      <li><strong>Paiements groupés</strong> (une opération pour 2 à 4 factures) : acceptés seulement si le total tombe au centime, si la combinaison est unique et si le libellé porte un indice de groupement.</li>
+      <li><strong>Acomptes</strong> : acceptés seulement si le libellé l'annonce explicitement.</li>
+      <li><strong>Cas ambigu</strong> : jamais tranché automatiquement. Une combinaison incertaine reste signalée comme manquante — relancer un client qui a déjà envoyé la pièce coûte un e-mail, ne pas le relancer coûte une déclaration incomplète.</li>
+      <li><strong>Reproductibilité</strong> : l'ordre d'évaluation est déterministe ; deux exécutions sur les mêmes entrées produisent des sorties identiques au bit près.</li>
+    </ol>
+  </section>
+
+  <section id="s7">
+    <div class="sec-head"><span class="eyebrow"><span class="num">07</span> &middot; Routage</span>
+      <h2>Rattacher une pièce entrante au bon dossier</h2></div>
+    <p>C'est le point dur du produit, et la seule fonction où une erreur peut exposer les données d'un
+      client à un autre. L'algorithme est volontairement conservateur : en cas de doute, il ne tranche pas.</p>
+    <ol class="rules">
+      <li><strong>Idempotence d'abord.</strong> Clé = empreinte du fichier + identifiant du message. Un e-mail rejoué ne crée rien et ne déclenche rien.</li>
+      <li><strong>Dossier</strong> : adresse de l'expéditeur présente dans les contacts d'un dossier. À défaut, domaine de l'expéditeur rattaché à un seul dossier. Deux dossiers candidats ou plus → file non routée, sans exception.</li>
+      <li><strong>Période</strong> : période ouverte du dossier. Si deux périodes sont ouvertes, la date de la pièce arbitre ; si elle est absente → file non routée.</li>
+      <li><strong>Opération</strong> : parmi les pièces attendues du dossier et de la période, celles dont le montant correspond (tolérance §6) dans une fenêtre de −60 à +15 jours autour de la date d'opération. Exactement un candidat → rattachement <em>proposé</em>. Zéro ou plusieurs → file humaine.</li>
+      <li><strong>Jamais de rattachement inter-dossiers</strong>, quelle que soit la qualité de la correspondance de montant. Règle de sécurité, non contournable par configuration.</li>
+      <li><strong>Aucune pièce n'est perdue</strong> : tout ce qui n'est pas routé apparaît dans la file humaine au cycle suivant, avec son e-mail d'origine.</li>
+      <li><strong>Le rattachement reste une proposition</strong> tant qu'un humain ne l'a pas confirmé, en v1. La confirmation est un clic dans le tableau de suivi.</li>
+    </ol>
+  </section>
+
+  <section id="s8">
+    <div class="sec-head"><span class="eyebrow"><span class="num">08</span> &middot; Le cœur</span>
+      <h2>Référentiel d'exclusions</h2></div>
+    <p>Sur un relevé de PME française, <strong>60 à 70 % des opérations n'exigent légitimement aucune facture
+      fournisseur</strong> : salaires, charges sociales, impôts, frais bancaires, échéances de prêt,
+      mouvements internes, encaissements clients. Un système qui signale tout le reste produit des dizaines
+      de fausses alertes et se fait débrancher en trois jours.</p>
+    <p>Deux niveaux : des règles générales valables pour tout dossier français, et des règles apprises par
+      dossier, enrichies chaque mois par le comptable. C'est ce second niveau qui rend le remplacement du
+      produit coûteux au bout de quelques mois.</p>
+    <h3>Cycle de vie d'une règle apprise</h3>
+    <div class="chain">
+      <span class="st start">PROPOSÉE</span><span class="ar">→</span>
+      <span class="st">VALIDÉE PAR LE RESPONSABLE</span><span class="ar">→</span>
+      <span class="st end">ACTIVE</span><span class="ar">→</span>
+      <span class="st">RÉVISÉE OU RETIRÉE</span>
+    </div>
+    <p class="small muted">Une règle proposée s'applique dès le cycle suivant mais reste signalée comme
+      provisoire dans le tableau de suivi jusqu'à validation. Toute règle porte son auteur et sa date :
+      une exclusion abusive doit pouvoir être remontée à la personne qui l'a créée.</p>
+    <div class="note">
+      <b>Contre-exemple à ne jamais avaler</b>
+      <p>Une échéance de crédit-bail ressemble à un remboursement d'emprunt, mais exige bien une facture
+        mensuelle. Le référentiel doit contenir ses propres contre-exemples, et le jeu de test doit les
+        couvrir explicitement.</p>
+    </div>
+  </section>
+
+  <section id="s9">
+    <div class="sec-head"><span class="eyebrow"><span class="num">09</span> &middot; États</span>
+      <h2>Machines d'états</h2></div>
+    <p>Deux machines, et une règle qui évite la moitié des bugs de ce type de produit :
+      <strong>l'état de la période n'est pas saisi, il est calculé</strong> à partir de l'état de ses pièces
+      attendues. « Bloqué » n'est pas un état mais un drapeau porté par une pièce : un dossier peut être
+      bloqué sur une pièce et avancer sur les autres.</p>
+
+    <h3>Pièce attendue — machine principale</h3>
+    <div class="chain">
+      <span class="st start">ATTENDUE</span><span class="ar">→</span>
+      <span class="st">DEMANDÉE</span><span class="ar">→</span>
+      <span class="st">REÇUE</span><span class="ar">→</span>
+      <span class="st end">VALIDÉE</span>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>État</th><th>Événement</th><th>Garde</th><th>État cible</th><th>Effet</th></tr></thead>
+        <tbody>
+          <tr><td class="id">ATTENDUE</td><td>Relance envoyée</td><td>Relance validée par un humain (v1)</td><td class="id">DEMANDÉE</td><td>Départ du délai T+3</td></tr>
+          <tr><td class="id">ATTENDUE</td><td>Règle d'exclusion créée</td><td>Règle validée, applicable au dossier</td><td class="id">HORS PÉRIMÈTRE</td><td>Terminal, motif journalisé</td></tr>
+          <tr><td class="id">DEMANDÉE</td><td>Pièce rattachée</td><td>Rattachement confirmé par un humain</td><td class="id">REÇUE</td><td>Délai suspendu</td></tr>
+          <tr><td class="id">DEMANDÉE</td><td>Promesse saisie</td><td>Date de promesse dans les 15 jours</td><td class="id">PROMISE</td><td>Délai reporté à la date promise + 2 j</td></tr>
+          <tr><td class="id">DEMANDÉE</td><td>Délai dépassé</td><td>Compteur de relances &lt; plafond</td><td class="id">DEMANDÉE</td><td>Relance suivante mise en brouillon</td></tr>
+          <tr><td class="id">DEMANDÉE</td><td>Délai dépassé</td><td>Plafond de relances atteint</td><td class="id">ESCALADÉE</td><td>Alerte au responsable</td></tr>
+          <tr><td class="id">PROMISE</td><td>Date promise dépassée</td><td>Aucune pièce reçue</td><td class="id">DEMANDÉE</td><td>Relance, ton adapté</td></tr>
+          <tr><td class="id">REÇUE</td><td>Contrôle comptable</td><td>Pièce conforme</td><td class="id">VALIDÉE</td><td>Terminal</td></tr>
+          <tr><td class="id">REÇUE</td><td>Contrôle comptable</td><td>Pièce non conforme ou illisible</td><td class="id">DEMANDÉE</td><td>Relance avec motif du rejet</td></tr>
+          <tr><td class="id">ESCALADÉE</td><td>Arbitrage du responsable</td><td>Décision de classement</td><td class="id">CLOSE SANS SUITE</td><td>Terminal, motif obligatoire</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Période — état calculé</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>État</th><th>Condition de calcul</th></tr></thead>
+        <tbody>
+          <tr><td class="id">OUVERTE</td><td>Relevé importé, pièces attendues non encore créées</td></tr>
+          <tr><td class="id">EN COLLECTE</td><td>Au moins une pièce attendue dans un état non terminal</td></tr>
+          <tr><td class="id">COMPLÈTE</td><td>Toutes les pièces attendues sont dans un état terminal</td></tr>
+          <tr><td class="id">CLÔTURÉE</td><td>Complète, et clôture prononcée par le comptable</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="small muted">Les délais ne figurent pas dans la machine d'états : ils vivent dans la
+      configuration du dossier (§10). Une seule source de vérité, sans quoi les deux divergent au premier
+      changement de paramètre.</p>
+  </section>
+
+  <section id="s10">
+    <div class="sec-head"><span class="eyebrow"><span class="num">10</span> &middot; Cadence</span>
+      <h2>Calendrier de relance</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Jalon</th><th>Déclencheur</th><th>Action</th><th>Paramétrable</th></tr></thead>
+        <tbody>
+          <tr><td class="id">T0</td><td>Pièce attendue créée</td><td>Demande initiale, groupée par dossier</td><td>Oui</td></tr>
+          <tr><td class="id">T+3 j ouvrés</td><td>Aucune réponse</td><td>Relance 1</td><td>Oui</td></tr>
+          <tr><td class="id">T+7 j ouvrés</td><td>Toujours incomplet</td><td>Relance 2</td><td>Oui</td></tr>
+          <tr><td class="id">T+14 j ouvrés</td><td>Toujours incomplet</td><td>Escalade au responsable</td><td>Oui</td></tr>
+          <tr><td class="id">J−5 échéance</td><td>Échéance TVA (15 ou 24) approchant</td><td>Relance prioritaire, ton renforcé</td><td>Oui</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Garde-fous non paramétrables</h3>
+    <ul class="small">
+      <li><strong>Un seul e-mail par destinataire et par semaine</strong>, toutes pièces et tous dossiers confondus. Les demandes sont groupées, jamais fractionnées.</li>
+      <li><strong>Aucun envoi hors jours et heures ouvrés</strong> du fuseau du destinataire.</li>
+      <li><strong>Jamais deux relances pour la même pièce dans le même cycle</strong>, quelle que soit la configuration.</li>
+      <li><strong>Plafond de 4 relances</strong> par pièce, puis escalade obligatoire. Au-delà, le problème n'est plus documentaire.</li>
+    </ul>
+  </section>
+
+  <section id="s11">
+    <div class="sec-head"><span class="eyebrow"><span class="num">11</span> &middot; Recette</span>
+      <h2>Critères d'acceptation</h2></div>
+    <p>Chaque critère porte une métrique, un seuil, un protocole et un arbitre. Un critère sans ces quatre
+      éléments n'entre pas dans ce tableau, et la fonction correspondante n'est pas réputée livrée.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>ID</th><th>Exigence</th><th>Métrique et seuil</th><th>Protocole</th><th>Arbitre</th></tr></thead>
+        <tbody>
+          <tr><td class="id">CA-01</td><td>Ne pas crier au loup</td><td>Fausses alertes <strong>&lt; 2 %</strong></td><td>1 mois de relevé réel + liste des manquants établie indépendamment par le comptable ; comparaison ligne à ligne</td><td>Comptable référent</td></tr>
+          <tr><td class="id">CA-02</td><td>Ne rien laisser passer</td><td>Manques ratés <strong>= 0</strong></td><td>Même jeu que CA-01</td><td>Comptable référent</td></tr>
+          <tr><td class="id">CA-03</td><td>Ne jamais se tromper de client</td><td>Rattachements inter-dossiers <strong>= 0</strong></td><td>Rejeu de 200 pièces réelles sur un portefeuille d'au moins 10 dossiers</td><td>Responsable de portefeuille</td></tr>
+          <tr><td class="id">CA-04</td><td>Router sans travail humain</td><td>Pièces routées automatiquement <strong>≥ 85 %</strong></td><td>Même jeu que CA-03</td><td>Responsable de portefeuille</td></tr>
+          <tr><td class="id">CA-05</td><td>Ne jamais envoyer deux fois</td><td>Doublons d'envoi <strong>= 0</strong> sur 30 jours</td><td>Rejeu de 3 e-mails identiques + contrôle du journal d'envoi</td><td>Journal d'audit</td></tr>
+          <tr><td class="id">CA-06</td><td>Rien ne part sans relecture</td><td>Envois sans validation <strong>= 0</strong></td><td>Contrôle exhaustif du journal sur la période de recette</td><td>Journal d'audit</td></tr>
+          <tr><td class="id">CA-07</td><td>Justifier chaque ligne réclamée</td><td>Lignes reliées à une opération du relevé <strong>= 100 %</strong></td><td>Contrôle automatique bloquant à la génération</td><td>Automatique</td></tr>
+          <tr><td class="id">CA-08</td><td>Reproductibilité</td><td>Sorties identiques (empreinte)</td><td>Deux exécutions sur les mêmes entrées, en intégration continue</td><td>Automatique</td></tr>
+          <tr><td class="id">CA-09</td><td>Tenir la charge d'un cabinet</td><td>Cycle de 20 dossiers / 5 000 opérations <strong>&lt; 10 min</strong></td><td>Banc de mesure sur corpus généré</td><td>Automatique</td></tr>
+          <tr><td class="id">CA-10</td><td>Reprise après panne</td><td>Aucune perte, aucun doublon</td><td>Interruption injectée au milieu d'un cycle, puis relance</td><td>Automatique</td></tr>
+          <tr><td class="id">CA-11</td><td>Réversibilité</td><td>Export complet <strong>&lt; 1 h</strong>, format documenté</td><td>Test de restitution trimestriel</td><td>Cabinet</td></tr>
+          <tr><td class="id">CA-12</td><td>Localisation des données</td><td>Données hors UE <strong>= 0</strong></td><td>Inventaire des flux + contrat d'hébergement</td><td>Revue juridique</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note crit">
+      <b>Règle de recette</b>
+      <p>CA-01, CA-02, CA-03 et CA-06 sont <strong>bloquants</strong> : un échec sur l'un d'eux interdit la
+        mise en production, sans compensation possible par les autres. Les seuils sont mesurés sur données
+        réelles du cabinet, jamais sur le corpus synthétique — celui-ci sert à détecter les régressions,
+        pas à prouver l'exactitude.</p>
+    </div>
+  </section>
+
+  <section id="s12">
+    <div class="sec-head"><span class="eyebrow"><span class="num">12</span> &middot; Exigences</span>
+      <h2>Non fonctionnel, proportionné à la v1</h2></div>
+    <div class="grid2">
+      <div class="box">
+        <h3>Fiabilité</h3>
+        <ul class="small">
+          <li>Idempotence par empreinte sur toute entrée : opération, e-mail, pièce</li>
+          <li>Un cycle interrompu se rejoue intégralement sans effet de bord</li>
+          <li>File d'attente simple et fichier des événements non traitables ; ni bus d'entreprise ni orchestrateur externe à ce stade</li>
+          <li>Horodatage et acteur sur chaque écriture</li>
+          <li>Tests automatisés sur le moteur de règles et le routage, exécutés à chaque modification</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h3>Sécurité</h3>
+        <ul class="small">
+          <li>Instance et stockage isolés par cabinet (D4)</li>
+          <li>Chiffrement au repos et en transit</li>
+          <li>Secrets hors du dépôt, dans un gestionnaire dédié</li>
+          <li>Accès nominatifs, second facteur sur les comptes d'administration</li>
+          <li>Journal d'audit protégé contre la modification</li>
+          <li>Sauvegardes chiffrées, restauration testée chaque mois</li>
+        </ul>
+      </div>
+    </div>
+    <p class="small muted">Ce qui est volontairement absent de la v1 : RBAC fin, facturation intégrée,
+      supervision temps réel, multi-région. Ces briques sont des réponses à des problèmes que nous n'avons
+      pas encore — les ajouter maintenant coûterait le temps de la preuve de valeur.</p>
+  </section>
+
+  <section id="s13">
+    <div class="sec-head"><span class="eyebrow"><span class="num">13</span> &middot; Conformité</span>
+      <h2>Chaîne de sous-traitance et données personnelles</h2></div>
+    <p>Les données traitées concernent des entreprises françaises et, indirectement, des personnes
+      physiques (dirigeants, salariés via les libellés de paie). La chaîne doit être écrite avant le
+      premier dossier réel.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Acteur</th><th>Qualification RGPD</th><th>Obligation</th></tr></thead>
+        <tbody>
+          <tr><td>Entreprise cliente</td><td>Responsable de traitement</td><td>Information de ses propres personnes concernées</td></tr>
+          <tr><td>Cabinet donneur d'ordre</td><td>Sous-traitant</td><td>Autorisation écrite de recourir à un sous-traitant ultérieur</td></tr>
+          <tr><td>Cabinet producteur (offshore)</td><td>Sous-traitant ultérieur</td><td>Contrat conforme à l'article 28, registre des traitements</td></tr>
+          <tr><td>Nous (éditeur)</td><td>Sous-traitant ultérieur</td><td>Accord de sous-traitance nommant l'hébergeur, mesures techniques documentées</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul class="small">
+      <li><strong>Hébergement en Union européenne obligatoire</strong> avant le premier dossier réel, et nommé au contrat.</li>
+      <li><strong>Minimisation</strong> : aucune pièce ni libellé n'est transmis à un service tiers en v1, puisque aucun modèle de langage n'intervient (D2). En phase 4, toute transmission passera par une liste blanche de champs, documentée.</li>
+      <li><strong>Durées de conservation</strong> paramétrables par cabinet, avec suppression effective et prouvable.</li>
+      <li><strong>Côté tunisien</strong> : vérifier les obligations applicables auprès de l'INPDP et le régime des transferts internationaux avant déploiement.</li>
+      <li><strong>Anonymisation en phase d'essai</strong> : raison sociale et IBAN masqués, <strong>libellés bancaires intacts</strong> — un libellé masqué rend le jeu de données inutilisable.</li>
+    </ul>
+    <p class="small muted">Ce document n'est pas un avis juridique. Une revue par un conseil est un
+      livrable de la phase 1, pas une option.</p>
+  </section>
+
+  <section id="s14">
+    <div class="sec-head"><span class="eyebrow"><span class="num">14</span> &middot; ROI</span>
+      <h2>Mesurer, pas estimer</h2></div>
+    <p>Le temps économisé ne sera jamais un paramètre réglable dans le produit : un client qui règle
+      lui-même la variable qui démontre notre valeur ne croit pas au résultat, et il a raison.</p>
+    <ol class="rules">
+      <li><strong>Avant tout déploiement</strong>, le cabinet chronomètre le temps réellement consacré aux relances sur deux semaines pleines, par collaborateur et par dossier. Cette valeur est gelée : c'est la référence.</li>
+      <li>Sont également relevés : le nombre de dossiers par collaborateur, le nombre de pièces par dossier et par mois, et le nombre de dossiers refusés ou retardés faute de capacité.</li>
+      <li><strong>Après 60 jours</strong> d'exploitation, le même relevé est refait à l'identique, sur le même portefeuille.</li>
+      <li>Le produit conserve la méthode de calcul et les valeurs d'entrée, de sorte que tout chiffre communiqué puisse être reconstitué.</li>
+    </ol>
+    <p class="small muted">Le chiffre qui vend n'est pas le nombre de minutes économisées, mais le nombre de
+      dossiers qu'un collaborateur peut suivre sans embauche. C'est celui-là qu'il faut mesurer.</p>
+  </section>
+
+  <section id="s15">
+    <div class="sec-head"><span class="eyebrow"><span class="num">15</span> &middot; Risques</span>
+      <h2>Ce qui peut tuer le projet</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Risque</th><th>Impact</th><th>Parade</th><th>Signal d'alerte précoce</th></tr></thead>
+        <tbody>
+          <tr><td>Pas de mandat pour écrire au client final</td><td>Critique</td><td>Circuit C-RELAIS par défaut (D6), question posée en phase 0</td><td>Le cabinet hésite à répondre « qui écrit au client ? »</td></tr>
+          <tr><td>Pas de vérité terrain disponible</td><td>Critique</td><td>Aucune vente avant CA-01 et CA-02 mesurés</td><td>Le cabinet propose un relevé sans la liste des manquants</td></tr>
+          <tr><td>Fausses alertes en production</td><td>Élevé</td><td>Référentiel d'exclusions à deux niveaux, seuil bloquant en recette</td><td>Le comptable commence à ignorer les lignes signalées</td></tr>
+          <tr><td>Erreur de routage entre deux clients</td><td>Critique</td><td>Interdiction structurelle inter-dossiers (§7, règle 5)</td><td>Toute pièce routée avec un score faible</td></tr>
+          <tr><td>Relances perçues comme du harcèlement</td><td>Élevé</td><td>Garde-fous non paramétrables (§10)</td><td>Un client final demande à ne plus être contacté</td></tr>
+          <tr><td>Export bancaire inexploitable (PDF seul)</td><td>Élevé</td><td>Vérification en phase 0, refus de démarrer sans format structuré</td><td>La banque du dossier n'offre que du PDF</td></tr>
+          <tr><td>Départ du référent chez le cabinet pilote</td><td>Moyen</td><td>Deux interlocuteurs nommés dès le début, documentation du paramétrage</td><td>Un seul nom sur tous les échanges</td></tr>
+          <tr><td>Dérive vers la saisie comptable</td><td>Moyen</td><td>Périmètre §3 opposable, toute extension repasse par ce document</td><td>Demandes d'imputation ou de lettrage</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s16">
+    <div class="sec-head"><span class="eyebrow"><span class="num">16</span> &middot; Feuille de route</span>
+      <h2>Cinq phases, et le droit de s'arrêter à chacune</h2></div>
+    <p>Chaque phase a un critère de sortie et un <strong>critère d'arrêt</strong>. Savoir à l'avance ce qui
+      nous ferait renoncer est ce qui évite de financer un produit que personne n'achète.</p>
+
+    <div class="gantt" role="img" aria-label="Calendrier des cinq phases sur 31 semaines, détaillé dans le tableau suivant">
+      <div class="grow">
+        <span class="lab"><b>Phase 0</b>Preuve sur données réelles</span>
+        <div class="track"><i class="b1 lightbar" style="left:0%; width:9.7%"><span>S1–S3</span></i></div>
+      </div>
+      <div class="grow">
+        <span class="lab"><b>Phase 1</b>Cycle complet, 1 cabinet</span>
+        <div class="track"><i class="b2 lightbar" style="left:9.7%; width:19.4%"><span>S4–S9</span></i></div>
+      </div>
+      <div class="grow">
+        <span class="lab"><b>Phase 2</b>Pilote payant</span>
+        <div class="track"><i class="b3" style="left:29.0%; width:38.7%"><span>S10–S21</span></i></div>
+      </div>
+      <div class="grow">
+        <span class="lab"><b>Phase 3</b>Industrialisation</span>
+        <div class="track"><i class="b4" style="left:58.1%; width:32.3%"><span>S19–S28</span></i></div>
+      </div>
+      <div class="grow">
+        <span class="lab"><b>Phase 4</b>Extensions, conditionnelle</span>
+        <div class="track"><i class="b5" style="left:90.3%; width:9.7%"><span>S29+</span></i></div>
+      </div>
+      <div class="scale">
+        <span></span>
+        <div class="ticks"><span class="t-first" style="left:0%">S1</span><span style="left:22.6%">S8</span><span style="left:48.4%">S16</span><span style="left:74.2%">S24</span><span class="t-last" style="left:100%">S31</span></div>
+      </div>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Phase</th><th class="num">Durée</th><th class="num">Charge</th><th>Livrables</th><th>Critère de sortie</th><th>Critère d'arrêt</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="id">P0 — Preuve</td><td class="num">3 sem.<br>S1–S3</td><td class="num">10 j·h</td>
+            <td>Relevé réel + vérité terrain obtenus ; mesure CA-01 et CA-02 ; circuit de relance tranché ; vérification des outils déjà en place</td>
+            <td>CA-01 et CA-02 atteints sur données réelles</td>
+            <td>Aucun cabinet ne fournit de vérité terrain sous 6 semaines</td>
+          </tr>
+          <tr>
+            <td class="id">P1 — Cycle complet</td><td class="num">6 sem.<br>S4–S9</td><td class="num">25 j·h</td>
+            <td>Routage e-mail, machines d'états, Sheets/Gmail/Drive, journal d'audit, VPS UE, accord de sous-traitance, revue juridique</td>
+            <td>CA-03 à CA-12 atteints ; un cycle hebdomadaire tourne sans intervention de notre part</td>
+            <td>CA-03 ou CA-06 hors seuil après deux itérations</td>
+          </tr>
+          <tr>
+            <td class="id">P2 — Pilote payant</td><td class="num">12 sem.<br>S10–S21</td><td class="num">15 j·h</td>
+            <td>Un cabinet payant, baseline ROI gelée, exclusions apprises enrichies, mesure après 60 jours</td>
+            <td>Gain mesuré et reconnu par écrit par le cabinet ; renouvellement de l'abonnement</td>
+            <td>Le cabinet cesse d'utiliser le tableau de suivi deux semaines d'affilée</td>
+          </tr>
+          <tr>
+            <td class="id">P3 — Industrialisation</td><td class="num">10 sem.<br>S19–S28</td><td class="num">35 j·h</td>
+            <td>2<sup>e</sup> et 3<sup>e</sup> cabinet, mise en service en moins d'un jour, supervision, facturation, documentation d'exploitation</td>
+            <td>Trois cabinets en production, mise en service reproductible sans code spécifique</td>
+            <td>Chaque nouveau cabinet exige plus de 5 j·h de développement spécifique</td>
+          </tr>
+          <tr>
+            <td class="id">P4 — Extensions</td><td class="num">à définir<br>S29+</td><td class="num">—</td>
+            <td>Modèle de langage sur les trois usages bornés (D2), connecteurs logiciels comptables, multi-tenant si la demande l'exige</td>
+            <td>Chaque extension a son propre critère mesurable</td>
+            <td>Conditionnelle : ne démarre que si P3 est atteinte</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="small muted">Charges exprimées en jours-homme pour un développeur, hors temps du cabinet.
+      Les phases 2 et 3 se recouvrent volontairement : l'industrialisation commence pendant que le pilote
+      tourne, sinon le deuxième client attend trois mois de trop. Première recette possible : <strong>fin de
+      semaine 9</strong>. Premier revenu récurrent : <strong>semaine 10</strong>.</p>
+  </section>
+
+  <section id="s17">
+    <div class="sec-head"><span class="eyebrow"><span class="num">17</span> &middot; Existant</span>
+      <h2>Ce qui est déjà écrit, et ce qui manque</h2></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Brique</th><th>État</th><th>Reste à faire</th></tr></thead>
+        <tbody>
+          <tr><td>Normalisation des libellés</td><td>Implémentée</td><td>Alias fournisseurs alimentés par un vrai portefeuille</td></tr>
+          <tr><td>Référentiel d'exclusions général</td><td>Implémenté</td><td>Cycle de vie des règles apprises (§8)</td></tr>
+          <tr><td>Moteur d'appariement</td><td>Implémenté</td><td>Aucun écart connu ; à confronter à un relevé réel</td></tr>
+          <tr><td>Génération des relances</td><td>Implémentée</td><td>Groupement par destinataire, garde-fous §10</td></tr>
+          <tr><td>Tableau de suivi et statistiques</td><td>Implémentés</td><td>Publication dans Google Sheets</td></tr>
+          <tr><td>Corpus synthétique et évaluation</td><td>Implémentés</td><td>Jeu de test issu de données réelles</td></tr>
+          <tr><td>Machines d'états</td><td>Absentes</td><td>Tout §9</td></tr>
+          <tr><td>Routage des pièces entrantes</td><td>Absent</td><td>Tout §7 — poste le plus lourd de la phase 1</td></tr>
+          <tr><td>Journal d'audit</td><td>Absent</td><td>Tout §12</td></tr>
+          <tr><td>Connexion Gmail / Drive</td><td>Absente</td><td>Phase 1</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s18">
+    <div class="sec-head"><span class="eyebrow"><span class="num">18</span> &middot; Validation</span>
+      <h2>Ce document n'est une référence qu'une fois signé</h2></div>
+    <p class="small muted">Toute modification ultérieure passe par une nouvelle version numérotée et une
+      nouvelle validation. Une fonction ajoutée sans critère d'acceptation mesurable est réputée hors
+      périmètre, quelle que soit la discussion qui l'a précédée.</p>
+    <dl class="sign">
+      <div><dt>Rédacteur</dt><dd><span class="todo">nom, date, signature</span></dd></div>
+      <div><dt>Pour le cabinet</dt><dd><span class="todo">nom, fonction, date</span></dd></div>
+      <div><dt>Revue juridique</dt><dd><span class="todo">conseil, date — livrable phase 1</span></dd></div>
+    </dl>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Version</th><th>Date</th><th>Auteur</th><th>Nature de la modification</th></tr></thead>
+        <tbody>
+          <tr><td class="id">1.0</td><td>29/09/2026</td><td><span class="todo">à compléter</span></td><td>Première version opposable. Remplace les notes de cadrage antérieures.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p class="small muted">Cahier des charges &middot; collecte et relance des pièces justificatives &middot;
+      v1.0 du 29 septembre 2026. Les mentions encadrées en pointillés sont des emplacements à compléter
+      avant diffusion.</p>
+  </footer>
+</div>
