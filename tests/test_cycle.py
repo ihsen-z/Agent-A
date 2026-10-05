@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import hashlib
+import os
 import importlib.util
 import shutil
 import sys
@@ -1340,7 +1341,7 @@ def test_eml_imbrique_mis_en_quarantaine_sans_bloquer_les_autres(entree, inst):
     (q,) = lire_csv(inst.sortie / "quarantaine.csv")
     assert q["nom_fichier"] == "0-bombe.eml"
     assert q["empreinte"] == hashlib.sha256(bombe).hexdigest()
-    assert q["raison"].startswith("RecursionError") and "Traceback" not in q["raison"]
+    assert "RecursionError" in q["raison"] and "Traceback" not in q["raison"]
     r2 = lancer(entree, inst, J0)                                 # retente, journalise une seule fois
     assert r2.quarantaine == 1 and len(lire_csv(inst.sortie / "quarantaine.csv")) == 1
     assert actions_audit(inst).count("eml_quarantaine") == 1
@@ -1469,3 +1470,235 @@ def test_rattacher_leve_le_blocage_du_cycle_jamais_un_blocage_manuel(entree, tmp
     cycle.debloquer_piece(inst, "ALPHA", "A-001", "Paul Martin", motif="litige clos", maintenant=m)
     assert cycle.controler_piece(inst, "ALPHA", "A-001", VALIDEUSE, conforme=True,
                                  maintenant=m).etat is EtatPiece.VALIDEE
+
+
+# ---------------------------------------------------------------------------
+# Gardes de taille avant analyse d'un .eml, et entrees malformees
+# ---------------------------------------------------------------------------
+
+
+def _eml_avec_from(taille_en_tete: int, message_id: str) -> bytes:
+    mots = b"=?utf-8?q?a?= " * (taille_en_tete // 14)
+    return (b"From: " + mots + b"<a@b.fr>\r\nMessage-ID: <" + message_id.encode()
+            + b">\r\n\r\nx\r\n")
+
+
+def test_eml_gros_corps_en_tetes_normaux_passe(entree, inst):
+    e = ecrire_eml(inst.entrant, "1.eml", expediteur="compta@alpha-sarl.fr", message_id="<g@a>",
+                   corps="120,00 EUR\n" + "texte de remplissage " * 5000,
+                   fichiers=(("loxam_2026-09-03.pdf", b"%PDF" + b"0" * 100_000),))
+    assert e.stat().st_size > 100_000
+    r = lancer(entree, inst, J0)
+    assert (r.propositions, r.quarantaine) == (1, 0)
+
+
+def test_bloc_d_en_tetes_de_70_kio_en_quarantaine_sans_analyse(entree, inst, monkeypatch):
+    brut = _eml_avec_from(70 * 1024, "lourd@x")
+    assert brut.index(b"\r\n\r\n") > cycle.TAILLE_MAX_EN_TETES_EML
+    (inst.entrant / "lourd.eml").write_bytes(brut)
+    ecrire_eml(inst.entrant, "ok.eml", expediteur="compta@alpha-sarl.fr", message_id="<ok@a>",
+               corps="120,00 EUR", fichiers=(("loxam_2026-09-03.pdf", b"%PDF"),))
+    analyses = []                                                 # cote parent : appels d'analyse
+    original = cycle._lire_eml_isole
+    monkeypatch.setattr(cycle, "_lire_eml_isole", lambda chemin, *a: analyses.append(chemin.name)
+                        or original(chemin, *a))
+    t = time.perf_counter()
+    r = lancer(entree, inst, J0)
+    duree = time.perf_counter() - t
+    assert duree < 1.0, duree
+    assert analyses == ["ok.eml"]                                 # l'analyseur n'a jamais vu le fichier
+    assert (r.quarantaine, r.propositions) == (1, 1)
+    (q,) = lire_csv(inst.sortie / "quarantaine.csv")
+    assert q["nom_fichier"] == "lourd.eml" and q["empreinte"] == hashlib.sha256(brut).hexdigest()
+    assert q["raison"].startswith("EmlRefuse : bloc d'en-tetes de") and "Traceback" not in q["raison"]
+    assert actions_audit(inst).count("eml_quarantaine") == 1
+
+
+def test_bloc_d_en_tetes_juste_sous_le_seuil_analyse(entree, inst):
+    (inst.entrant / "limite.eml").write_bytes(_eml_avec_from(32 * 1024, "limite@x"))
+    r = lancer(entree, inst, J0)
+    assert r.quarantaine == 0 and r.messages_lus == 1
+
+
+def test_fichier_de_31_mio_refuse_sans_analyse(entree, inst, monkeypatch):
+    gros = inst.entrant / "gros.eml"
+    with open(gros, "wb") as f:
+        f.write(b"From: a@b.fr\r\nMessage-ID: <gros@x>\r\n\r\n")
+        f.truncate(31 * 1024 * 1024)
+    monkeypatch.setattr(cycle, "_lire_eml_isole", lambda *a: pytest.fail("analyse interdite"))
+    r = lancer(entree, inst, J0)
+    (q,) = lire_csv(inst.sortie / "quarantaine.csv")
+    assert r.quarantaine == 1 and q["raison"].startswith("EmlRefuse : fichier de 32505856 octets")
+
+
+@pytest.mark.parametrize("domaines", ["client a.fr", "jean@client-a.fr", "localhost"])
+def test_domaines_malformes_refus_lisible_sans_ecriture(tmp_path, capsys, domaines):
+    entree = ecrire_entree(tmp_path / "e")
+    with open(entree / "dossiers.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["dossier", "raison_sociale", "email_contact", "nom_contact", "jour_echeance_tva",
+                    "ton_relance", "circuit", "email_relais", "domaines"])
+        w.writerow([*DOSSIERS[0], domaines])
+    inst = cycle.Instance(tmp_path / "i")                         # instance neuve, rien sur disque
+    rc, out, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1
+    assert "REFUS [cycle]" in err and "domaine" in err and "dossiers.csv" in err
+    assert not inst.depot.exists() and not inst.audit.exists()
+
+
+def test_entrees_illisibles_refus_lisible(tmp_path, capsys, inst):
+    entree = ecrire_entree(tmp_path / "e")
+    lancer(entree, inst, J0)
+    avant, audit_avant = etat_depot(inst), inst.audit.read_bytes()
+    (entree / "releve_bancaire.csv").write_text(
+        "dossier,date_operation,libelle,debit,credit,reference\nALPHA,31/02/2026,\x1b[2J,1,,R\n",
+        encoding="utf-8")
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1 and "REFUS [cycle]" in err and "releve_bancaire.csv" in err and "\x1b" not in err
+    (entree / "releve_bancaire.csv").unlink()
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1 and "introuvable" in err
+    assert etat_depot(inst) == avant and inst.audit.read_bytes() == audit_avant
+
+
+# ---------------------------------------------------------------------------
+# Lecture isolee des .eml dans un processus enfant borne
+# ---------------------------------------------------------------------------
+
+import multiprocessing  # noqa: E402
+import resource  # noqa: E402
+
+MEMOIRE_TEST = 256 * 1024 ** 2
+CPU_TEST = 2
+
+
+def _mots(n: int) -> bytes:
+    return b"=?utf-8?q?a?= " * n
+
+
+def _partie_nom_encode(n: int, mid: str) -> bytes:
+    return (b"From: inconnu@evil.example\r\nMessage-ID: <" + mid.encode() + b">\r\nMIME-Version: 1.0\r\n"
+            b"Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n"
+            b"Content-Type: application/pdf; name=\"" + _mots(n).strip() + b"\"\r\n\r\nPDF\r\n--b--\r\n")
+
+
+def _enfants_vivants() -> list[str]:
+    vivants = [str(p.pid) for p in multiprocessing.active_children()]
+    for fichier in Path("/proc/self/task").glob("*/children"):
+        vivants += fichier.read_text().split()
+    return vivants
+
+
+def _rss_parent_ko() -> int:
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
+def lancer_borne(entree: Path, inst: cycle.Instance, d: dt.date = J0) -> cycle.ResumeCycle:
+    return cycle.executer_cycle(entree, inst, d, a_10h(d), limite_memoire_eml=MEMOIRE_TEST,
+                                limite_cpu_eml=CPU_TEST)
+
+
+def test_attaques_mesurees_en_quarantaine_le_reste_du_lot_traite(entree, inst):
+    attaques = {
+        "a-partie-109k.eml": _partie_nom_encode(8000, "p109@x"),
+        "b-partie-218k.eml": _partie_nom_encode(16000, "p218@x"),
+        "c-imbrique-1000.eml": _imbrique(1000),
+    }
+    for nom, brut in attaques.items():
+        (inst.entrant / nom).write_bytes(brut)
+    ecrire_eml(inst.entrant, "y-ok.eml", expediteur="compta@alpha-sarl.fr", message_id="<ok@a>",
+               corps="Montant 120,00 EUR",
+               fichiers=(("loxam_2026-09-03.pdf", b"%PDF-1"), ("annexe.pdf", b"%PDF-2"),
+                         ("photo.jpg", b"\xff\xd8\xff")))                 # legitime, 3 pieces jointes
+    ecrire_eml(inst.entrant, "z-ok.eml", expediteur="contact@beta-sas.fr", message_id="<ok@b>",
+               fichiers=(("metro.pdf", b"%PDF-3"),))
+    rss_avant = _rss_parent_ko()
+    t = time.perf_counter()
+    r = lancer_borne(entree, inst)
+    duree = time.perf_counter() - t
+    assert duree < 8.0, duree
+    assert _rss_parent_ko() - rss_avant < 100 * 1024                 # < 100 Mo (sans isolation : +465 Mo a +1,8 Go)
+    quarantaine = {q["nom_fichier"]: q["raison"] for q in lire_csv(inst.sortie / "quarantaine.csv")}
+    assert set(quarantaine) == set(attaques)
+    assert "MemoryError" in quarantaine["a-partie-109k.eml"]
+    assert "RecursionError" in quarantaine["c-imbrique-1000.eml"]
+    assert all("Traceback" not in raison for raison in quarantaine.values())
+    assert r.messages_lus == 2 and r.propositions == 1 and r.brouillons_crees == 2
+    file = cycle.lister_file(inst)
+    assert len([d for d in file if d.message_id == "<ok@a>"]) == 3   # une decision par piece jointe
+    assert _enfants_vivants() == []
+
+
+@pytest.mark.parametrize("n", [8000, 16000])                         # 112 Ko puis 224 Ko
+def test_from_quadratique_borne_meme_sans_le_premier_filtre(entree, inst, monkeypatch, n):
+    monkeypatch.setattr(cycle, "TAILLE_MAX_EN_TETES_EML", 10 * 1024 * 1024)   # 2e ligne de defense seule
+    (inst.entrant / "lourd.eml").write_bytes(
+        b"From: " + _mots(n) + b"<a@b.fr>\r\nMessage-ID: <lourd@x>\r\n\r\nx\r\n")
+    ecrire_eml(inst.entrant, "ok.eml", expediteur="compta@alpha-sarl.fr", message_id="<ok@a>",
+               corps="120,00 EUR", fichiers=(("loxam_2026-09-03.pdf", b"%PDF"),))
+    rss_avant = _rss_parent_ko()
+    t = time.perf_counter()
+    r = lancer_borne(entree, inst)
+    assert time.perf_counter() - t < 5.0
+    assert _rss_parent_ko() - rss_avant < 100 * 1024
+    assert r.propositions == 1
+    lourd = [d for d in cycle.lister_file(inst) if d.message_id == "<lourd@x>"]
+    en_quarantaine = [q for q in lire_csv(inst.sortie / "quarantaine.csv") if q["nom_fichier"] == "lourd.eml"]
+    assert en_quarantaine or (lourd and all(d.dossier is None for d in lourd))   # jamais route
+    assert _enfants_vivants() == []
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "routage._expediteur intercepte `Exception`, donc aussi MemoryError : sous la borne memoire "
+    "de la lecture isolee, l'en-tete From quadratique n'est pas mis en quarantaine mais lu comme "
+    "un expediteur vide (DOSSIER_INCONNU, file humaine). Sans danger pour le routage, mais "
+    "l'epuisement de ressources est deguise en en-tete malforme."))
+def test_defaut_routage_avale_memoryerror_de_l_en_tete_from(entree, inst, monkeypatch):
+    monkeypatch.setattr(cycle, "TAILLE_MAX_EN_TETES_EML", 10 * 1024 * 1024)
+    (inst.entrant / "lourd.eml").write_bytes(
+        b"From: " + _mots(8000) + b"<a@b.fr>\r\nMessage-ID: <lourd@x>\r\n\r\nx\r\n")
+    lancer_borne(entree, inst)
+    assert [q["nom_fichier"] for q in lire_csv(inst.sortie / "quarantaine.csv")] == ["lourd.eml"]
+
+
+@pytest.mark.parametrize("comportement, attendu", [
+    ("boucle", "SIGXCPU"),
+    ("sommeil", "interrompue"),
+    ("memoire", "MemoryError"),
+    ("sortie", "code de sortie 3"),
+])
+def test_lecture_isolee_chaque_echec_devient_une_quarantaine(entree, inst, monkeypatch,
+                                                           comportement, attendu):
+    from rapprochement import routage
+
+    def lecteur_hostile(chemin):
+        if comportement == "boucle":
+            while True:
+                pass
+        if comportement == "sommeil":
+            time.sleep(60)
+        if comportement == "memoire":
+            return bytearray(4 * 1024 ** 3)
+        os._exit(3)
+
+    monkeypatch.setattr(cycle, "MARGE_GARDE_LECTURE_EML", 0.5)
+    monkeypatch.setattr(routage, "lire_eml", lecteur_hostile)      # herite par l'enfant (fork)
+    ecrire_eml(inst.entrant, "1.eml", expediteur="compta@alpha-sarl.fr", message_id="<h@a>",
+               fichiers=(("f.pdf", b"%PDF"),))
+    t = time.perf_counter()
+    r = cycle.executer_cycle(entree, inst, J0, a_10h(J0), limite_memoire_eml=MEMOIRE_TEST,
+                             limite_cpu_eml=1)
+    assert time.perf_counter() - t < 4.0
+    (q,) = lire_csv(inst.sortie / "quarantaine.csv")
+    assert attendu in q["raison"] and "Traceback" not in q["raison"], q["raison"]
+    assert r.quarantaine == 1 and r.brouillons_crees == 2
+    assert _enfants_vivants() == []
+
+
+def test_sans_module_resource_refus_explicite(entree, inst, monkeypatch, capsys):
+    monkeypatch.setattr(cycle, "resource", None)
+    with pytest.raises(cycle.IsolationIndisponible, match="Linux ou macOS"):
+        lancer(entree, inst, J0)
+    assert not inst.depot.exists()
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1 and "IsolationIndisponible" in err and "Linux ou macOS" in err

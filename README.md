@@ -101,20 +101,75 @@ Schémas et exemples dans [`data/schemas/`](data/schemas/). Format pivot en CSV 
 chaque banque exporte différemment, la conversion se fait à l'entrée plutôt que
 dans le moteur.
 
+## MVP : le cycle complet, avec validation humaine
+
+Le moteur ci-dessus répond à « quelles pièces manquent ». Le MVP y ajoute tout
+ce qu'il faut pour s'en servir dans un cabinet : suivi de chaque pièce dans le
+temps, rattachement des pièces reçues par e-mail, relances **validées par un
+humain nommé avant envoi**, journal d'audit chaîné.
+
+```bash
+# Une instance = un répertoire par cabinet (base, journal, validateurs, sorties)
+mkdir -p instance && echo "Alice Durand" > instance/validateurs.txt
+
+# 1. Un cycle : rapproche, crée les pièces attendues, route les e-mails de
+#    instance/entrant/, prépare les brouillons. Il n'envoie et ne valide JAMAIS rien.
+python3 scripts/cycle.py cycle --entree data/corpus --instance instance --date 2026-10-05
+
+# 2. Un humain relit puis valide (le nom doit figurer dans validateurs.txt)
+python3 scripts/cycle.py valider  --instance instance --par "Alice Durand" <id_brouillon>
+
+# 3. Seul chemin d'émission : refuse tout brouillon non validé, refuse un renvoi
+python3 scripts/cycle.py envoyer  --instance instance <id_brouillon>
+
+# Suivi : pièces et états, file des messages non rattachés, intégrité du journal
+python3 scripts/cycle.py pieces --instance instance
+python3 scripts/cycle.py file   --instance instance
+python3 scripts/cycle.py verifier-audit --instance instance
+```
+
+Autres commandes : `rejeter`, `trancher` (envoi dont le résultat est inconnu),
+`rattacher`, `controler`, `promesse`, `arbitrer`, `bloquer`, `debloquer`,
+`reparer-audit`, `exporter`. Toute décision humaine exige `--par`.
+
+**Ce qui est garanti, et testé** : rien ne part sans validation humaine ; jamais
+deux envois du même message ; un envoi incertain n'est jamais renvoyé seul ; une
+pièce n'est jamais rattachée au dossier d'un autre client ; un cycle interrompu
+puis relancé ne perd rien et ne duplique rien.
+
+**Ce qui n'est pas fait** : les connecteurs Gmail, Drive et Google Sheets (il faut
+des identifiants et un compte de test ; le MVP lit des `.eml` sur disque et écrit
+les e-mails émis dans `outbox/`), et surtout **aucune mesure sur données réelles**.
+Les chiffres de ce dépôt viennent d'un corpus synthétique. Les limites assumées
+et les conditions d'un pilote sont dans
+[docs/architecture_mvp.md](docs/architecture_mvp.md), sections 7 et 8.
+
 ## Architecture
 
 ```
 src/rapprochement/
-  modeles.py        types du domaine
+  modeles.py        types du domaine (contrat entre les modules)
   normalisation.py  nettoyage des libellés bancaires
   exclusions.py     référentiel des opérations sans justificatif  <- le produit
   moteur.py         appariement
+  etats.py          machine d'états d'une pièce attendue (table vérifiée couple par couple)
+  routage.py        rattachement des pièces reçues par e-mail, prudent par construction
+  cadence.py        jours ouvrés, jalons, garde-fous de relance
   relances.py       génération des emails
+  depot.py          persistance SQLite
+  audit.py          journal d'audit chaîné par SHA-256
+  envoi.py          validation humaine et émission, sans double envoi
+  cycle.py          orchestration du cycle complet
   rapport.py        tableau de suivi et statistiques
 scripts/
   generer_corpus.py corpus synthétique + vérité terrain
-  lancer.py         cycle complet
+  lancer.py         cycle historique, sans état
+  cycle.py          cycle du MVP et commandes humaines
   evaluer.py        mesure contre la vérité terrain
+docs/
+  cahier_des_charges.html   cahier des charges v1.0 (décisions, critères d'acceptation, feuille de route)
+  architecture_mvp.md       contrat entre modules, limites connues, conditions d'un pilote
+  document_commercial.html  document commercial
 ```
 
 ## Déploiement prévu

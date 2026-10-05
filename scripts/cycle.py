@@ -36,6 +36,7 @@ from rapprochement.envoi import (                     # noqa: E402
 )
 from rapprochement.audit import JournalCorrompu       # noqa: E402
 from rapprochement.etats import TransitionInterdite   # noqa: E402
+from rapprochement.parseurs import ErreurFormat       # noqa: E402
 from rapprochement.modeles import EtatPiece           # noqa: E402
 
 FUSEAU = ZoneInfo("Europe/Paris")
@@ -231,6 +232,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parseur().parse_args(argv)
     try:
         return _executer(args)
+    except ErreurFormat as exc:
+        # Entree illisible (releve, pieces, dossiers) : refus lisible, rien n'a ete ecrit.
+        _afficher(f"REFUS [cycle] entree invalide (ErreurFormat) : {exc}", file=sys.stderr)
+        return 1
     except JournalCorrompu as exc:
         # Alteration ailleurs qu'en fin : affichee telle quelle, jamais contournee.
         _afficher(f"REFUS (JournalCorrompu) : {exc}", file=sys.stderr)

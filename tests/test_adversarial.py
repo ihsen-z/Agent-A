@@ -938,17 +938,14 @@ def test_sain_reparations_concurrentes_et_collision_de_fragment(tmp_path) -> Non
     assert j.chemin.read_bytes() == sain and j.verifier().ok
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "En-tete From de 112 Ko fait de 8 000 mots encodes RFC 2047 : l'analyseur d'en-tetes de la "
-    "bibliotheque standard est quadratique (mesure : 3 s et ~0,9 Go ; 224 Ko -> 17 s et 3,6 Go ; "
-    "~450 Ko -> ~14 Go, processus tue par le noyau). Aucune limite de taille avant analyse, "
-    "pas d'exception donc pas de quarantaine, et le fichier est relu a chaque cycle."))
-def test_defaut_en_tete_from_quadratique_ralentit_tout_le_cycle(entree, inst) -> None:
+def test_regression_en_tete_from_quadratique_ralentit_tout_le_cycle(entree, inst) -> None:
     (inst.entrant / "lourd.eml").write_bytes(
         b"From: " + b"=?utf-8?q?a?= " * 8000 + b"<a@b.fr>\r\nMessage-ID: <lourd@x>\r\n\r\nx\r\n")
     t = time.perf_counter()
-    lancer(entree, inst, J0)
+    r = lancer(entree, inst, J0)
     assert time.perf_counter() - t < 1.0
+    assert r.quarantaine == 1
+    assert "bloc d'en-tetes" in cellules(inst.sortie / "quarantaine.csv")[2]
 
 
 def test_sain_quarantaine_fichiers_pathologiques(entree, inst, capsys) -> None:
@@ -1106,12 +1103,8 @@ def test_regression_domaine_declare_idna2003_replie_sur_un_autre_domaine() -> No
     assert all(x.dossier is None for x in d), d
 
 
-@pytest.mark.xfail(strict=True, raises=ErreurFormat, reason=(
-    "Colonne `domaines` malformee dans dossiers.csv : `ErreurFormat` n'est pas interceptee par "
-    "le CLI (trace Python au lieu d'un REFUS lisible) ; le cycle de TOUS les clients s'arrete "
-    "pour une cellule d'un seul dossier."))
 @pytest.mark.parametrize("domaines", ["client a.fr", "jean@client-a.fr", "localhost"])
-def test_defaut_cli_domaines_malformes_trace_au_lieu_d_un_refus(tmp_path, capsys, domaines) -> None:
+def test_regression_cli_domaines_malformes_trace_au_lieu_d_un_refus(tmp_path, capsys, domaines) -> None:
     dossiers = [DOSSIERS[0][:8] + [domaines], DOSSIERS[1][:8] + [""]]
     entree = ecrire_entree(tmp_path / "e", dossiers=dossiers)
     lignes = (entree / "dossiers.csv").read_text(encoding="utf-8").splitlines()
@@ -1188,3 +1181,219 @@ def test_sain_cli_envoi_incertain_bloque_le_suivant(tmp_path, capsys) -> None:
     assert cli.main(["envoyer", b2.id_relance, *base]) == 1
     assert "EnvoiIncertainEnAttente" in capsys.readouterr().err
     assert list(inst.outbox.glob("*.eml")) == []
+
+
+# ===========================================================================
+# 9. Troisieme passage : isolation de la lecture des .eml (enfant borne)
+# ===========================================================================
+
+import os as _os  # noqa: E402
+import signal as _signal  # noqa: E402
+
+
+def _enfants_vivants() -> list[int]:
+    """PID des processus dont le parent est ce processus (zombies compris)."""
+    moi, trouves = _os.getpid(), []
+    for d in _os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                with open(f"/proc/{d}/stat", "rb") as f:
+                    champs = f.read().rsplit(b")", 1)[1].split()
+                if int(champs[1]) == moi:
+                    trouves.append(int(d))
+            except (OSError, IndexError, ValueError):
+                pass
+    return trouves
+
+
+def test_sain_isolation_gros_messages_legitimes_passent(entree, inst) -> None:
+    """Pas d'interblocage du tube : 24 Mio (piece de 18 Mio) et 200 pieces de 100 Kio."""
+    (inst.entrant / "1.eml").write_bytes(eml("compta@alpha-sarl.fr", "<g@x>", objet="facture 120,00 EUR",
+                                             fichiers=(("f_2026-09.pdf", _os.urandom(18 * 1024 * 1024)),)))
+    (inst.entrant / "2.eml").write_bytes(eml("contact@beta-sas.fr", "<h@x>", objet="releve",
+                                             fichiers=tuple((f"f{i}.pdf", _os.urandom(100 * 1024))
+                                                            for i in range(200))))
+    assert (inst.entrant / "1.eml").stat().st_size > 20 * 1024 * 1024
+    t = time.perf_counter()
+    r = lancer(entree, inst, J0)
+    assert time.perf_counter() - t < 13           # bien avant le delai de garde
+    assert r.quarantaine == 0 and r.messages_lus == 2
+    assert r.propositions == 1 and r.non_routees == 200
+
+
+def test_sain_isolation_mille_fichiers_sans_fuite(entree, inst) -> None:
+    for i in range(1000):
+        brut = _imbrique(1000) if i % 10 == 0 else eml("x@inconnu.fr", f"<{i}@x>", fichiers=((f"f{i}.pdf", b"%"),))
+        (inst.entrant / f"{i:04d}.eml").write_bytes(brut)
+    fd_avant = len(_os.listdir("/proc/self/fd"))
+    r = lancer(entree, inst, J0)
+    assert (r.quarantaine, r.messages_lus) == (100, 900)
+    assert len(_os.listdir("/proc/self/fd")) == fd_avant
+    assert _enfants_vivants() == []
+    with sqlite3.connect(inst.depot) as c:
+        assert c.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def _espion(monkeypatch, comportement):
+    """Remplace `routage.lire_eml` (herite par fork) : l'enfant ecrit son PID puis agit."""
+    vrai = routage.lire_eml
+
+    def faux(chemin):
+        with open(str(chemin) + ".pid", "w") as f:
+            f.write(str(_os.getpid()))
+        comportement(chemin)
+        return vrai(chemin)
+
+    monkeypatch.setattr(routage, "lire_eml", faux)
+
+
+def _boucle_sourde(chemin) -> None:
+    _signal.signal(_signal.SIGXCPU, _signal.SIG_IGN)
+    while True:
+        pass
+
+
+def _bloque(chemin) -> None:
+    _signal.signal(_signal.SIGXCPU, _signal.SIG_IGN)
+    time.sleep(3600)
+
+
+@pytest.mark.parametrize("comportement", [_boucle_sourde, _bloque], ids=["ignore_SIGXCPU", "bloque"])
+def test_sain_isolation_enfant_tue_sans_survivant(entree, tmp_path, monkeypatch, comportement) -> None:
+    inst = nouvelle_instance(tmp_path / "i")
+    (inst.racine / "parking").mkdir()
+    (inst.entrant / "1.eml").write_bytes(eml("compta@alpha-sarl.fr", "<a@x>", fichiers=(("f.pdf", b"%"),)))
+    _espion(monkeypatch, comportement)
+    t = time.perf_counter()
+    r = cycle.executer_cycle(entree, inst, J0, a(J0), limite_cpu_eml=1)
+    assert time.perf_counter() - t < 10
+    assert r.quarantaine == 1
+    pid = int((inst.entrant / "1.eml.pid").read_text())
+    assert not _os.path.exists(f"/proc/{pid}") and _enfants_vivants() == []
+    raison = cellules(inst.sortie / "quarantaine.csv")[2]
+    assert "SIGKILL" in raison or "plus de" in raison, raison
+
+
+def test_sain_isolation_aucune_transaction_ni_verrou_tenus_au_fork(entree, inst, monkeypatch) -> None:
+    """Au moment de chaque fork, ni la base (BEGIN IMMEDIATE) ni le journal (flock) ne sont
+    verrouilles par le parent : l'enfant ne peut ni bloquer ni heriter d'un verrou."""
+    import fcntl
+    for i in range(3):
+        (inst.entrant / f"{i}.eml").write_bytes(eml("compta@alpha-sarl.fr", f"<{i}@x>",
+                                                    fichiers=(("f.pdf", b"%"),)))
+    vrai = cycle._lire_eml_isole
+    constats = []
+
+    def controle(chemin, *args, **kw):
+        c = sqlite3.connect(inst.depot, timeout=0)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("ROLLBACK")
+            base_libre = True
+        except sqlite3.OperationalError:
+            base_libre = False
+        finally:
+            c.close()
+        with open(inst.audit, "ab") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                journal_libre = True
+            except OSError:
+                journal_libre = False
+        constats.append((base_libre, journal_libre))
+        return vrai(chemin, *args, **kw)
+
+    monkeypatch.setattr(cycle, "_lire_eml_isole", controle)
+    lancer(entree, inst, J0)
+    assert constats == [(True, True)] * 3
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "L'enfant qui analyse un .eml non fiable herite des descripteurs ouverts du parent, dont "
+    "celui de depot.sqlite (et de son -wal) en ecriture : rien ne les ferme avant l'analyse "
+    "(defense en profondeur ; une faille d'execution de code dans l'analyseur atteindrait la "
+    "base de tous les clients)."))
+def test_defaut_isolation_enfant_herite_du_descripteur_de_la_base(entree, inst, monkeypatch) -> None:
+    (inst.entrant / "1.eml").write_bytes(eml("compta@alpha-sarl.fr", "<a@x>", fichiers=(("f.pdf", b"%"),)))
+
+    def inventaire(chemin) -> None:
+        cibles = []
+        for fd in _os.listdir("/proc/self/fd"):
+            try:
+                cibles.append(_os.readlink(f"/proc/self/fd/{fd}"))
+            except OSError:
+                pass
+        with open(str(chemin) + ".fds", "w") as f:
+            f.write("\n".join(cibles))
+
+    _espion(monkeypatch, inventaire)
+    lancer(entree, inst, J0)
+    cibles = (inst.entrant / "1.eml.fds").read_text().splitlines()
+    assert not [c for c in cibles if "depot.sqlite" in c or "audit.jsonl" in c], cibles
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Sous `ulimit -v` (RLIMIT_AS dur pose par l'hebergeur ou le cron), si la marge restante est "
+    "inferieure a la limite de l'enfant (1 Gio), `setrlimit` echoue ('not allowed to raise "
+    "maximum limit') et TOUT e-mail legitime part en quarantaine. Le plafond devrait etre "
+    "min(plafond voulu, limite dure)."))
+def test_defaut_isolation_ulimit_v_met_tout_en_quarantaine(tmp_path) -> None:
+    script = tmp_path / "s.py"
+    script.write_text(
+        "import os, resource, sys\n"
+        f"sys.path.insert(0, {str(RACINE / 'tests')!r}); sys.path.insert(0, {str(RACINE / 'src')!r})\n"
+        "import test_adversarial as T\n"
+        "from pathlib import Path\n"
+        f"racine = Path({str(tmp_path)!r})\n"
+        "e = T.ecrire_entree(racine / 'e'); inst = T.nouvelle_instance(racine / 'i')\n"
+        "(inst.entrant / '1.eml').write_bytes(T.eml('compta@alpha-sarl.fr', '<g@x>', "
+        "objet='facture 120,00 EUR', fichiers=(('f_2026-09.pdf', b'%PDF'),)))\n"
+        "vsz = int(open('/proc/self/statm').read().split()[0]) * os.sysconf('SC_PAGE_SIZE')\n"
+        "dur = vsz + 400 * 1024 * 1024\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (dur, dur))\n"
+        "r = T.lancer(e, inst, T.J0)\n"
+        "print(r.quarantaine, r.propositions)\n", encoding="utf-8")
+    sortie = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, check=True).stdout
+    assert sortie.split() == ["0", "1"], sortie
+
+
+def test_sain_isolation_parent_deja_gros(entree, inst) -> None:
+    lest = bytearray(500 * 1024 * 1024)
+    lest[::4096] = b"\x01" * len(range(0, len(lest), 4096))
+    (inst.entrant / "1.eml").write_bytes(eml("compta@alpha-sarl.fr", "<g@x>", objet="facture 120,00 EUR",
+                                             fichiers=(("f_2026-09.pdf", _os.urandom(10 * 1024 * 1024)),)))
+    r = lancer(entree, inst, J0)
+    del lest
+    assert (r.quarantaine, r.propositions) == (0, 1)
+
+
+def test_sain_isolation_indisponible_refus_avant_toute_ecriture(entree, tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cycle, "resource", None)
+    racine = tmp_path / "jamais"
+    with pytest.raises(cycle.IsolationIndisponible):
+        cycle.executer_cycle(entree, racine, J0, a(J0))
+    assert not racine.exists()
+    assert charger_cli().main(["cycle", "--entree", str(entree), "--instance", str(racine),
+                               "--date", J0.isoformat()]) == 1
+    assert "IsolationIndisponible" in capsys.readouterr().err and not racine.exists()
+    monkeypatch.undo()
+    monkeypatch.setattr(cycle.multiprocessing, "get_all_start_methods", lambda: ["spawn"])
+    with pytest.raises(cycle.IsolationIndisponible):
+        cycle.executer_cycle(entree, racine, J0, a(J0))
+    assert not racine.exists()
+
+
+def test_sain_isolation_deterministe_avec_quarantaine(tmp_path) -> None:
+    entree = ecrire_entree(tmp_path / "e")
+    messages = {"0-bombe.eml": _imbrique(1000),
+                "1.eml": eml("compta@alpha-sarl.fr", "<1@x>", objet="120,00 EUR", fichiers=(("f_2026-09.pdf", b"%"),)),
+                "2-gros.eml": b"From: " + b"=?utf-8?q?a?= " * 6000 + b"<a@b.fr>\r\n\r\nx\r\n",
+                "3.eml": eml("x@gmail.com", "<3@x>", fichiers=(("b.pdf", b"%"),))}
+    empreintes_sorties = []
+    for i in range(2):
+        inst = nouvelle_instance(tmp_path / f"i{i}")
+        for nom in (sorted(messages) if i == 0 else sorted(messages, reverse=True)):
+            (inst.entrant / nom).write_bytes(messages[nom])
+        lancer(entree, inst, J0)
+        empreintes_sorties.append(_empreintes(inst.sortie))
+    assert empreintes_sorties[0] == empreintes_sorties[1]

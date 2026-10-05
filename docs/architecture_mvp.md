@@ -469,6 +469,18 @@ assumee.
   (environ 34 ms par message). Au-dela de quelques milliers de messages accumules, le
   cycle ralentit ; vers 17 000 il depasse les 10 minutes de CA-09. Archiver
   regulierement.
+- **Isolation de la lecture des `.eml` : trois limites.** (1) Surcout mesure de
+  7,1 ms par message (100 messages : 0,42 s puis 1,13 s). (2) Si la limite dure de
+  l'hote (`ulimit -v`) laisse moins de 1 Gio de marge, `setrlimit` echoue et TOUT
+  e-mail legitime part en quarantaine : le plafond devrait etre le minimum du
+  plafond voulu et de la limite dure. (3) L'enfant herite des descripteurs de
+  `depot.sqlite` et de son fichier `-wal` : fermer les descripteurs herites avant
+  l'analyse serait une defense en profondeur. Aucun des deux defauts n'a ete
+  exploite par le reviewer.
+- **Un `From` piege est classe « dossier inconnu », pas « attaque ».** Il est bien
+  neutralise (rien n'est rattache, 0,25 s), mais le detail affiche est
+  « expediteur illisible » et ne dit pas que la memoire de l'enfant etait epuisee :
+  l'operateur ne voit pas qu'il s'agit d'un message hostile.
 - **Point ouvert du cahier des charges.** Le garde-fou « un e-mail par destinataire
   sur 7 jours glissants » gagne sur les jalons : le jalon T+3 ne s'execute jamais.
   Cadence reelle : demande initiale, relance a 7 jours, relance a 14 jours,
@@ -479,8 +491,9 @@ assumee.
 Verdict du reviewer independant, apres deux passages d'attaque : **un pilote est
 possible sur un portefeuille reel reduit**, sous ces conditions.
 
-1. Les `.eml` sont filtres en amont par taille (le cycle plafonne l'en-tete et le
-   fichier, mais les en-tetes des parties imbriquees restent a surveiller).
+1. L'hote est Linux ou macOS, sans `ulimit -v` laissant moins de 1 Gio de marge :
+   la lecture de chaque `.eml` se fait dans un processus enfant a memoire et temps
+   bornes, et le cycle refuse de demarrer sans cette isolation (voir section 7).
 2. Les domaines d'entreprise sont declares en ASCII ou punycode.
 3. L'instance est sur disque local, a acces restreint (la protection contre une
    validation forgee en SQL est l'acces disque, voir section 7).

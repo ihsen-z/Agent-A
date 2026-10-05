@@ -76,6 +76,10 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
+import math
+import multiprocessing
+import os
+import signal
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -85,6 +89,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+try:  # pragma: no cover - depend de la plateforme
+    import resource
+except ImportError:  # pragma: no cover
+    resource = None  # type: ignore[assignment]
 
 from . import envoi as envoi_mod
 from . import etats, routage
@@ -107,12 +116,28 @@ from .modeles import (
     Statut,
     StatutBrouillon,
     StatutRoutage,
+    MessageEntrant,
     identifiant_relance,
 )
 from .moteur import Moteur
-from .parseurs import lire_dossiers, lire_pieces, lire_releve
+from .parseurs import ErreurFormat, lire_dossiers, lire_pieces, lire_releve
 from .rapport import ecrire_suivi, ligne_sure
 from .relances import construire_brouillon
+
+# Gardes AVANT toute analyse d'un .eml : l'analyseur d'en-tetes de la bibliotheque
+# standard est quadratique sur les mots encodes RFC 2047 (mesure : 112 Ko d'en-tete
+# From -> ~1 a 3 s et ~0,9 Go ; 224 Ko -> 17 s et 3,6 Go). Au-dela, le fichier part
+# en quarantaine sans jamais etre analyse.
+TAILLE_MAX_EN_TETES_EML = 64 * 1024          # bloc d'en-tetes de plus haut niveau, en octets
+TAILLE_MAX_EML = 30 * 1024 * 1024            # fichier .eml complet, en octets
+
+# Ces deux plafonds ne sont qu'un premier filtre bon marche. La vraie protection :
+# chaque .eml est analyse dans un PROCESSUS ENFANT a ressources bornees ; le parent
+# n'analyse jamais un fichier lui-meme (l'analyseur peut s'emballer ailleurs, par
+# exemple sur les en-tetes des parties imbriquees).
+LIMITE_MEMOIRE_LECTURE_EML = 1024 ** 3       # octets d'espace d'adressage EN PLUS de celui herite
+LIMITE_CPU_LECTURE_EML = 10.0                # secondes de CPU de l'enfant
+MARGE_GARDE_LECTURE_EML = 3.0                # secondes reelles ajoutees au CPU avant de tuer
 
 ACTEUR_SYSTEME = "systeme"
 FUSEAU = "Europe/Paris"
@@ -305,14 +330,32 @@ class Entrees:
     referentiel: Referentiel
 
 
+def _lire(lecteur: Callable[[Path], Any], chemin: Path) -> Any:
+    """Toute erreur de lecture d'une entree devient `parseurs.ErreurFormat` (nom du fichier
+    en tete) : le CLI la presente comme un refus lisible, sans trace Python."""
+    try:
+        return lecteur(chemin)
+    except ErreurFormat as exc:
+        if str(exc).startswith(chemin.name):
+            raise
+        raise ErreurFormat(f"{chemin.name} : {exc}") from None
+    except FileNotFoundError:
+        raise ErreurFormat(f"{chemin.name} : fichier d'entree introuvable ({chemin.parent})") from None
+    except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        raise ErreurFormat(f"{chemin.name} : {type(exc).__name__} : {exc}") from None
+
+
 def lire_entrees(entree: Path | str) -> Entrees:
-    """Memes fichiers que `scripts/lancer.py` ; `exclusions_dossier.csv` optionnel."""
+    """Memes fichiers que `scripts/lancer.py` ; `exclusions_dossier.csv` optionnel.
+
+    Leve `parseurs.ErreurFormat` pour toute entree illisible ou malformee, AVANT que
+    le cycle n'ouvre la base ou le journal."""
     racine = Path(entree)
     return Entrees(
-        operations=lire_releve(racine / "releve_bancaire.csv"),
-        pieces=lire_pieces(racine / "pieces_recues.csv"),
-        dossiers=lire_dossiers(racine / "dossiers.csv"),
-        referentiel=Referentiel.depuis_csv(racine / "exclusions_dossier.csv"),
+        operations=_lire(lire_releve, racine / "releve_bancaire.csv"),
+        pieces=_lire(lire_pieces, racine / "pieces_recues.csv"),
+        dossiers=_lire(lire_dossiers, racine / "dossiers.csv"),
+        referentiel=_lire(Referentiel.depuis_csv, racine / "exclusions_dossier.csv"),
     )
 
 
@@ -555,8 +598,15 @@ def executer_cycle(
     maintenant: dt.datetime,
     *,
     panne: Panne | None = None,
+    limite_memoire_eml: int = LIMITE_MEMOIRE_LECTURE_EML,
+    limite_cpu_eml: float = LIMITE_CPU_LECTURE_EML,
 ) -> ResumeCycle:
     """Execute un cycle complet (voir la docstring du module).
+
+    Chaque .eml est analyse dans un processus enfant borne a `limite_memoire_eml`
+    octets d'espace d'adressage supplementaire et `limite_cpu_eml` secondes de CPU ;
+    tout depassement met le fichier en quarantaine. Sans `resource` / `fork`, le
+    cycle est refuse d'emblee (`IsolationIndisponible`).
 
     Rejouable : un second appel le meme jour avec les memes entrees ne cree ni
     piece, ni brouillon, ni decision de plus. `panne(point)` est un point
@@ -568,6 +618,7 @@ def executer_cycle(
     audit laisse l'evenement sans trace d'audit (jamais l'inverse).
     """
     _exiger_temps(aujourdhui, maintenant)
+    exiger_isolation()
     inst = Instance.de(instance)
     entrees = lire_entrees(entree)
 
@@ -599,7 +650,9 @@ def executer_cycle(
         a_verifier = _etape_pieces(depot, notes, rapprochements, aujourdhui, resume)
         _panne(panne, "apres_pieces")
 
-        quarantaine = _etape_routage(depot, notes, inst, entrees.dossiers, aujourdhui, resume)
+        quarantaine = _etape_routage(depot, notes, inst, entrees.dossiers, aujourdhui, resume,
+                                     limite_memoire_eml=limite_memoire_eml,
+                                     limite_cpu_eml=limite_cpu_eml)
         _panne(panne, "apres_routage")
 
         pieces_avant = depot.charger_pieces()
@@ -705,13 +758,132 @@ class FichierEnQuarantaine:
 CLE_QUARANTAINE = "eml-quarantaine:"
 
 
+class EmlRefuse(Exception):
+    """Fichier refuse AVANT analyse (taille) : il part en quarantaine."""
+
+
+class IsolationIndisponible(ErreurCycle):
+    """La lecture isolee des .eml exige `resource` et `fork` (Linux, macOS)."""
+
+
+def exiger_isolation() -> None:
+    """Refus explicite si la lecture isolee est impossible : jamais de repli silencieux
+    sur l'analyse directe (une protection qui disparait sans bruit est pire qu'aucune)."""
+    if resource is None or "fork" not in multiprocessing.get_all_start_methods():
+        raise IsolationIndisponible(
+            "la lecture isolee des e-mails entrants exige Linux ou macOS (modules `resource` "
+            "et demarrage `fork`) : cycle refuse sur cette plateforme, rien n'a ete ecrit"
+        )
+
+
+def _espace_adresses_actuel() -> int:
+    """Taille virtuelle du processus (Linux : /proc/self/statm), 0 si inconnue."""
+    try:
+        with open("/proc/self/statm", "rb") as f:
+            return int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def _enfant_lire_eml(connexion: Any, chemin: str, limite_memoire: int, limite_cpu: int) -> None:
+    """Corps du processus enfant : borne ses ressources, PUIS analyse, puis renvoie le
+    `MessageEntrant` (ou une raison lisible). Ne laisse jamais remonter d'exception
+    (multiprocessing imprimerait une trace Python)."""
+    try:
+        # RLIMIT_AS porte sur tout l'espace d'adressage, y compris celui herite du parent
+        # par fork : la limite est donc un SUPPLEMENT au-dessus de l'existant.
+        plafond = _espace_adresses_actuel() + limite_memoire
+        resource.setrlimit(resource.RLIMIT_AS, (plafond, plafond))
+        resource.setrlimit(resource.RLIMIT_CPU, (limite_cpu, limite_cpu + 1))
+        message = routage.lire_eml(chemin)
+        connexion.send(("ok", message))
+    except BaseException as exc:  # noqa: BLE001 - tout echec devient une raison de quarantaine
+        try:
+            connexion.send(("erreur", _raison(exc)))
+        except BaseException:  # noqa: BLE001
+            pass
+    finally:
+        try:
+            connexion.close()
+        except BaseException:  # noqa: BLE001
+            pass
+
+
+def _lire_eml_isole(chemin: Path, limite_memoire: int, limite_cpu: float) -> MessageEntrant:
+    """Analyse `chemin` dans un processus enfant borne (memoire, CPU, delai reel).
+
+    Leve `EmlRefuse` avec une raison lisible pour tout echec : erreur d'analyse,
+    MemoryError, depassement CPU (SIGXCPU), enfant tue au delai de garde, sortie
+    anormale, resultat absent ou illisible. L'enfant est toujours attendu (`join`) :
+    aucun processus ne survit a l'appel.
+    """
+    cpu = max(1, math.ceil(limite_cpu))
+    contexte = multiprocessing.get_context("fork")
+    lecture, ecriture = contexte.Pipe(duplex=False)
+    enfant = contexte.Process(target=_enfant_lire_eml, daemon=True,
+                              args=(ecriture, str(chemin), int(limite_memoire), cpu))
+    statut: str | None = None
+    valeur: Any = None
+    enfant.start()
+    ecriture.close()
+    try:
+        if lecture.poll(cpu + MARGE_GARDE_LECTURE_EML):
+            try:
+                statut, valeur = lecture.recv()
+            except Exception:  # noqa: BLE001 - EOF (enfant mort) ou resultat illisible
+                statut = None
+        else:
+            statut = "delai"
+    finally:
+        if enfant.is_alive():
+            enfant.kill()
+        enfant.join()
+        lecture.close()
+    if statut == "ok" and isinstance(valeur, MessageEntrant):
+        return valeur
+    if statut == "erreur":
+        raise EmlRefuse(f"lecture isolee en echec : {valeur}")
+    if statut == "delai":
+        raise EmlRefuse(f"lecture isolee interrompue : plus de {cpu + MARGE_GARDE_LECTURE_EML:g} s")
+    code = enfant.exitcode
+    if code is not None and code < 0:
+        nom = signal.Signals(-code).name if -code in signal.valid_signals() else str(-code)
+        cause = {"SIGXCPU": f"temps CPU depasse (limite {cpu} s)",
+                 "SIGKILL": "processus tue (memoire ou temps)"}.get(nom, "signal recu")
+        raise EmlRefuse(f"lecture isolee en echec : {cause} [{nom}]")
+    raise EmlRefuse(f"lecture isolee en echec : aucun resultat (code de sortie {code})")
+
+
+def _garde_eml(chemin: Path) -> None:
+    """Leve `EmlRefuse` si le fichier ou son bloc d'en-tetes de plus haut niveau depasse
+    les seuils. Ne fait qu'une lecture d'octets : l'analyseur n'est jamais appele.
+
+    Limite connue : les en-tetes des PARTIES imbriquees (nom de fichier encode RFC 2047
+    dans Content-Type / Content-Disposition) ne sont pas bornes ici et restent couteux
+    a l'analyse (mesure : 109 Ko -> ~2-4 s, 218 Ko -> ~19 s et 1,8 Go).
+    """
+    taille = chemin.stat().st_size
+    if taille > TAILLE_MAX_EML:
+        raise EmlRefuse(f"fichier de {taille} octets > {TAILLE_MAX_EML} : non analyse")
+    brut = chemin.read_bytes()
+    fins = [i for i in (brut.find(b"\r\n\r\n"), brut.find(b"\n\n")) if i >= 0]
+    bloc = min(fins) if fins else len(brut)
+    if bloc > TAILLE_MAX_EN_TETES_EML:
+        raise EmlRefuse(
+            f"bloc d'en-tetes de {bloc} octets > {TAILLE_MAX_EN_TETES_EML} : non analyse "
+            "(analyseur quadratique sur les en-tetes encodes)"
+        )
+
+
 def _raison(exc: BaseException) -> str:
     message = " ".join(str(exc).split())[:300]
     return f"{type(exc).__name__} : {message}" if message else type(exc).__name__
 
 
 def _etape_routage(depot: Depot, notes: _Notes, inst: Instance, dossiers: Mapping[str, Dossier],
-                   aujourdhui: dt.date, resume: ResumeCycle) -> list[FichierEnQuarantaine]:
+                   aujourdhui: dt.date, resume: ResumeCycle, *,
+                   limite_memoire_eml: int = LIMITE_MEMOIRE_LECTURE_EML,
+                   limite_cpu_eml: float = LIMITE_CPU_LECTURE_EML) -> list[FichierEnQuarantaine]:
     """Etape 5 : routage des .eml ; rien n'est rattache sans confirmation humaine.
 
     Chaque fichier est lu et route isolement : un .eml pathologique (imbrication
@@ -728,7 +900,8 @@ def _etape_routage(depot: Depot, notes: _Notes, inst: Instance, dossiers: Mappin
     quarantaine: list[FichierEnQuarantaine] = []
     for chemin in chemins:
         try:
-            message = routage.lire_eml(chemin)
+            _garde_eml(chemin)                    # premier filtre, sans analyse
+            message = _lire_eml_isole(chemin, limite_memoire_eml, limite_cpu_eml)
             attendues = depot.charger_pieces()
             deja_vus = {c for c in _cles_message(message) if depot.est_vu(c)}
             decisions = routage.router(
@@ -1396,7 +1569,7 @@ def brouillons(instance: Instance | Path | str,
 
 __all__ = [
     "CollisionReferences", "EnvoiRefuse", "ErreurCycle", "FichierEnQuarantaine", "Instance",
-    "JournalNonSain", "LigneSuivi", "ReparationAudit", "affichable", "exiger_journal_sain",
+    "IsolationIndisponible", "JournalNonSain", "exiger_isolation", "LigneSuivi", "ReparationAudit", "affichable", "exiger_journal_sain",
     "reparer_audit",
     "ResumeCycle", "SuiviPieces", "ValidateurRefuse", "arbitrer_piece", "bloquer_piece",
     "brouillons", "collisions_de_reference", "controler_piece", "debloquer_piece",
