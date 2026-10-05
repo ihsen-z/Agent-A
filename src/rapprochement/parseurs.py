@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import hashlib
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -58,10 +59,34 @@ def _exiger(entetes: set[str], attendues: set[str], fichier: str) -> None:
         )
 
 
+def _reference_de_repli(
+    dossier: str,
+    date_operation: dt.date,
+    libelle: str,
+    montant: Decimal,
+    sens: Sens,
+    rang: int,
+) -> str:
+    """Reference stable pour une ligne de releve qui n'en porte pas.
+
+    Derivee du CONTENU de la ligne, jamais de son numero : un numero de ligne
+    change d'un export a l'autre, deux operations de mois differents finissent
+    alors par partager la meme reference, et la seconde n'est jamais reclamee.
+    Deux lignes strictement identiques (meme jour, meme libelle, meme montant)
+    restent distinguees par leur rang d'apparition.
+    """
+    graine = "|".join(
+        (dossier, date_operation.isoformat(), libelle, str(montant), sens.value)
+    )
+    empreinte = hashlib.sha256(graine.encode("utf-8")).hexdigest()[:12]
+    return f"H{empreinte}-{rang}"
+
+
 def lire_releve(chemin: Path | str, dossier_defaut: str | None = None) -> list[OperationBancaire]:
     """releve_bancaire.csv : dossier,date_operation,libelle,debit,credit,reference[,devise,date_valeur]"""
     chemin = Path(chemin)
     operations: list[OperationBancaire] = []
+    rangs: dict[str, int] = {}
     with open(chemin, newline="", encoding="utf-8-sig") as f:
         lecteur = csv.DictReader(f)
         _exiger(
@@ -82,12 +107,21 @@ def lire_releve(chemin: Path | str, dossier_defaut: str | None = None) -> list[O
                     f"{chemin.name} ligne {numero} : dossier absent et aucun dossier par defaut"
                 )
             date_valeur = ligne.get("date_valeur", "").strip()
+            date_operation = lire_date(ligne["date_operation"])
+            libelle = (ligne["libelle"] or "").strip()
+            reference = (ligne["reference"] or "").strip()
+            if not reference:
+                cle = f"{dossier}|{date_operation}|{libelle}|{montant}|{sens.value}"
+                rangs[cle] = rangs.get(cle, 0) + 1
+                reference = _reference_de_repli(
+                    dossier, date_operation, libelle, montant, sens, rangs[cle]
+                )
             operations.append(
                 OperationBancaire(
-                    reference=(ligne["reference"] or f"L{numero}").strip(),
+                    reference=reference,
                     dossier=dossier,
-                    date_operation=lire_date(ligne["date_operation"]),
-                    libelle=(ligne["libelle"] or "").strip(),
+                    date_operation=date_operation,
+                    libelle=libelle,
                     montant=montant,
                     sens=sens,
                     devise=(ligne.get("devise") or "EUR").strip() or "EUR",

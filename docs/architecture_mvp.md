@@ -280,6 +280,7 @@ class Planification:
 def planifier(pieces: Iterable[PieceAttendue], dossiers: Mapping[str, Dossier],
               historique: Sequence[EnvoiRelance], aujourdhui: dt.date) -> Planification
 
+# defini dans relances.py, pas dans cadence.py
 def construire_brouillon(planifiee: RelancePlanifiee,
                          pieces: Mapping[str, PieceAttendue],
                          dossiers: Mapping[str, Dossier],
@@ -403,3 +404,52 @@ Connecteurs Gmail, Drive et Google Sheets (il faut des identifiants et un compte
 de test : le MVP definit le port `Expediteur` et une source `.eml` sur disque, les
 adaptateurs reseau viennent ensuite). Aucune IA. Aucune interface web. Aucun
 multi-tenant.
+
+## 7. Limites connues du MVP
+
+Un document de reference qui ne nomme pas ses limites laisse croire que le
+systeme fait plus qu'il ne fait. Chacune est soit corrigee en phase 2, soit
+assumee.
+
+**Donnees et identite**
+
+- **References d'operation uniques entre dossiers : exigence.** Le moteur et
+  `Brouillon.references` indexent par reference seule. Le cycle refuse de demarrer
+  si deux dossiers en partagent une, avec la liste des collisions. Correction
+  prevue : cle composite `(dossier, reference)` de bout en bout.
+- **Identite non authentifiee.** `--par` doit figurer dans `validateurs.txt`, mais
+  rien ne prouve que la personne est celle qu'elle dit etre (ni mot de passe, ni
+  second facteur). La liste des acteurs automatiques refusés est une liste noire,
+  contournable (`robot-1`). Le garde-fou reel de CA-06 est structurel : le seul
+  chemin d'emission exige un brouillon `VALIDEE` et le cycle ne valide jamais.
+- **Expediteur d'un e-mail non authentifie** : l'en-tete `From` n'est verifie ni par
+  SPF ni par DKIM. Le routage ne peut donc pas distinguer un expediteur usurpe.
+
+**Integrite du journal et du depot**
+
+- La suppression des *dernieres* entrees du journal d'audit n'est pas detectable
+  sans ancrage externe du dernier hash (par exemple l'envoyer par e-mail chaque soir).
+- Journal et base SQLite ne sont pas atomiques entre eux. `envoi.py` ecrit le
+  journal dans la transaction, le cycle l'ecrit apres : un crash laisse, selon le
+  cas, un evenement sans trace d'audit ou une trace sans effet. Jamais d'effet
+  silencieux sans les deux copies a rapprocher.
+- Verrou de fichier `fcntl` : Linux et macOS seulement. Le mode WAL de SQLite est peu
+  fiable sur un systeme de fichiers reseau : l'instance doit etre sur disque local.
+- L'export du depot contient l'horloge de `marquer_vu` : deux instances alimentees
+  des memes donnees produisent des exports differents (CA-08 est prouve pour les
+  sorties, l'outbox, l'audit et le contenu du depot, pas pour l'export).
+
+**Comportement**
+
+- **Aucun rattachement automatique** pour le circuit C-RELAIS, ni pour une adresse
+  grand public : une meme adresse y envoie les pieces de plusieurs clients.
+  Tout passe par la file humaine. C'est voulu.
+- Les statuts `PARTIEL` et `A_VERIFIER` ne produisent jamais de relance.
+- Une piece `ESCALADEE` n'a pas de sortie vers `DEMANDEE` : le responsable peut
+  l'arbitrer (`CLOSE_SANS_SUITE`) ou la rattacher, pas relancer a nouveau.
+- Pas de relance prioritaire a J-5 de l'echeance TVA ; fuseau fixe `Europe/Paris`.
+- **Point ouvert du cahier des charges.** Le garde-fou « un e-mail par destinataire
+  sur 7 jours glissants » gagne sur les jalons : le jalon T+3 ne s'execute jamais.
+  Cadence reelle : demande initiale, relance a 7 jours, relance a 14 jours,
+  escalade a 14 jours ouvres (environ J+18). A trancher avant la phase 2.
+
