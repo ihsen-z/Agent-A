@@ -291,19 +291,18 @@ _CARACTERES_INTERDITS_DOMAINE = re.compile(r"[\s@<>()\[\],;:\"\\/]")
 
 
 def normaliser_domaine(domaine: str) -> str | None:
-    """Domaine en minuscules, sans point final, en ASCII (IDNA/punycode), ou None.
+    """Domaine en minuscules, sans point final, ou None s'il n'est pas comparable.
 
-    `Exemple.FR.` -> `exemple.fr` ; `societe-generale.fr` et sa forme unicode
-    accentuee se comparent par leur forme punycode. Un domaine qui ne se
-    normalise pas (caractere interdit, label vide, pas de point, IDNA invalide)
-    ne prouve rien.
+    Seuls les domaines ASCII sont comparables (forme punycode `xn--...` comprise).
+    Aucune conversion IDNA : le codec `idna` de Python applique IDNA 2003, qui
+    replie `straße.de` sur `strasse.de`, un AUTRE domaine enregistrable. Un
+    domaine non ASCII, avec un caractere interdit, un label vide ou sans point
+    ne prouve donc rien.
     """
-    d = (domaine or "").strip().lower().rstrip(".")
-    if not d or "." not in d or _CARACTERES_INTERDITS_DOMAINE.search(d):
-        return None
-    try:
-        d = d.encode("idna").decode("ascii").lower()
-    except UnicodeError:
+    d = (domaine or "").strip().lower()
+    if d.endswith("."):
+        d = d[:-1]
+    if not d or not d.isascii() or "." not in d or _CARACTERES_INTERDITS_DOMAINE.search(d):
         return None
     if any(not label for label in d.split(".")):
         return None
@@ -373,7 +372,8 @@ def domaines_par_dossier(dossiers: Mapping[str, Dossier]) -> dict[str, frozenset
     """Domaines DECLARES par le cabinet pour chaque dossier (`Dossier.domaines`).
 
     Seule source admise pour le routage par domaine : rien n'est deduit de
-    `email_contact`. Normalises (minuscules, sans point final, IDNA). Un domaine
+    `email_contact`. Normalises (minuscules, sans point final). Un domaine non
+    ASCII est ignore, sans exception (ecrire sa forme punycode `xn--...`). Un domaine
     de messagerie grand public declare par erreur est ecarte (garde-fou en
     profondeur), un domaine illisible aussi. Cle du mapping = code du dossier
     (`ValueError` sinon).

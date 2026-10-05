@@ -373,11 +373,31 @@ def test_domaine_declare_route(declare: str) -> None:
     assert (d.statut, d.dossier, d.reference_operation) == (StatutRoutage.PROPOSEE, "A", "A-1")
 
 
-def test_domaine_declare_idna() -> None:
+def test_domaine_declare_punycode_route() -> None:
     pieces = [attendue("A-1", "A", "89.90")]
-    for declare, exp in (("société.fr", "x@xn--socit-esab.fr"), ("xn--socit-esab.fr", "x@société.fr")):
+    for declare, exp in (("xn--strae-oqa.de", "x@xn--strae-oqa.de"), ("XN--Strae-oqa.DE.", "x@xn--strae-oqa.de.")):
         d = route_un(message(exp, "f_89,90.pdf"), {"A": frozenset()}, pieces, domaines={"A": [declare]})
         assert (d.statut, d.dossier) == (StatutRoutage.PROPOSEE, "A")
+
+
+def test_domaine_non_ascii_jamais_compare() -> None:
+    pieces = [attendue("A-1", "A", "89.90")]
+    vide = {"A": frozenset()}
+    # IDNA 2003 replierait straße.de sur strasse.de : un autre domaine.
+    for exp in ("x@strasse.de", "x@straße.de", "x@xn--strae-oqa.de"):
+        d = route_un(message(exp, "f_89,90.pdf"), vide, pieces, domaines={"A": ["straße.de"]})
+        assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+    # Expediteur non ASCII : ne correspond a aucun domaine declare, meme punycode.
+    for exp in ("x@straße.de", "x@société.fr"):
+        d = route_un(message(exp, "f_89,90.pdf"), vide, pieces,
+                     domaines={"A": ["xn--strae-oqa.de", "xn--socit-esab.fr", "strasse.de"]})
+        assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+    # Un domaine non ASCII ignore n'empeche pas les autres domaines du dossier.
+    d = route_un(message("x@alpha.fr", "f_89,90.pdf"), vide, pieces, domaines={"A": ["straße.de", "alpha.fr"]})
+    assert (d.statut, d.dossier) == (StatutRoutage.PROPOSEE, "A")
+    assert domaines_par_dossier(
+        {"A": dossier("A", "a@alpha.fr", domaines=("straße.de", "société.fr", "Alpha.FR."))}
+    ) == {"A": frozenset({"alpha.fr"})}
     # Homoglyphe cyrillique : autre domaine, aucune correspondance.
     d = route_un(message("x@\u0430lpha.fr", "f_89,90.pdf"), ADRESSES, pieces, domaines={"A": ["alpha.fr"]})
     assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
@@ -443,7 +463,7 @@ def test_domaines_par_dossier() -> None:
         "A": frozenset({"alpha.fr", "alpha-groupe.fr"}),
         "B": frozenset(),
         "C": frozenset({"gamma.fr"}),
-        "D": frozenset({"xn--socit-esab.fr"}),
+        "D": frozenset(),                                                 # non ASCII : ignore
     }
     with pytest.raises(ValueError):
         domaines_par_dossier({"A": dossier("B", "x@beta.fr")})

@@ -623,12 +623,53 @@ def test_reparation_sauvegarde_le_fragment(chemin):
     assert frag.name.split(".fragment-")[1].endswith("Z")
 
 
-def test_reparation_ligne_complete_sans_saut_de_ligne_final(chemin):
+def test_entree_valide_sans_saut_de_ligne_est_completee(chemin):
+    j = remplir(chemin, 3)
+    complet = chemin.read_bytes()
+    chemin.write_bytes(complet[:-1])
+    assert not j.verifier().ok
+    assert j.reparer_fin_tronquee() == 0
+    assert chemin.read_bytes() == complet  # rien de retire, seul "\n" ajoute
+    assert fragments(chemin) == []
+    assert j.verifier().ok and j.verifier().nb_entrees == 3
+    assert j.ecrire("alice", "suite", "x", horodatage=T0).seq == 4
+    assert j.verifier().ok
+
+
+def test_entree_sans_saut_de_ligne_hash_faux_est_un_fragment(chemin):
+    j = remplir(chemin, 3)
+    ls = lignes(chemin)
+    ls[2] = modifier_ligne(ls[2], lambda d: d["details"].__setitem__("valeur", 0))[:-1]
+    reecrire(chemin, ls)
+    fragment = ls[2]
+    assert j.reparer_fin_tronquee() == len(fragment)
+    assert [p.read_bytes() for p in fragments(chemin)] == [fragment]
+    assert j.verifier().ok and j.verifier().nb_entrees == 2
+
+
+def test_entree_sans_saut_de_ligne_seq_saute_est_un_fragment(chemin):
+    j = remplir(chemin, 3)
+    ls = lignes(chemin)
+    prec = json.loads(ls[1])["hash"]
+    corps = {
+        "seq": 7, "horodatage": T0.isoformat(), "acteur": "alice", "action": "x",
+        "objet": "y", "details": {}, "hash_precedent": prec,
+    }
+    h = hashlib.sha256(json.dumps(corps, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    ls[2] = json.dumps({**corps, "hash": h}, sort_keys=True, separators=(",", ":")).encode()
+    reecrire(chemin, ls)
+    assert j.reparer_fin_tronquee() == len(ls[2])
+    assert len(fragments(chemin)) == 1
+    assert j.verifier().ok and j.verifier().nb_entrees == 2
+
+
+def test_completion_du_saut_de_ligne_idempotente(chemin):
     j = remplir(chemin, 3)
     chemin.write_bytes(chemin.read_bytes()[:-1])
-    assert j.reparer_fin_tronquee() > 0
-    assert j.verifier().ok and j.verifier().nb_entrees == 2
-    assert len(fragments(chemin)) == 1
+    assert j.reparer_fin_tronquee() == 0
+    apres = chemin.read_bytes()
+    assert j.reparer_fin_tronquee() == 0
+    assert chemin.read_bytes() == apres and fragments(chemin) == []
 
 
 def test_reparation_json_invalide_en_derniere_ligne(chemin):

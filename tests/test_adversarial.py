@@ -899,12 +899,7 @@ def test_sain_reparer_ne_blanchit_pas_une_entree_complete(tmp_path, alteration) 
     assert j.chemin.read_bytes() == avant and _fragments(tmp_path) == []
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Coupure juste avant le saut de ligne final : la derniere entree est COMPLETE et valide "
-    "(hash et chaine corrects) mais `reparer_fin_tronquee` la retire de la chaine comme un "
-    "fragment (copie annexe seulement) ; l'evenement, dont l'effet est deja valide en base "
-    "par le cycle, n'a plus de trace dans le journal. Il suffisait d'ajouter le saut de ligne."))
-def test_defaut_reparer_retire_une_entree_complete_sans_saut_de_ligne(tmp_path) -> None:
+def test_regression_reparer_retire_une_entree_complete_sans_saut_de_ligne(tmp_path) -> None:
     j = _journal(tmp_path)
     j.chemin.write_bytes(j.chemin.read_bytes()[:-1])           # seul le '\n' final manque
     j.reparer_fin_tronquee()
@@ -1101,11 +1096,7 @@ def test_sain_domaines_declares_temoins(tmp_path) -> None:
     assert dossier_de("x@xn--client-a-x.fr")[0] is None
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Domaine declare 'strasse.de' ecrit 'straße.de' : la normalisation IDNA 2003 de Python le "
-    "replie sur 'strasse.de', un AUTRE domaine enregistrable (IDNA 2008 : xn--strae-oqa.de) ; "
-    "les e-mails d'une autre entreprise sont proposes dans ce dossier."))
-def test_defaut_domaine_declare_idna2003_replie_sur_un_autre_domaine() -> None:
+def test_regression_domaine_declare_idna2003_replie_sur_un_autre_domaine() -> None:
     from rapprochement.modeles import Dossier
     dossiers = {"A": Dossier("A", "A", "jean@xn--strae-oqa.de", "J", domaines=("straße.de",))}
     m = MessageEntrant("<x@y>", "compta@strasse.de", dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc),

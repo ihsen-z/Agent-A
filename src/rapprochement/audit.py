@@ -273,6 +273,11 @@ class JournalAudit:
         silencieuse), puis le fichier est tronque juste avant et synchronise.
         Renvoie le nombre d'octets retires.
 
+        Exception : si le fragment final est en fait une entree COMPLETE et
+        authentique (seq, chainage, hash corrects) a laquelle il ne manque que
+        le saut de ligne, on ajoute ce saut de ligne : rien n'est retire, aucun
+        fichier fragment, retour 0.
+
         Renvoie 0, sans rien toucher, si le journal est vide ou sain. Leve
         `JournalCorrompu`, sans RIEN modifier, si une entree complete est
         alteree ou si la chaine est rompue ailleurs qu'en fin : reparer
@@ -315,6 +320,18 @@ class JournalAudit:
                         raise JournalCorrompu(
                             f"ligne {rang} alteree, reparation refusee (rien modifie) : {exc}"
                         ) from exc
+            if not termine:
+                try:
+                    self._controler(candidate, rang, precedent)
+                except JournalCorrompu:
+                    pass  # vrai fragment : traite ci-dessous
+                else:
+                    # Entree authentique (seq, chainage, hash, forme) : il ne
+                    # manque que le saut de ligne. On le complete, rien n'est retire.
+                    f.write(b"\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                    return 0
             longueur = len(candidate) + (1 if termine else 0)
             debut = len(donnees) - longueur
             fragment = donnees[debut:]
