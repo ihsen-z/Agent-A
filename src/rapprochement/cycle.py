@@ -49,6 +49,7 @@ Garde-fous d'assemblage (choix de l'integrateur, a revoir par le chef de projet)
   `confirme_par` humain). Elle est BLOQUEE (`BLOCAGE_SIGNALE`, motif prefixe
   par `PREFIXE_MOTIF_CYCLE`) : elle n'est plus relancee et attend un humain.
   Le blocage est leve si l'operation redevient MANQUANT, ou apres `rattacher`.
+  Si un humain le leve (`debloquer`), le cycle ne le repose plus.
 - Une piece connue dont l'operation est devenue HORS_PERIMETRE sort par
   `EXCLUSION_CREEE` (`regle_validee=True` : les regles viennent du referentiel
   general et de `exclusions_dossier.csv`, tenu par le cabinet).
@@ -61,6 +62,11 @@ Garde-fous d'assemblage (choix de l'integrateur, a revoir par le chef de projet)
   `envoi.envoyer` ne connait pas ces regles.
 - Les commandes humaines exigent un nom present dans `validateurs.txt`
   (insensible a la casse ; fichier absent ou vide : refus).
+
+Suivi humain : `saisir_promesse`, `arbitrer_piece`, `bloquer_piece`,
+`debloquer_piece` (meme garde, audit apres COMMIT, rejeu sans effet) et
+`suivi_pieces` (lecture seule, echeances calculees par `cadence.planifier`).
+Le cycle ecrit `sortie/escalades.csv` (pieces ESCALADEE) a chaque passage.
 
 Le cycle ne valide JAMAIS rien lui-meme.
 """
@@ -90,6 +96,7 @@ from .modeles import (
     Brouillon,
     DecisionRoutage,
     Dossier,
+    EtatPeriode,
     EtatPiece,
     Evenement,
     OperationBancaire,
@@ -331,7 +338,8 @@ def _transition(piece: PieceAttendue, evenement: Evenement, aujourdhui: dt.date,
         "etat_apres": nouvelle.etat.value,
         "nb_relances": nouvelle.nb_relances,
     }
-    for cle in ("valide_par", "confirme_par", "controle_par", "motif", "id_piece"):
+    for cle in ("valide_par", "confirme_par", "controle_par", "arbitre_par", "motif",
+                "id_piece", "date_promesse"):
         if cle in contexte:
             details[cle] = contexte[cle]
     notes.noter("transition", _objet(piece), details, acteur=acteur)
@@ -613,6 +621,8 @@ def _etape_pieces(depot: Depot, notes: _Notes, rapprochements: list[Rapprochemen
                 ))
             if piece.bloquee or piece.etat is EtatPiece.RECUE:
                 continue
+            if depot.est_vu(_cle_deblocage_humain(piece)):
+                continue                      # un humain a deja leve ce blocage : on ne le remet pas
             motif = (f"{PREFIXE_MOTIF_CYCLE}operation {r.statut.value} au rapprochement "
                      f"({' + '.join(p.id_piece for p in r.pieces) or 'sans piece'}) : a confirmer")
             a_sauver.append(_transition(piece, Evenement.BLOCAGE_SIGNALE, aujourdhui, notes, motif=motif))
@@ -797,6 +807,15 @@ def ecrire_sorties(inst: Instance, depot: Depot, rapprochements: list[Rapprochem
         d.message_id, d.empreinte, d.nom_fichier, d.statut.value, d.dossier, d.periode,
         d.reference_operation, d.motif.value if d.motif else "", d.detail,
     ] for d in depot.file_humaine(resolue=False)))
+
+    _ecrire_csv(sortie / "escalades.csv", (
+        "dossier", "reference", "periode", "date_operation", "montant", "devise", "libelle",
+        "nb_relances", "date_premiere_demande", "date_derniere_relance", "bloquee", "motif_blocage",
+    ), ([
+        p.dossier, p.reference, p.periode, _iso(p.date_operation), str(p.montant), p.devise,
+        p.libelle, p.nb_relances, _iso(p.date_premiere_demande), _iso(p.date_derniere_relance),
+        int(p.bloquee), p.motif_blocage,
+    ] for p in pieces if p.etat is EtatPiece.ESCALADEE))
 
     dossier_b = sortie / "brouillons"
     dossier_b.mkdir(exist_ok=True)
@@ -989,6 +1008,229 @@ def controler_piece(instance: Instance | Path | str, dossier: str, reference: st
         return nouvelle
 
 
+# ---------------------------------------------------------------------------
+# Suivi humain : promesse, arbitrage, blocage (meme garde que les autres decisions)
+# ---------------------------------------------------------------------------
+
+CLE_DEBLOCAGE_HUMAIN = "deblocage-humain:"
+
+
+def _cle_deblocage_humain(piece: PieceAttendue) -> str:
+    return f"{CLE_DEBLOCAGE_HUMAIN}{piece.dossier}/{piece.reference}"
+
+
+def _decision_sur_piece(
+    instance: Instance | Path | str,
+    par: str,
+    dossier: str,
+    reference: str,
+    maintenant: dt.datetime,
+    evenement: Evenement,
+    deja_fait: Callable[[PieceAttendue], bool],
+    action: str,
+    details: Mapping[str, Any],
+    **contexte: Any,
+) -> PieceAttendue:
+    """Squelette commun : validateur declare, piece existante, transition `etats`,
+    COMMIT puis audit. Idempotent : si la piece est deja dans l'etat vise
+    (`deja_fait`), rien n'est ecrit (ni depot ni journal) et la piece est renvoyee.
+    Une transition refusee leve `etats.TransitionInterdite` (message de `etats`)."""
+    inst = Instance.de(instance)
+    nom = exiger_validateur(inst, par)
+    if not isinstance(maintenant, dt.datetime) or maintenant.utcoffset() is None:
+        raise ValueError("maintenant doit etre un datetime avec fuseau")
+    aujourdhui = _jour_local(maintenant)
+    with _ouvrir(inst) as (depot, journal):
+        notes = _Notes(journal, maintenant)
+        with _transaction(depot, notes):
+            piece = _piece(depot, dossier, reference)
+            if deja_fait(piece):
+                return piece
+            nouvelle = _transition(piece, evenement, aujourdhui, notes, acteur=nom, **contexte)
+            depot.sauver_pieces([nouvelle])
+            if evenement is Evenement.BLOCAGE_LEVE:
+                depot.marquer_vu(_cle_deblocage_humain(piece))
+            notes.noter(action, _objet(nouvelle), {"par": nom, **details}, acteur=nom)
+        return nouvelle
+
+
+def saisir_promesse(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
+                    date_promesse: dt.date, maintenant: dt.datetime) -> PieceAttendue:
+    """`PROMESSE_SAISIE` : DEMANDEE -> PROMISE (date dans [aujourdhui, +15 j], garde `etats`)."""
+    if isinstance(date_promesse, dt.datetime) or not isinstance(date_promesse, dt.date):
+        raise ErreurCycle("la date promise doit etre une date AAAA-MM-JJ")
+    return _decision_sur_piece(
+        instance, par, dossier, reference, maintenant, Evenement.PROMESSE_SAISIE,
+        lambda p: p.etat is EtatPiece.PROMISE and p.date_promesse == date_promesse,
+        "promesse_saisie", {"date_promesse": date_promesse}, date_promesse=date_promesse,
+    )
+
+
+def arbitrer_piece(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
+                   motif: str, maintenant: dt.datetime) -> PieceAttendue:
+    """`ARBITRAGE_CLASSEMENT` : ESCALADEE -> CLOSE_SANS_SUITE, motif obligatoire."""
+    if not isinstance(motif, str) or not motif.strip():
+        raise ErreurCycle("arbitrer : --motif obligatoire et non vide")
+    nom = exiger_validateur(instance, par)
+    return _decision_sur_piece(
+        instance, par, dossier, reference, maintenant, Evenement.ARBITRAGE_CLASSEMENT,
+        lambda p: p.etat is EtatPiece.CLOSE_SANS_SUITE,
+        "arbitrage", {"motif": motif.strip()}, arbitre_par=nom, motif=motif.strip(),
+    )
+
+
+def bloquer_piece(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
+                  motif: str, maintenant: dt.datetime) -> PieceAttendue:
+    """`BLOCAGE_SIGNALE` : la piece n'est plus relancee tant qu'un humain ne la debloque pas."""
+    if not isinstance(motif, str) or not motif.strip():
+        raise ErreurCycle("bloquer : --motif obligatoire et non vide")
+    motif = motif.strip()
+    if motif.startswith(PREFIXE_MOTIF_CYCLE.strip()):
+        raise ErreurCycle(f"bloquer : le prefixe {PREFIXE_MOTIF_CYCLE.strip()!r} est reserve au cycle")
+    return _decision_sur_piece(
+        instance, par, dossier, reference, maintenant, Evenement.BLOCAGE_SIGNALE,
+        lambda p: p.bloquee and p.motif_blocage == motif,
+        "blocage", {"motif": motif}, motif=motif,
+    )
+
+
+def debloquer_piece(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
+                    motif: str, maintenant: dt.datetime) -> PieceAttendue:
+    """`BLOCAGE_LEVE`. Leve aussi un blocage pose par le cycle : la decision humaine est
+    memorisee et le cycle ne rebloque plus cette piece pour le meme constat du moteur."""
+    if not isinstance(motif, str) or not motif.strip():
+        raise ErreurCycle("debloquer : --motif obligatoire et non vide (trace d'audit)")
+    return _decision_sur_piece(
+        instance, par, dossier, reference, maintenant, Evenement.BLOCAGE_LEVE,
+        lambda p: not p.bloquee,
+        "deblocage", {"motif": motif.strip()},
+    )
+
+
+@dataclass(frozen=True)
+class LigneSuivi:
+    piece: PieceAttendue
+    echeance: dt.date | None      # prochaine date ou le cycle agira de lui-meme
+    action: str                   # ce qui se passera, ou ce qu'un humain doit faire
+
+
+@dataclass(frozen=True)
+class SuiviPieces:
+    aujourdhui: dt.date
+    lignes: tuple[LigneSuivi, ...]
+    periodes: tuple[tuple[str, str, EtatPeriode], ...]
+
+    def texte(self) -> str:
+        sortie = [f"Pieces attendues au {self.aujourdhui.isoformat()} : {len(self.lignes)}"]
+        for l in self.lignes:
+            p = l.piece
+            sortie.append(
+                f"  {p.dossier:14s} {p.reference:12s} {p.periode} {p.etat.value:16s} "
+                f"relances={p.nb_relances} echeance={_iso(l.echeance) or '-':10s} "
+                f"{p.montant:>10} {p.devise}  {l.action}"
+            )
+        sortie.append(f"Periodes (etat calcule) : {len(self.periodes)}")
+        sortie += [f"  {d:14s} {per} {e.value}" for d, per, e in self.periodes]
+        return "\n".join(sortie) + "\n"
+
+
+HORIZON_ECHEANCE_JOURS = 120
+
+
+def _echeances(pieces: list[PieceAttendue], depot: Depot,
+               aujourdhui: dt.date) -> dict[tuple[str, str], tuple[dt.date, str]]:
+    """Prochaine action automatique, calculee en interrogeant `cadence.planifier` jour
+    apres jour : aucune regle de calendrier n'est dupliquee ici (c'est une double regle
+    qui avait rendu l'escalade inatteignable). Le destinataire d'une piece est celui
+    de son dernier brouillon (garde-fou hebdomadaire) ; a defaut un destinataire propre
+    au dossier."""
+    destinataires: dict[str, str] = {}
+    for b in depot.lister_brouillons():                    # tri (cree_le, id) : le dernier gagne
+        for d in b.dossiers:
+            destinataires[d] = b.destinataire
+    dossiers = {
+        p.dossier: Dossier(p.dossier, p.dossier,
+                           destinataires.get(p.dossier, f"{p.dossier.lower()}@destinataire.invalid"), "")
+        for p in pieces
+    }
+    historique = depot.historique_envois()
+    par_ref = {p.reference: p for p in pieces}
+    resultat: dict[tuple[str, str], tuple[dt.date, str]] = {}
+    restantes = {p.reference for p in pieces if p.etat not in ETATS_TERMINAUX}
+    for n in range(HORIZON_ECHEANCE_JOURS + 1):
+        if not restantes:
+            break
+        jour = aujourdhui + dt.timedelta(days=n)
+        plan = planifier([par_ref[r] for r in sorted(restantes)], dossiers, historique, jour)
+        for ref, evenement in plan.transitions:
+            p = par_ref[ref]
+            libelle = ("escalade au responsable" if evenement is Evenement.DELAI_DEPASSE
+                       else "promesse depassee : retour en DEMANDEE")
+            resultat[(p.dossier, ref)] = (jour, libelle)
+            restantes.discard(ref)
+        for r in plan.relances:
+            for ref in r.references:
+                p = par_ref[ref]
+                resultat[(p.dossier, ref)] = (jour, f"relance niveau {p.nb_relances + 1}")
+                restantes.discard(ref)
+        restantes -= set(plan.bloquees)
+    return resultat
+
+
+def _action_humaine(p: PieceAttendue) -> str:
+    if p.etat in ETATS_TERMINAUX:
+        return "termine"
+    if p.bloquee:
+        return f"bloquee ({p.motif_blocage}) : debloquer ou rattacher"
+    if p.etat is EtatPiece.RECUE:
+        return "controle a faire (controler)"
+    if p.etat is EtatPiece.ESCALADEE:
+        return "arbitrage du responsable (arbitrer, rattacher)"
+    return "aucune echeance dans l'horizon"
+
+
+def suivi_pieces(instance: Instance | Path | str, aujourdhui: dt.date, *,
+                 dossier: str | None = None, etat: str | EtatPiece | None = None) -> SuiviPieces:
+    """Lecture seule (aucun validateur, aucune ecriture d'audit, aucun etat modifie).
+
+    Tri : (dossier, date_operation, reference), celui du depot. L'etat de chaque
+    periode est calcule par `etats.etat_periode` sur TOUTES les pieces de la periode,
+    quel que soit le filtre `etat`.
+    """
+    if isinstance(aujourdhui, dt.datetime) or not isinstance(aujourdhui, dt.date):
+        raise TypeError("aujourdhui doit etre une date")
+    try:
+        filtre = None if etat is None else EtatPiece(etat)
+    except ValueError:
+        raise ErreurCycle(
+            f"etat inconnu {etat!r} (attendu : {', '.join(e.value for e in EtatPiece)})"
+        ) from None
+    inst = Instance.de(instance)
+    if not inst.depot.exists():
+        return SuiviPieces(aujourdhui, (), ())
+    with Depot(inst.depot) as depot:
+        toutes = depot.charger_pieces(dossier=dossier)
+        echeances = _echeances(toutes, depot, aujourdhui)
+        en_attente = {
+            (d, ref): b for b in depot.lister_brouillons() if b.statut in STATUTS_EN_ATTENTE
+            for d in b.dossiers for ref in b.references
+        }
+    lignes = []
+    for p in toutes:
+        if filtre is not None and p.etat is not filtre:
+            continue
+        quand, action = echeances.get((p.dossier, p.reference), (None, _action_humaine(p)))
+        b = en_attente.get((p.dossier, p.reference))
+        if b is not None and p.etat not in ETATS_TERMINAUX:
+            action = f"brouillon {b.id_relance} {b.statut.value} : valider puis envoyer"
+        lignes.append(LigneSuivi(p, quand, action))
+    groupes: dict[tuple[str, str], list[PieceAttendue]] = {}
+    for p in toutes:
+        groupes.setdefault((p.dossier, p.periode), []).append(p)
+    periodes = tuple((d, per, etats.etat_periode(ps)) for (d, per), ps in sorted(groupes.items()))
+    return SuiviPieces(aujourdhui, tuple(lignes), periodes)
+
+
 def verifier_audit(instance: Instance | Path | str) -> ResultatVerification:
     inst = Instance.de(instance)
     if not inst.audit.exists():
@@ -1013,8 +1255,10 @@ def brouillons(instance: Instance | Path | str,
 
 
 __all__ = [
-    "CollisionReferences", "EnvoiRefuse", "ErreurCycle", "Instance", "ResumeCycle",
-    "ValidateurRefuse", "brouillons", "collisions_de_reference", "controler_piece",
+    "CollisionReferences", "EnvoiRefuse", "ErreurCycle", "Instance", "LigneSuivi",
+    "ResumeCycle", "SuiviPieces", "ValidateurRefuse", "arbitrer_piece", "bloquer_piece",
+    "brouillons", "collisions_de_reference", "controler_piece", "debloquer_piece",
+    "saisir_promesse", "suivi_pieces",
     "envoyer_relance", "executer_cycle", "exiger_validateur", "exporter", "lire_entrees",
     "lire_validateurs", "lister_file", "pieces", "rattacher_piece", "rejeter_relance",
     "repercuter_envois", "trancher_envoi", "valider_relance", "verifier_audit",

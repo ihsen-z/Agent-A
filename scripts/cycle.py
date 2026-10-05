@@ -2,9 +2,14 @@
 """Cycle du MVP : detection, relances validees par un humain, rattachement des pieces.
 
 Sous-commandes : cycle, valider, rejeter, envoyer, trancher, file, rattacher,
-controler, verifier-audit, exporter. `valider`, `rejeter`, `trancher`,
-`rattacher` et `controler` exigent `--par NOM`, NOM etant declare dans
-`<instance>/validateurs.txt`. Le cycle ne valide jamais rien lui-meme.
+controler, promesse, arbitrer, bloquer, debloquer, pieces, verifier-audit,
+exporter. Toute decision humaine (valider, rejeter, trancher, rattacher,
+controler, promesse, arbitrer, bloquer, debloquer) exige `--par NOM`, NOM etant
+declare dans `<instance>/validateurs.txt`. Le cycle ne valide jamais rien lui-meme.
+`pieces` est en lecture seule.
+
+Exception de nommage : pour `promesse`, `--date` est la date PROMISE par le
+client (comme demande) ; le jour courant s'y donne avec `--le`.
 
 `--date` vaut aujourd'hui par defaut (seul endroit ou l'horloge est lue) ;
 l'heure de `maintenant` vient de `--heure` (defaut : l'heure courante si
@@ -29,13 +34,29 @@ from rapprochement.envoi import (                     # noqa: E402
     ErreurEnvoi,
 )
 from rapprochement.etats import TransitionInterdite   # noqa: E402
+from rapprochement.modeles import EtatPiece           # noqa: E402
 
 FUSEAU = ZoneInfo("Europe/Paris")
 
 
+def _date(valeur: str) -> dt.date:
+    try:
+        return dt.date.fromisoformat(valeur)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"date invalide {valeur!r} (attendu AAAA-MM-JJ)") from None
+
+
+def _heure(valeur: str) -> str:
+    try:
+        dt.time.fromisoformat(valeur)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"heure invalide {valeur!r} (attendu HH:MM)") from None
+    return valeur
+
+
 def _instants(args: argparse.Namespace) -> tuple[dt.date, dt.datetime]:
-    if args.date:
-        jour = dt.date.fromisoformat(args.date)
+    if args.jour:
+        jour = args.jour
         heure = dt.time.fromisoformat(args.heure) if args.heure else dt.time(10, 0)
         return jour, dt.datetime.combine(jour, heure, tzinfo=FUSEAU)
     maintenant = dt.datetime.now(FUSEAU)
@@ -45,12 +66,16 @@ def _instants(args: argparse.Namespace) -> tuple[dt.date, dt.datetime]:
 
 
 def _parseur() -> argparse.ArgumentParser:
-    commun = argparse.ArgumentParser(add_help=False)
-    commun.add_argument("--instance", required=True, help="repertoire de l'instance du cabinet")
-    commun.add_argument("--date", help="AAAA-MM-JJ (defaut : aujourd'hui)")
-    commun.add_argument("--heure", help="HH:MM, heure locale Europe/Paris")
+    base = argparse.ArgumentParser(add_help=False)
+    base.add_argument("--instance", required=True, help="repertoire de l'instance du cabinet")
+    base.add_argument("--heure", type=_heure, help="HH:MM, heure locale Europe/Paris")
+    commun = argparse.ArgumentParser(add_help=False, parents=[base])
+    commun.add_argument("--date", dest="jour", type=_date, help="AAAA-MM-JJ (defaut : aujourd'hui)")
     humain = argparse.ArgumentParser(add_help=False)
     humain.add_argument("--par", required=True, help="nom declare dans validateurs.txt")
+    piece = argparse.ArgumentParser(add_help=False)
+    piece.add_argument("--dossier", required=True)
+    piece.add_argument("--reference", required=True)
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sous = p.add_subparsers(dest="commande", required=True)
@@ -87,6 +112,22 @@ def _parseur() -> argparse.ArgumentParser:
     g.add_argument("--conforme", dest="conforme", action="store_true")
     g.add_argument("--non-conforme", dest="conforme", action="store_false")
     s.add_argument("--motif", default="")
+
+    s = sous.add_parser("promesse", parents=[base, humain, piece],
+                        help="saisit la date promise par le client (DEMANDEE -> PROMISE)")
+    s.add_argument("--date", dest="date_promesse", type=_date, required=True,
+                   help="date PROMISE, AAAA-MM-JJ, dans [aujourd'hui, +15 jours]")
+    s.add_argument("--le", dest="jour", type=_date, help="jour courant AAAA-MM-JJ (defaut : aujourd'hui)")
+    s = sous.add_parser("arbitrer", parents=[commun, humain, piece],
+                        help="classe sans suite une piece ESCALADEE")
+    s.add_argument("--motif", required=True)
+    s = sous.add_parser("bloquer", parents=[commun, humain, piece], help="bloque une piece")
+    s.add_argument("--motif", required=True)
+    s = sous.add_parser("debloquer", parents=[commun, humain, piece], help="debloque une piece")
+    s.add_argument("--motif", required=True)
+    s = sous.add_parser("pieces", parents=[commun], help="liste les pieces et l'etat des periodes")
+    s.add_argument("--dossier")
+    s.add_argument("--etat", help="filtre : " + ", ".join(e.value for e in EtatPiece))
 
     sous.add_parser("verifier-audit", parents=[commun], help="verifie le journal d'audit")
     s = sous.add_parser("exporter", parents=[commun], help="export JSON complet du depot")
@@ -139,6 +180,22 @@ def _executer(args: argparse.Namespace) -> int:
         p = cycle.controler_piece(inst, args.dossier, args.reference, args.par,
                                   conforme=args.conforme, motif=args.motif, maintenant=maintenant)
         print(f"{p.dossier}/{p.reference} -> {p.etat.value}")
+        return 0
+    if c in ("promesse", "arbitrer", "bloquer", "debloquer"):
+        if c == "promesse":
+            p = cycle.saisir_promesse(inst, args.dossier, args.reference, args.par,
+                                      date_promesse=args.date_promesse, maintenant=maintenant)
+        else:
+            fonction = {"arbitrer": cycle.arbitrer_piece, "bloquer": cycle.bloquer_piece,
+                        "debloquer": cycle.debloquer_piece}[c]
+            p = fonction(inst, args.dossier, args.reference, args.par, motif=args.motif,
+                         maintenant=maintenant)
+        drapeau = " (bloquee)" if p.bloquee else ""
+        promesse = f" promise le {p.date_promesse.isoformat()}" if p.date_promesse else ""
+        print(f"{p.dossier}/{p.reference} -> {p.etat.value}{promesse}{drapeau}")
+        return 0
+    if c == "pieces":
+        print(cycle.suivi_pieces(inst, aujourdhui, dossier=args.dossier, etat=args.etat).texte(), end="")
         return 0
     if c == "verifier-audit":
         r = cycle.verifier_audit(inst)

@@ -142,6 +142,11 @@ def inst(tmp_path: Path) -> cycle.Instance:
     return nouvelle_instance(tmp_path / "instance")
 
 
+def lire_csv(chemin: Path) -> list[dict[str, str]]:
+    with open(chemin, encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
 def lancer(entree: Path, inst: cycle.Instance, d: dt.date, **kw) -> cycle.ResumeCycle:
     return cycle.executer_cycle(entree, inst, d, a_10h(d), **kw)
 
@@ -536,11 +541,19 @@ def test_evolution_sur_plusieurs_jours_jusqu_a_l_escalade(entree, inst):
     r17 = lancer(entree, inst, jour(17))
     assert r17.transitions == 0 and r17.brouillons_crees == 0
     assert _etats(inst) == {(EtatPiece.DEMANDEE, 3)}
+    assert lire_csv(inst.sortie / "escalades.csv") == []
 
     # Jour 18 : 14 jours ouvres depuis la premiere demande -> ESCALADE reelle.
     r18 = lancer(entree, inst, jour(18))
     assert r18.transitions == 5 and r18.brouillons_crees == 0
     assert _etats(inst) == {(EtatPiece.ESCALADEE, 3)}
+    escalades = lire_csv(inst.sortie / "escalades.csv")
+    assert [(l["dossier"], l["reference"]) for l in escalades] == [
+        ("ALPHA", "A-003"), ("ALPHA", "A-001"), ("ALPHA", "A-002"), ("BETA", "B-001"), ("GAMMA", "G-001")]
+    assert {
+        k: escalades[1][k] for k in ("montant", "libelle", "nb_relances", "date_premiere_demande")
+    } == {"montant": "120.00", "libelle": "CB LOXAM LOCATION", "nb_relances": "3",
+          "date_premiere_demande": "2026-10-05"}
 
     # Plus aucune relance ensuite.
     assert lancer(entree, inst, jour(21)).brouillons_crees == 0
@@ -956,3 +969,281 @@ def test_defaut_depot_export_non_reproductible(tmp_path, monkeypatch):
         exports.append(Path(chemin).read_bytes())
         depot.fermer()
     assert exports[0] == exports[1]
+
+
+# ---------------------------------------------------------------------------
+# Suivi humain : promesse, arbitrage, blocage, liste des pieces
+# ---------------------------------------------------------------------------
+
+
+def actions_audit(inst: cycle.Instance) -> list[str]:
+    return [e.action for e in JournalAudit(inst.audit).lire()]
+
+
+def amener_a_l_escalade(entree: Path, inst: cycle.Instance) -> None:
+    for n in (0, 7, 14):
+        lancer(entree, inst, jour(n))
+        valider_et_envoyer(inst, jour(n))
+    lancer(entree, inst, jour(18))
+    assert _etats(inst) == {(EtatPiece.ESCALADEE, 3)}
+
+
+def cli(capsys, inst: cycle.Instance, commande: str, *args: str, date: dt.date | None = J0):
+    options = ["--instance", str(inst.racine)]
+    if date is not None:
+        options += (["--le"] if commande == "promesse" else ["--date"]) + [date.isoformat()]
+    rc = charger_cli().main([commande, *options, *args])
+    sortie = capsys.readouterr()
+    assert "Traceback" not in sortie.out + sortie.err
+    return rc, sortie.out, sortie.err
+
+
+def test_arbitrer_escaladee_jusqu_a_periode_complete(entree, inst):
+    amener_a_l_escalade(entree, inst)
+    suivi = cycle.suivi_pieces(inst, jour(18), etat="escaladee")
+    assert len(suivi.lignes) == 5 and all("arbitrage" in l.action for l in suivi.lignes)
+    p = cycle.arbitrer_piece(inst, "ALPHA", "A-003", "paul martin",
+                             motif="Fournisseur liquide, montant non significatif",
+                             maintenant=a_10h(jour(18)))
+    assert p.etat is EtatPiece.CLOSE_SANS_SUITE
+    toutes = cycle.pieces(inst)
+    aout = [x for x in toutes if (x.dossier, x.periode) == ("ALPHA", "2026-08")]
+    sept = [x for x in toutes if (x.dossier, x.periode) == ("ALPHA", "2026-09")]
+    assert etats.etat_periode(aout) is EtatPeriode.COMPLETE
+    assert etats.etat_periode(sept) is EtatPeriode.EN_COLLECTE
+    periodes = {(d, per): e for d, per, e in cycle.suivi_pieces(inst, jour(18)).periodes}
+    assert periodes[("ALPHA", "2026-08")] is EtatPeriode.COMPLETE
+
+    journal = JournalAudit(inst.audit).lire()
+    (arbitrage,) = [e for e in journal if e.action == "arbitrage"]
+    assert arbitrage.acteur == "Paul Martin" and arbitrage.objet == "ALPHA/A-003"
+    assert arbitrage.details["motif"].startswith("Fournisseur liquide")
+    n = len(journal)
+    cycle.arbitrer_piece(inst, "ALPHA", "A-003", VALIDEUSE, motif="rejeu",
+                         maintenant=a_10h(jour(18)))                   # rejeu : sans effet
+    assert len(JournalAudit(inst.audit).lire()) == n
+
+    lancer(entree, inst, jour(21))
+    assert [l["reference"] for l in lire_csv(inst.sortie / "escalades.csv")] == [
+        "A-001", "A-002", "B-001", "G-001"]
+    periodes_csv = {(l["dossier"], l["periode"]): l["etat"] for l in lire_csv(inst.sortie / "periodes.csv")}
+    assert periodes_csv[("ALPHA", "2026-08")] == "complete"
+    assert JournalAudit(inst.audit).verifier().ok
+
+
+def test_arbitrer_refus(entree, inst):
+    lancer(entree, inst, J0)
+    valider_et_envoyer(inst, J0)
+    avant, journal_avant = etat_depot(inst), actions_audit(inst)
+    m = a_10h(J0)
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.arbitrer_piece(inst, "ALPHA", "A-001", "Mallory", motif="x", maintenant=m)
+    with pytest.raises(cycle.ErreurCycle, match="introuvable"):
+        cycle.arbitrer_piece(inst, "ALPHA", "Z-999", VALIDEUSE, motif="x", maintenant=m)
+    with pytest.raises(cycle.ErreurCycle, match="motif"):
+        cycle.arbitrer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="  ", maintenant=m)
+    with pytest.raises(etats.TransitionInterdite, match="arbitrage_classement interdit depuis demandee"):
+        cycle.arbitrer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="x", maintenant=m)
+    assert etat_depot(inst) == avant and actions_audit(inst) == journal_avant
+
+
+def test_promesse_puis_retour_en_demandee_trois_jours_ouvres_apres(entree, inst):
+    lancer(entree, inst, J0)
+    valider_et_envoyer(inst, J0)
+    promise_le = dt.date(2026, 10, 9)                                  # vendredi
+    p = cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=promise_le,
+                              maintenant=a_10h(jour(2)))
+    assert (p.etat, p.date_promesse) == (EtatPiece.PROMISE, promise_le)
+    (entree_audit,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "promesse_saisie"]
+    assert entree_audit.acteur == VALIDEUSE
+    suivi = {l.piece.reference: l for l in cycle.suivi_pieces(inst, jour(2)).lignes}
+    assert suivi["A-001"].echeance == dt.date(2026, 10, 14)            # J+3 ouvres apres la date
+    assert "promesse" in suivi["A-001"].action
+
+    lancer(entree, inst, jour(7))                                      # lundi 12 : relance des autres
+    nouveaux = [b for b in cycle.brouillons(inst) if b.cree_le == jour(7)]
+    assert nouveaux and all("A-001" not in b.references for b in nouveaux)
+    lancer(entree, inst, dt.date(2026, 10, 13))                        # 2e jour ouvre : encore promise
+    assert pieces_par_ref(inst)["A-001"].etat is EtatPiece.PROMISE
+    r = lancer(entree, inst, dt.date(2026, 10, 14))                    # 3e jour ouvre : retour
+    a001 = pieces_par_ref(inst)["A-001"]
+    assert r.transitions == 1
+    assert (a001.etat, a001.date_promesse, a001.nb_relances) == (EtatPiece.DEMANDEE, None, 1)
+
+
+def test_promesse_refus_et_rejeu(entree, inst):
+    lancer(entree, inst, J0)
+    m = a_10h(J0)
+    with pytest.raises(etats.TransitionInterdite, match="promesse_saisie interdit depuis attendue"):
+        cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=jour(3), maintenant=m)
+    valider_et_envoyer(inst, J0)
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.saisir_promesse(inst, "ALPHA", "A-001", "bot", date_promesse=jour(3), maintenant=m)
+    with pytest.raises(cycle.ErreurCycle, match="introuvable"):
+        cycle.saisir_promesse(inst, "BETA", "A-001", VALIDEUSE, date_promesse=jour(3), maintenant=m)
+    with pytest.raises(etats.TransitionInterdite, match="hors de"):
+        cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=jour(20), maintenant=m)
+    cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=jour(3), maintenant=m)
+    n = len(actions_audit(inst))
+    cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=jour(3), maintenant=m)
+    assert len(actions_audit(inst)) == n                               # rejeu : sans effet
+    with pytest.raises(etats.TransitionInterdite):                     # autre date : refus clair
+        cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=jour(4), maintenant=m)
+
+
+def test_promesse_impossible_sur_une_piece_escaladee(entree, inst):
+    """Constat (etats) : une fois ESCALADEE, une promesse obtenue par le responsable
+    ne peut pas etre enregistree ; seuls arbitrer, rattacher ou exclure restent."""
+    amener_a_l_escalade(entree, inst)
+    with pytest.raises(etats.TransitionInterdite, match="promesse_saisie interdit depuis escaladee"):
+        cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=jour(20),
+                              maintenant=a_10h(jour(18)))
+
+
+def test_bloquer_puis_debloquer(entree, inst):
+    lancer(entree, inst, J0)
+    valider_et_envoyer(inst, J0)
+    m3 = a_10h(jour(3))
+    p = cycle.bloquer_piece(inst, "ALPHA", "A-002", VALIDEUSE, motif="Litige fournisseur", maintenant=m3)
+    assert p.bloquee and p.motif_blocage == "Litige fournisseur"
+    n = len(actions_audit(inst))
+    cycle.bloquer_piece(inst, "ALPHA", "A-002", VALIDEUSE, motif="Litige fournisseur", maintenant=m3)
+    assert len(actions_audit(inst)) == n                               # rejeu : sans effet
+    with pytest.raises(etats.TransitionInterdite, match="bloquee"):
+        cycle.bloquer_piece(inst, "ALPHA", "A-002", VALIDEUSE, motif="autre", maintenant=m3)
+    with pytest.raises(cycle.ErreurCycle, match="reserve"):
+        cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="[cycle] faux", maintenant=m3)
+    with pytest.raises(cycle.ErreurCycle, match="motif"):
+        cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="", maintenant=m3)
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.debloquer_piece(inst, "ALPHA", "A-002", "Inconnu", motif="x", maintenant=m3)
+    with pytest.raises(cycle.ErreurCycle, match="introuvable"):
+        cycle.bloquer_piece(inst, "ALPHA", "NOPE", VALIDEUSE, motif="x", maintenant=m3)
+
+    r7 = lancer(entree, inst, jour(7))                                 # bloquee : pas relancee
+    (alpha,) = [b for b in cycle.brouillons(inst) if b.cree_le == jour(7) and "ALPHA" in b.dossiers]
+    assert alpha.references == ("A-001", "A-003") and r7.bloquees == 1
+    suivi = {l.piece.reference: l for l in cycle.suivi_pieces(inst, jour(7)).lignes}
+    assert suivi["A-002"].echeance is None and "Litige fournisseur" in suivi["A-002"].action
+    valider_et_envoyer(inst, jour(7))
+
+    with pytest.raises(cycle.ErreurCycle, match="motif"):
+        cycle.debloquer_piece(inst, "ALPHA", "A-002", VALIDEUSE, motif=" ", maintenant=a_10h(jour(7)))
+    p = cycle.debloquer_piece(inst, "ALPHA", "A-002", "Paul Martin", motif="Litige regle",
+                              maintenant=a_10h(jour(7)))
+    assert not p.bloquee and p.motif_blocage == ""
+    n = len(actions_audit(inst))
+    cycle.debloquer_piece(inst, "ALPHA", "A-002", "Paul Martin", motif="Litige regle",
+                          maintenant=a_10h(jour(7)))
+    assert len(actions_audit(inst)) == n
+    lancer(entree, inst, jour(14))                                     # de nouveau relancee
+    assert any("A-002" in b.references for b in cycle.brouillons(inst) if b.cree_le == jour(14))
+    acteurs = {(e.action, e.acteur) for e in JournalAudit(inst.audit).lire()}
+    assert ("blocage", VALIDEUSE) in acteurs and ("deblocage", "Paul Martin") in acteurs
+
+
+def test_debloquer_un_blocage_du_cycle_est_respecte(entree, tmp_path, inst):
+    lancer(entree, inst, J0)
+    valider_et_envoyer(inst, J0)
+    entree2 = ecrire_entree(tmp_path / "e2", pieces=[
+        ["P-77", "ALPHA", "orange.pdf", "Orange Pro", "2026-09-15", "59.90", "EUR", "2026-10-06", "email"],
+    ])
+    lancer(entree2, inst, jour(7))
+    assert pieces_par_ref(inst)["A-002"].bloquee
+    cycle.debloquer_piece(inst, "ALPHA", "A-002", VALIDEUSE, motif="P-77 concerne une autre facture",
+                          maintenant=a_10h(jour(7)))
+    lancer(entree2, inst, jour(8))
+    assert not pieces_par_ref(inst)["A-002"].bloquee
+
+
+def test_pieces_lecture_seule_triee_et_echeances(entree, tmp_path, capsys):
+    inst = nouvelle_instance(tmp_path / "sans_validateurs", validateurs=None)
+    assert cycle.suivi_pieces(inst, J0).lignes == ()                    # instance vide
+    lancer(entree, inst, J0)
+    suivi = cycle.suivi_pieces(inst, J0)
+    assert all("brouillon" in l.action for l in suivi.lignes)           # brouillons a valider
+    avant, audit_avant = etat_depot(inst), inst.audit.read_bytes()
+    rc, sortie1, _ = cli(capsys, inst, "pieces")
+    rc2, sortie2, _ = cli(capsys, inst, "pieces")
+    assert rc == rc2 == 0 and sortie1 == sortie2
+    assert etat_depot(inst) == avant and inst.audit.read_bytes() == audit_avant
+    lignes = [l for l in sortie1.splitlines() if l.startswith("  ") and "EUR" in l]
+    assert [l.split()[1] for l in lignes] == ["A-003", "A-001", "A-002", "B-001", "G-001"]
+    assert "ALPHA          2026-08 en_collecte" in sortie1
+
+    rc, sortie, _ = cli(capsys, inst, "pieces", "--dossier", "BETA")
+    assert rc == 0 and "B-001" in sortie and "A-001" not in sortie and "GAMMA" not in sortie
+    rc, sortie, _ = cli(capsys, inst, "pieces", "--etat", "escaladee")
+    assert rc == 0 and "Pieces attendues au 2026-10-05 : 0" in sortie
+    rc, _, err = cli(capsys, inst, "pieces", "--etat", "perdue")
+    assert rc == 1 and "etat inconnu" in err
+
+
+def test_echeances_coherentes_avec_le_cycle(entree, inst):
+    """L'echeance annoncee est le jour ou le cycle agit reellement."""
+    lancer(entree, inst, J0)
+    valider_et_envoyer(inst, J0)
+    suivi = {l.piece.reference: l for l in cycle.suivi_pieces(inst, J0).lignes}
+    assert suivi["A-001"].echeance == jour(7) and suivi["A-001"].action == "relance niveau 2"
+    for n in (7, 14):
+        lancer(entree, inst, jour(n))
+        valider_et_envoyer(inst, jour(n))
+    suivi = {l.piece.reference: l for l in cycle.suivi_pieces(inst, jour(14)).lignes}
+    assert {(l.echeance, l.action) for l in suivi.values()} == {(jour(18), "escalade au responsable")}
+    assert lancer(entree, inst, jour(17)).transitions == 0
+    assert lancer(entree, inst, jour(18)).transitions == 5
+
+
+def test_cli_suivi_humain(entree, inst, capsys):
+    amener_a_l_escalade(entree, inst)
+    j = jour(18)
+    piece = ["--dossier", "ALPHA", "--reference"]
+    # arbitrer
+    assert cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "x", "--par", "Mallory", date=j)[0] == 1
+    rc, _, err = cli(capsys, inst, "arbitrer", *piece, "Z-9", "--motif", "x", "--par", VALIDEUSE, date=j)
+    assert rc == 1 and "introuvable" in err
+    rc, _, err = cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "", "--par", VALIDEUSE, date=j)
+    assert rc == 1 and "motif" in err
+    rc, out, _ = cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "classe", "--par", VALIDEUSE, date=j)
+    assert rc == 0 and "close_sans_suite" in out
+    rc, _, err = cli(capsys, inst, "arbitrer", "--dossier", "BETA", "--reference", "B-001",
+                     "--motif", "x", "--par", VALIDEUSE, date=j)
+    assert rc == 0
+    # bloquer / debloquer sur une piece escaladee
+    rc, out, _ = cli(capsys, inst, "bloquer", *piece, "A-001", "--motif", "litige", "--par", VALIDEUSE, date=j)
+    assert rc == 0 and "(bloquee)" in out
+    rc, _, err = cli(capsys, inst, "bloquer", *piece, "A-001", "--motif", "autre", "--par", VALIDEUSE, date=j)
+    assert rc == 1 and "REFUS (TransitionInterdite)" in err
+    assert cli(capsys, inst, "debloquer", *piece, "A-001", "--motif", "ok", "--par", "X", date=j)[0] == 1
+    rc, out, _ = cli(capsys, inst, "debloquer", *piece, "A-001", "--motif", "ok", "--par", VALIDEUSE, date=j)
+    assert rc == 0 and "(bloquee)" not in out
+    rc, _, err = cli(capsys, inst, "bloquer", *piece, "A-404", "--motif", "x", "--par", VALIDEUSE, date=j)
+    assert rc == 1 and "introuvable" in err
+    # promesse : --date est la date promise, --le le jour courant
+    rc, _, err = cli(capsys, inst, "promesse", *piece, "A-002", "--date", "2026-10-26",
+                     "--par", VALIDEUSE, date=j)
+    assert rc == 1 and "promesse_saisie interdit depuis escaladee" in err
+    assert cli(capsys, inst, "promesse", *piece, "A-002", "--date", "2026-10-26",
+               "--par", "Mallory", date=j)[0] == 1
+    assert cli(capsys, inst, "promesse", *piece, "Z-1", "--date", "2026-10-26",
+               "--par", VALIDEUSE, date=j)[0] == 1
+    with pytest.raises(SystemExit):                                    # date illisible : argparse
+        charger_cli().main(["promesse", "--instance", str(inst.racine), *piece, "A-002",
+                            "--date", "2026-13-40", "--par", VALIDEUSE])
+    with pytest.raises(SystemExit):                                    # --par obligatoire
+        charger_cli().main(["arbitrer", "--instance", str(inst.racine), *piece, "A-002", "--motif", "x"])
+    # pieces : l'etat calcule des periodes suit
+    rc, out, _ = cli(capsys, inst, "pieces", date=j)
+    assert rc == 0 and "ALPHA          2026-08 complete" in out and "BETA           2026-09 complete" in out
+    assert JournalAudit(inst.audit).verifier().ok
+
+
+def test_cli_promesse_succes(entree, inst, capsys):
+    lancer(entree, inst, J0)
+    valider_et_envoyer(inst, J0)
+    rc, out, _ = cli(capsys, inst, "promesse", "--dossier", "ALPHA", "--reference", "A-001",
+                     "--date", "2026-10-09", "--par", "marie durand", date=jour(2))
+    assert rc == 0 and "promise le 2026-10-09" in out
+    rc, _, err = cli(capsys, inst, "promesse", "--dossier", "ALPHA", "--reference", "A-002",
+                     "--date", "2026-12-01", "--par", VALIDEUSE, date=jour(2))
+    assert rc == 1 and "hors de" in err
