@@ -35,6 +35,7 @@ from rapprochement.routage import (
     DOMAINES_GRAND_PUBLIC_CONTRAT,
     adresses_par_dossier,
     cle_idempotence,
+    domaines_par_dossier,
     extraire_montants,
     lire_dossier_eml,
     lire_eml,
@@ -90,9 +91,9 @@ def message(
     )
 
 
-def route_un(msg: MessageEntrant, adresses, attendues, deja_vus=()) -> DecisionRoutage:
+def route_un(msg: MessageEntrant, adresses, attendues, deja_vus=(), domaines=None) -> DecisionRoutage:
     decisions = router(msg, adresses=adresses, attendues=attendues, deja_vus=deja_vus,
-                       aujourdhui=AUJOURDHUI)
+                       aujourdhui=AUJOURDHUI, domaines=domaines)
     assert len(decisions) == 1
     return decisions[0]
 
@@ -219,12 +220,44 @@ def test_attendues_d_un_dossier_absent_des_adresses_ignorees() -> None:
 @pytest.mark.parametrize(
     "expediteur",
     ["", "   ", "pas-une-adresse", "a@b@alpha.fr", "Jean <compta@alpha.fr>",
-     "compta@alpha.fr, x@beta.fr", "compta@", "@alpha.fr", "compta@alpha.fr."],
+     "compta@alpha.fr, x@beta.fr", "compta@", "@alpha.fr", "+tag@alpha.fr", "compta@alpha.fr.."],
 )
 def test_expediteur_illisible_jamais_route(expediteur: str) -> None:
     pieces = [attendue("A-1", "A", "89.90")]
     d = route_un(message(expediteur, "f_89,90.pdf"), ADRESSES, pieces)
     assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+
+
+@pytest.mark.parametrize("exp", ["jean+x@client.fr", "Jean+X@CLIENT.FR", "jean@client.fr.",
+                                 "jean+a+b@client.fr"])
+def test_suffixe_plus_meme_boite(exp: str) -> None:
+    adresses = {"A": frozenset({"jean@client.fr"}), "B": frozenset({"paul@beta.fr"})}
+    pieces = [attendue("A-1", "A", "89.90"), attendue("B-1", "B", "89.90")]
+    d = route_un(message(exp, "f_89,90.pdf"), adresses, pieces)
+    assert (d.statut, d.dossier, d.reference_operation) == (StatutRoutage.PROPOSEE, "A", "A-1")
+
+
+def test_suffixe_plus_cote_referentiel() -> None:
+    adresses = {"A": frozenset({"jean+cabinet@client.fr"})}
+    d = route_un(message("jean@client.fr", "f_89,90.pdf"), adresses, [attendue("A-1", "A", "89.90")])
+    assert (d.statut, d.dossier) == (StatutRoutage.PROPOSEE, "A")
+
+
+@pytest.mark.parametrize("exp", ["jean+x@autre.fr", "j.ean@client.fr", "jean@sub.client.fr",
+                                 "jeanx@client.fr", "x+jean@client.fr"])
+def test_suffixe_plus_rien_d_autre_n_est_normalise(exp: str) -> None:
+    adresses = {"A": frozenset({"jean@client.fr"})}
+    d = route_un(message(exp, "f_89,90.pdf"), adresses, [attendue("A-1", "A", "89.90")])
+    assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+
+
+def test_contacts_identiques_apres_suffixe_plus_ambigu() -> None:
+    adresses = {"A": frozenset({"jean+a@client.fr"}), "B": frozenset({"JEAN+b@client.fr"})}
+    pieces = [attendue("A-1", "A", "89.90")]
+    for exp in ("jean@client.fr", "jean+a@client.fr", "jean+b@client.fr"):
+        d = route_un(message(exp, "f_89,90.pdf"), adresses, pieces)
+        assert_non_routee(d, MotifNonRoute.DOSSIER_AMBIGU)
+        assert d.dossier is None
 
 
 def test_casse_et_espaces_de_l_expediteur() -> None:
@@ -238,6 +271,26 @@ def test_casse_et_espaces_de_l_expediteur() -> None:
 # ---------------------------------------------------------------------------
 
 
+# Messageries absentes de toute liste noire (revue adversariale) : seule la
+# regle "domaine DECLARE uniquement" les neutralise.
+HORS_LISTE = ["hotmail.ca", "yahoo.ca", "live.co.uk", "t-online.de", "libero.it", "videotron.ca"]
+
+
+@pytest.mark.parametrize("domaine", HORS_LISTE)
+def test_messagerie_hors_liste_noire_ne_capte_rien(domaine: str) -> None:
+    # Le contact de A est chez ce fournisseur ; A a la seule piece au bon montant.
+    adresses = {"A": frozenset({f"gerant.a@{domaine}"}), "B": frozenset({"paul@client-b.fr"})}
+    pieces = [attendue("A-1", "A", "89.90"), attendue("B-1", "B", "120.00")]
+    for domaines in (None, {}, {"B": frozenset({"client-b.fr"})}):
+        d = route_un(message(f"inconnu@{domaine}", "facture_89,90.pdf"), adresses, pieces,
+                     domaines=domaines)
+        assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+        assert d.dossier is None
+    # L'adresse exacte du contact, elle, reste une preuve.
+    d = route_un(message(f"gerant.a@{domaine}", "facture_89,90.pdf"), adresses, pieces)
+    assert (d.statut, d.dossier, d.reference_operation) == (StatutRoutage.PROPOSEE, "A", "A-1")
+
+
 @pytest.mark.parametrize("domaine", sorted(DOMAINES_GRAND_PUBLIC_CONTRAT) + ["live.fr", "msn.com", "mail.gmail.com"])
 def test_domaine_grand_public_jamais_une_preuve(domaine: str) -> None:
     # A est le SEUL dossier sur ce domaine, et A a une piece au bon montant.
@@ -246,6 +299,16 @@ def test_domaine_grand_public_jamais_une_preuve(domaine: str) -> None:
     d = route_un(message(f"inconnu@{domaine}", "facture_89,90.pdf"), adresses, pieces)
     assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
     assert d.dossier is None
+
+
+@pytest.mark.parametrize("domaine", ["gmail.com", "GMAIL.com.", "orange.fr", "msn.com", "mail.gmail.com"])
+def test_domaine_grand_public_declare_par_erreur_refuse(domaine: str) -> None:
+    adresses = {"A": frozenset({"compta@alpha.fr"})}
+    pieces = [attendue("A-1", "A", "89.90")]
+    exp = "inconnu@" + domaine.lower().rstrip(".")
+    d = route_un(message(exp, "facture_89,90.pdf"), adresses, pieces, domaines={"A": [domaine]})
+    assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+    assert domaines_par_dossier({"A": dossier("A", "compta@alpha.fr", domaines=(domaine,))}) == {"A": frozenset()}
 
 
 def test_adresse_exacte_grand_public_reste_valable() -> None:
@@ -265,18 +328,26 @@ def test_liste_du_contrat_incluse() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_domaine_entreprise_partage_ambigu() -> None:
+def test_domaine_declare_par_deux_dossiers_ambigu() -> None:
     adresses = {"A": frozenset({"pdg@groupe.fr"}), "B": frozenset({"daf@groupe.fr"})}
+    domaines = {"A": ["groupe.fr"], "B": ["Groupe.FR."]}
     pieces = [attendue("A-1", "A", "89.90")]
-    d = route_un(message("compta@groupe.fr", "f_89,90.pdf"), adresses, pieces)
+    d = route_un(message("compta@groupe.fr", "f_89,90.pdf"), adresses, pieces, domaines=domaines)
     assert_non_routee(d, MotifNonRoute.DOSSIER_AMBIGU)
     assert d.dossier is None
+
+
+def test_domaine_commun_non_declare_inconnu() -> None:
+    adresses = {"A": frozenset({"pdg@groupe.fr"}), "B": frozenset({"daf@groupe.fr"})}
+    d = route_un(message("compta@groupe.fr", "f_89,90.pdf"), adresses, [attendue("A-1", "A", "89.90")])
+    assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
 
 
 def test_domaine_partage_mais_adresse_exacte_unique() -> None:
     adresses = {"A": frozenset({"pdg@groupe.fr"}), "B": frozenset({"daf@groupe.fr"})}
     pieces = [attendue("A-1", "A", "89.90"), attendue("B-1", "B", "89.90")]
-    d = route_un(message("daf@groupe.fr", "f_89,90.pdf"), adresses, pieces)
+    d = route_un(message("daf@groupe.fr", "f_89,90.pdf"), adresses, pieces,
+                 domaines={"A": ["groupe.fr"], "B": ["groupe.fr"]})
     assert (d.statut, d.dossier, d.reference_operation) == (StatutRoutage.PROPOSEE, "B", "B-1")
 
 
@@ -294,17 +365,49 @@ def test_adresse_grand_public_partagee_ambigue() -> None:
     assert d.dossier is None
 
 
-def test_domaine_unique_non_grand_public_accepte() -> None:
+@pytest.mark.parametrize("declare", ["alpha.fr", "ALPHA.fr", "alpha.fr.", " alpha.fr "])
+def test_domaine_declare_route(declare: str) -> None:
+    pieces = [attendue("A-1", "A", "89.90"), attendue("B-1", "B", "89.90")]
+    d = route_un(message("assistante@alpha.fr", "f_89,90.pdf"), ADRESSES, pieces,
+                 domaines={"A": [declare], "B": ["beta.fr"]})
+    assert (d.statut, d.dossier, d.reference_operation) == (StatutRoutage.PROPOSEE, "A", "A-1")
+
+
+def test_domaine_declare_idna() -> None:
     pieces = [attendue("A-1", "A", "89.90")]
-    d = route_un(message("assistante@alpha.fr", "f_89,90.pdf"), ADRESSES, pieces)
+    for declare, exp in (("société.fr", "x@xn--socit-esab.fr"), ("xn--socit-esab.fr", "x@société.fr")):
+        d = route_un(message(exp, "f_89,90.pdf"), {"A": frozenset()}, pieces, domaines={"A": [declare]})
+        assert (d.statut, d.dossier) == (StatutRoutage.PROPOSEE, "A")
+    # Homoglyphe cyrillique : autre domaine, aucune correspondance.
+    d = route_un(message("x@\u0430lpha.fr", "f_89,90.pdf"), ADRESSES, pieces, domaines={"A": ["alpha.fr"]})
+    assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+
+
+@pytest.mark.parametrize("domaines", [None, {}, {"A": []}, {"B": ["beta.fr"]}])
+def test_domaine_non_declare_ne_route_plus(domaines) -> None:
+    # alpha.fr est le domaine du contact de A, mais personne ne l'a declare.
+    pieces = [attendue("A-1", "A", "89.90")]
+    d = route_un(message("assistante@alpha.fr", "f_89,90.pdf"), ADRESSES, pieces, domaines=domaines)
+    assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+    assert d.dossier is None
+
+
+def test_adresse_exacte_prime_sur_domaine_declare() -> None:
+    # B a declare alpha.fr (filiale) mais compta@alpha.fr est le contact exact de A.
+    pieces = [attendue("A-1", "A", "89.90"), attendue("B-1", "B", "89.90")]
+    d = route_un(message("compta@alpha.fr", "f_89,90.pdf"), ADRESSES, pieces, domaines={"B": ["alpha.fr"]})
     assert (d.statut, d.dossier) == (StatutRoutage.PROPOSEE, "A")
 
 
 def test_sous_domaine_n_est_pas_le_domaine() -> None:
     pieces = [attendue("A-1", "A", "89.90")]
     for exp in ("x@mail.alpha.fr", "x@alpha.fr.evil.com", "x@xalpha.fr"):
-        d = route_un(message(exp, "f_89,90.pdf"), ADRESSES, pieces)
+        d = route_un(message(exp, "f_89,90.pdf"), ADRESSES, pieces, domaines={"A": ["alpha.fr"]})
         assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
+    # Et un domaine parent n'est pas couvert par un sous-domaine declare.
+    d = route_un(message("x@alpha.fr", "f_89,90.pdf"), {"A": frozenset()}, pieces,
+                 domaines={"A": ["compta.alpha.fr"]})
+    assert_non_routee(d, MotifNonRoute.DOSSIER_INCONNU)
 
 
 def test_domaine_inconnu() -> None:
@@ -323,9 +426,32 @@ def test_adresses_mal_formees_dans_le_referentiel_ignorees() -> None:
 # ---------------------------------------------------------------------------
 
 
-def dossier(code: str, contact: str, circuit: str = "C-DIRECT", relais: str = "") -> Dossier:
+def dossier(code: str, contact: str, circuit: str = "C-DIRECT", relais: str = "",
+            domaines: tuple[str, ...] = ()) -> Dossier:
     return Dossier(code=code, raison_sociale=code, email_contact=contact, nom_contact="",
-                   circuit=circuit, email_relais=relais)
+                   circuit=circuit, email_relais=relais, domaines=domaines)
+
+
+def test_domaines_par_dossier() -> None:
+    dossiers = {
+        "A": dossier("A", "compta@alpha.fr", domaines=("Alpha.FR.", "alpha-groupe.fr")),
+        "B": dossier("B", "x@hotmail.ca"),                                 # rien n'est deduit
+        "C": dossier("C", "c@gamma.fr", domaines=("gmail.com", "pas un domaine", "gamma.fr")),
+        "D": dossier("D", "d@delta.fr", domaines=("société.fr",)),
+    }
+    assert domaines_par_dossier(dossiers) == {
+        "A": frozenset({"alpha.fr", "alpha-groupe.fr"}),
+        "B": frozenset(),
+        "C": frozenset({"gamma.fr"}),
+        "D": frozenset({"xn--socit-esab.fr"}),
+    }
+    with pytest.raises(ValueError):
+        domaines_par_dossier({"A": dossier("B", "x@beta.fr")})
+
+
+def test_adresses_par_dossier_ne_derive_aucun_domaine() -> None:
+    adresses = adresses_par_dossier({"A": dossier("A", "gerant@hotmail.ca", domaines=("alpha.fr",))})
+    assert adresses == {"A": frozenset({"gerant@hotmail.ca"})}
 
 
 def test_adresses_par_dossier_normalise_et_exclut_relais_et_interne() -> None:
@@ -768,23 +894,41 @@ MONTANTS_DENSES = ("89.90", "120.00", "45.50", "1234.56", "89.92")
 DOMAINE_PARTAGE = "groupe-commun.fr"
 
 
-def _referentiel_dense(rng: random.Random) -> dict[str, frozenset[str]]:
+Referentiel = tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]
+
+
+def _referentiel_dense(rng: random.Random) -> Referentiel:
+    """(adresses, domaines declares). Volontairement piege :
+    contacts sur messageries hors liste noire, domaine declare par plusieurs
+    dossiers, adresse partagee, gmail.com declare par erreur, domaines de
+    contact NON declares."""
     adresses: dict[str, set[str]] = {}
+    domaines: dict[str, set[str]] = {}
     for i in range(16):
         code = f"D{i:02d}"
         adrs = {f"compta@d{i:02d}.fr"}
+        doms: set[str] = set()
+        if i % 4 == 0:
+            doms.add(f"d{i:02d}.fr")                          # domaine declare unique
         if i % 4 == 1:
-            adrs = {f"dirigeant{i}@gmail.com"}             # contact grand public
+            adrs = {f"dirigeant{i}@{HORS_LISTE[i % len(HORS_LISTE)]}"}   # messagerie hors liste
         if i % 4 == 2:
-            adrs.add(f"dg{i}@{DOMAINE_PARTAGE}")             # domaine partage
+            adrs.add(f"dg{i}@{DOMAINE_PARTAGE}")
+            doms |= {DOMAINE_PARTAGE, f"d{i:02d}.fr"}          # domaine declare partage
         if i in (3, 7):
-            adrs.add("commun@holding-x.fr")                 # adresse partagee
+            adrs.add("commun@holding-x.fr")                   # adresse partagee
+        if i == 5:
+            doms.add("gmail.com")                             # erreur de saisie
         adresses[code] = adrs
-    return {k: frozenset(v) for k, v in adresses.items()}
+        if rng.random() < 0.9:                                # parfois aucun domaine declare
+            domaines[code] = doms
+    return ({k: frozenset(v) for k, v in adresses.items()},
+            {k: frozenset(v) for k, v in domaines.items()})
 
 
-def _proprietaire(expediteur: str, adresses: dict[str, frozenset[str]]) -> str | None:
-    """Oracle independant : le seul dossier que la regle autorise, ou None."""
+def _proprietaire(expediteur: str, ref: Referentiel) -> str | None:
+    """Oracle independant : dossier d'une adresse exacte OU d'un domaine declare."""
+    adresses, domaines = ref
     exp = expediteur.strip().lower()
     exacts = [d for d, a in adresses.items() if exp in a]
     if exacts:
@@ -792,7 +936,7 @@ def _proprietaire(expediteur: str, adresses: dict[str, frozenset[str]]) -> str |
     dom = exp.rpartition("@")[2]
     if dom in DOMAINES_GRAND_PUBLIC or any(dom.endswith("." + g) for g in DOMAINES_GRAND_PUBLIC):
         return None
-    par_dom = [d for d, a in adresses.items() if any(x.rpartition("@")[2] == dom for x in a)]
+    par_dom = [d for d, doms in domaines.items() if dom in doms]
     return par_dom[0] if len(par_dom) == 1 else None
 
 
@@ -809,9 +953,10 @@ def _attendues_denses(rng: random.Random, codes: list[str]) -> list[PieceAttendu
     return pieces
 
 
-def _expediteur_aleatoire(rng: random.Random, adresses: dict[str, frozenset[str]]) -> str:
-    connues = sorted(a for v in adresses.values() for a in v)
+def _expediteur_aleatoire(rng: random.Random, ref: Referentiel) -> str:
+    connues = sorted(a for v in ref[0].values() for a in v)
     return rng.choice([
+        f"w{rng.randint(0, 9)}@" + rng.choice(HORS_LISTE),
         rng.choice(connues),
         rng.choice(connues).upper(),
         f"inconnu{rng.randint(0, 9)}@" + rng.choice(connues).rpartition("@")[2],
@@ -834,19 +979,23 @@ def test_propriete_jamais_inter_dossiers() -> None:
     nb_proposees = 0
     nb_cas = 0
     nb_pieges = 0
+    nb_par_domaine = 0
     for _ in range(120):
-        adresses = _referentiel_dense(rng)
+        ref = _referentiel_dense(rng)
+        adresses, domaines = ref
         pieces = _attendues_denses(rng, sorted(adresses))
         cles = {(p.dossier, p.reference): p for p in pieces}
         for _ in range(12):
-            exp = _expediteur_aleatoire(rng, adresses)
+            exp = _expediteur_aleatoire(rng, ref)
             noms = [_nom_aleatoire(rng) for _ in range(rng.randint(0, 3))]
             corps = rng.choice(["", "", "Bonjour", "Total 89,90 EUR", "Montant : 120,00 €"])
             msg = message(exp, *noms, corps=corps, message_id=f"<{nb_cas}@x>")
-            decisions = router(msg, adresses=adresses, attendues=pieces, aujourdhui=AUJOURDHUI)
+            decisions = router(msg, adresses=adresses, attendues=pieces, aujourdhui=AUJOURDHUI,
+                               domaines=domaines)
             nb_cas += 1
             assert len(decisions) == max(1, len(noms))
-            proprietaire = _proprietaire(exp, adresses)
+            proprietaire = _proprietaire(exp, ref)
+            exact = any(exp.strip().lower() in a for a in adresses.values())
             for d in decisions:
                 montants_lus = set(extraire_montants(f"{d.nom_fichier} {msg.objet} {msg.corps}"))
                 if len(montants_lus) == 1 and any(
@@ -859,7 +1008,12 @@ def test_propriete_jamais_inter_dossiers() -> None:
                     assert d.dossier == proprietaire, (exp, d)
                 if d.statut is StatutRoutage.PROPOSEE:
                     nb_proposees += 1
+                    nb_par_domaine += not exact
                     assert proprietaire is not None
+                    # adresse exacte du dossier, ou domaine qu'IL a declare
+                    dom = exp.strip().lower().rpartition("@")[2]
+                    assert exp.strip().lower() in adresses[d.dossier] or dom in domaines[d.dossier]
+                    assert not any(dom.endswith(h) for h in HORS_LISTE) or exact
                     piece = cles[(d.dossier, d.reference_operation)]
                     assert piece.dossier == proprietaire
                     assert piece.etat not in ETATS_TERMINAUX
@@ -873,16 +1027,18 @@ def test_propriete_jamais_inter_dossiers() -> None:
     assert nb_cas >= 500
     assert nb_pieges >= 500, "le generateur doit offrir des candidates dans d'autres dossiers"
     assert nb_proposees >= 50, "le generateur doit vraiment exercer le cas PROPOSEE"
+    assert nb_par_domaine >= 10, "le repli par domaine declare doit etre exerce"
 
 
 def test_propriete_expediteur_grand_public_inconnu_jamais_route() -> None:
     rng = random.Random(7)
     for i in range(500):
-        adresses = _referentiel_dense(rng)
+        adresses, domaines = _referentiel_dense(rng)
         pieces = _attendues_denses(rng, sorted(adresses))
-        exp = f"client{i}@" + rng.choice(sorted(DOMAINES_GRAND_PUBLIC))
+        exp = f"client{i}@" + rng.choice(sorted(DOMAINES_GRAND_PUBLIC) + HORS_LISTE)
         msg = message(exp, _nom_aleatoire(rng), message_id=f"<gp{i}@x>")
-        for d in router(msg, adresses=adresses, attendues=pieces, aujourdhui=AUJOURDHUI):
+        for d in router(msg, adresses=adresses, attendues=pieces, aujourdhui=AUJOURDHUI,
+                        domaines=domaines):
             assert d.statut is StatutRoutage.NON_ROUTEE
             assert d.motif is MotifNonRoute.DOSSIER_INCONNU
             assert d.dossier is None
@@ -895,13 +1051,15 @@ def test_propriete_expediteur_grand_public_inconnu_jamais_route() -> None:
 
 def test_determinisme() -> None:
     rng = random.Random(42)
-    adresses = _referentiel_dense(rng)
+    ref = _referentiel_dense(rng)
+    adresses, domaines = ref
     pieces = _attendues_denses(rng, sorted(adresses))
-    msgs = [message(_expediteur_aleatoire(rng, adresses), *[_nom_aleatoire(rng) for _ in range(3)],
+    msgs = [message(_expediteur_aleatoire(rng, ref), *[_nom_aleatoire(rng) for _ in range(3)],
                     message_id=f"<{i}@x>") for i in range(100)]
 
-    def tout(attendues, adrs):
-        return [router(m, adresses=adrs, attendues=attendues, aujourdhui=AUJOURDHUI) for m in msgs]
+    def tout(attendues, adrs, doms=domaines):
+        return [router(m, adresses=adrs, attendues=attendues, aujourdhui=AUJOURDHUI, domaines=doms)
+                for m in msgs]
 
     premier = tout(pieces, adresses)
     assert premier == tout(list(pieces), dict(adresses))
@@ -909,4 +1067,4 @@ def test_determinisme() -> None:
     melange = list(pieces)
     random.Random(1).shuffle(melange)
     inverse = {k: adresses[k] for k in reversed(list(adresses))}
-    assert premier == tout(melange, inverse)
+    assert premier == tout(melange, inverse, {k: domaines[k] for k in reversed(list(domaines))})

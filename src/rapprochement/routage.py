@@ -14,12 +14,16 @@ Garanties structurelles :
   - les candidates sont filtrees sur ce dossier AVANT toute comparaison de
     montant : une piece d'un autre dossier ne peut pas etre proposee, quelle que
     soit la qualite de la correspondance ;
-  - un domaine de messagerie grand public ne sert jamais de preuve ;
+  - un domaine n'identifie un dossier que s'il a ete DECLARE par le cabinet
+    (`Dossier.domaines`) : jamais deduit de l'adresse d'un contact, car une
+    liste noire de messageries grand public est incomplete par nature
+    (hotmail.ca, t-online.de...). Un domaine grand public declare par erreur
+    reste refuse ;
   - aucune ambiguite n'est tranchee : ni pour le dossier, ni pour la periode, ni
     pour le montant, ni pour l'operation.
 
-Module pur pour `router`, `extraire_montants`, `cle_idempotence` et
-`adresses_par_dossier` (pas d'horloge, pas de disque). Seules `lire_eml` et
+Module pur pour `router`, `extraire_montants`, `cle_idempotence`,
+`adresses_par_dossier` et `domaines_par_dossier` (pas d'horloge, pas de disque). Seules `lire_eml` et
 `lire_dossier_eml` lisent le disque.
 """
 
@@ -62,6 +66,9 @@ from .moteur import montants_compatibles
 FENETRE_AVANT_JOURS = 60
 FENETRE_APRES_JOURS = 15
 
+# Garde-fou EN PROFONDEUR seulement : la defense principale est qu'aucun domaine
+# n'est deduit (voir `domaines_par_dossier`). Cette liste empeche qu'une erreur
+# de saisie du cabinet (declarer gmail.com pour un dossier) ouvre la fuite.
 # Liste du contrat 4.4, reprise a l'identique.
 DOMAINES_GRAND_PUBLIC_CONTRAT = frozenset(
     {
@@ -251,18 +258,61 @@ def _normaliser_adresse(adresse: str) -> str | None:
     if a.count("@") != 1 or _CARACTERES_INTERDITS_ADRESSE.search(a):
         return None
     locale, domaine = a.split("@")
+    if domaine.endswith("."):
+        domaine = domaine[:-1]                      # point final du FQDN : meme domaine
     if not locale or not domaine or domaine.startswith(".") or domaine.endswith("."):
         return None
-    return a
+    return f"{locale}@{domaine}"
+
+
+def _cle_boite(adresse: str) -> str | None:
+    """Cle de comparaison d'ADRESSE EXACTE : meme boite aux lettres.
+
+    Adresse normalisee (casse, point final du domaine) dont la partie locale
+    perd son suffixe `+tag` (tout ce qui suit le premier "+"). Rien d'autre
+    n'est normalise : `j.ean@` et `jean@` restent distinctes, et le domaine est
+    compare tel quel.
+    """
+    a = _normaliser_adresse(adresse)
+    if a is None:
+        return None
+    locale, domaine = a.split("@")
+    base = locale.split("+", 1)[0]
+    if not base:
+        return None
+    return f"{base}@{domaine}"
 
 
 def _domaine(adresse: str) -> str:
     return adresse.rsplit("@", 1)[1]
 
 
+_CARACTERES_INTERDITS_DOMAINE = re.compile(r"[\s@<>()\[\],;:\"\\/]")
+
+
+def normaliser_domaine(domaine: str) -> str | None:
+    """Domaine en minuscules, sans point final, en ASCII (IDNA/punycode), ou None.
+
+    `Exemple.FR.` -> `exemple.fr` ; `societe-generale.fr` et sa forme unicode
+    accentuee se comparent par leur forme punycode. Un domaine qui ne se
+    normalise pas (caractere interdit, label vide, pas de point, IDNA invalide)
+    ne prouve rien.
+    """
+    d = (domaine or "").strip().lower().rstrip(".")
+    if not d or "." not in d or _CARACTERES_INTERDITS_DOMAINE.search(d):
+        return None
+    try:
+        d = d.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    if any(not label for label in d.split(".")):
+        return None
+    return d
+
+
 def est_domaine_grand_public(domaine: str) -> bool:
     """Domaine de messagerie grand public, ou sous-domaine d'un tel domaine."""
-    d = domaine.strip().lower().rstrip(".")
+    d = normaliser_domaine(domaine) or (domaine or "").strip().lower().rstrip(".")
     return any(d == g or d.endswith("." + g) for g in DOMAINES_GRAND_PUBLIC)
 
 
@@ -294,14 +344,45 @@ def adresses_par_dossier(dossiers: Mapping[str, Dossier]) -> dict[str, frozenset
     resultat: dict[str, frozenset[str]] = {}
     for cle in sorted(dossiers):
         dossier = dossiers[cle]
-        if cle != dossier.code:
-            raise ValueError(
-                f"Referentiel incoherent : cle {cle!r} pour le dossier {dossier.code!r}"
-            )
+        _verifier_cle(cle, dossier)
         if dossier.circuit in CIRCUITS_SANS_ADRESSE_CLIENT:
             resultat[cle] = frozenset()
         else:
             resultat[cle] = frozenset(_adresses_du_champ(dossier.email_contact))
+    return resultat
+
+
+def _verifier_cle(cle: str, dossier: Dossier) -> None:
+    if cle != dossier.code:
+        raise ValueError(
+            f"Referentiel incoherent : cle {cle!r} pour le dossier {dossier.code!r}"
+        )
+
+
+def _domaines_valides(domaines: Iterable[str]) -> frozenset[str]:
+    """Domaines declares, normalises ; les invalides et les grand public sont ecartes."""
+    retenus: set[str] = set()
+    for brut in domaines:
+        d = normaliser_domaine(brut)
+        if d is not None and not est_domaine_grand_public(d):
+            retenus.add(d)
+    return frozenset(retenus)
+
+
+def domaines_par_dossier(dossiers: Mapping[str, Dossier]) -> dict[str, frozenset[str]]:
+    """Domaines DECLARES par le cabinet pour chaque dossier (`Dossier.domaines`).
+
+    Seule source admise pour le routage par domaine : rien n'est deduit de
+    `email_contact`. Normalises (minuscules, sans point final, IDNA). Un domaine
+    de messagerie grand public declare par erreur est ecarte (garde-fou en
+    profondeur), un domaine illisible aussi. Cle du mapping = code du dossier
+    (`ValueError` sinon).
+    """
+    resultat: dict[str, frozenset[str]] = {}
+    for cle in sorted(dossiers):
+        dossier = dossiers[cle]
+        _verifier_cle(cle, dossier)
+        resultat[cle] = _domaines_valides(dossier.domaines)
     return resultat
 
 
@@ -333,20 +414,28 @@ def cle_idempotence(message_id: str, empreinte: str) -> str:
 
 
 def _resoudre_dossier(
-    expediteur: str, adresses: Mapping[str, Collection[str]]
+    expediteur: str,
+    adresses: Mapping[str, Collection[str]],
+    domaines: Mapping[str, Collection[str]] | None,
 ) -> tuple[str | None, MotifNonRoute | None, str]:
-    """(dossier, motif, detail). Exactement l'un de dossier / motif est renseigne."""
+    """(dossier, motif, detail). Exactement l'un de dossier / motif est renseigne.
+
+    1. adresse exacte : un seul dossier -> lui, plusieurs -> DOSSIER_AMBIGU ;
+    2. sinon domaine de l'expediteur DECLARE (`domaines`) par un seul dossier,
+       en correspondance exacte (un sous-domaine ne correspond pas) ;
+       plusieurs -> DOSSIER_AMBIGU. `domaines` None ou vide : aucun repli.
+    Le domaine des adresses n'est JAMAIS utilise.
+    """
     exp = _normaliser_adresse(expediteur)
     if exp is None:
         return None, MotifNonRoute.DOSSIER_INCONNU, f"expediteur illisible : {expediteur!r}"
 
-    normalisees: dict[str, frozenset[str]] = {}
-    for code in sorted(adresses):
-        normalisees[code] = frozenset(
-            a for a in (_normaliser_adresse(x) for x in adresses[code]) if a is not None
-        )
-
-    exacts = [code for code, adrs in normalisees.items() if exp in adrs]
+    cle_exp = _cle_boite(exp)
+    exacts: list[str] = []
+    if cle_exp is not None:
+        for code in sorted(adresses):
+            if any(_cle_boite(x) == cle_exp for x in adresses[code]):
+                exacts.append(code)
     if len(exacts) == 1:
         return exacts[0], None, f"adresse exacte {exp}"
     if len(exacts) > 1:
@@ -354,21 +443,25 @@ def _resoudre_dossier(
             f"adresse {exp} presente dans {len(exacts)} dossiers : {', '.join(exacts)}"
         )
 
-    domaine = _domaine(exp)
+    if not domaines:
+        return None, MotifNonRoute.DOSSIER_INCONNU, (
+            f"adresse {exp} inconnue, aucun domaine declare : pas de repli par domaine"
+        )
+    domaine = normaliser_domaine(_domaine(exp))
+    if domaine is None:
+        return None, MotifNonRoute.DOSSIER_INCONNU, f"domaine illisible : {exp}"
     if est_domaine_grand_public(domaine):
         return None, MotifNonRoute.DOSSIER_INCONNU, (
             f"adresse {exp} inconnue, domaine grand public {domaine} : aucune preuve"
         )
-    par_domaine = [
-        code for code, adrs in normalisees.items() if any(_domaine(a) == domaine for a in adrs)
-    ]
+    par_domaine = [code for code in sorted(domaines) if domaine in _domaines_valides(domaines[code])]
     if len(par_domaine) == 1:
-        return par_domaine[0], None, f"domaine {domaine}"
+        return par_domaine[0], None, f"domaine declare {domaine}"
     if len(par_domaine) > 1:
         return None, MotifNonRoute.DOSSIER_AMBIGU, (
             f"domaine {domaine} partage par {len(par_domaine)} dossiers : {', '.join(par_domaine)}"
         )
-    return None, MotifNonRoute.DOSSIER_INCONNU, f"adresse {exp} et domaine {domaine} inconnus"
+    return None, MotifNonRoute.DOSSIER_INCONNU, f"adresse {exp} inconnue, domaine {domaine} non declare"
 
 
 def _decision_fichier(
@@ -452,8 +545,13 @@ def router(
     attendues: Iterable[PieceAttendue],
     deja_vus: Collection[str] = (),
     aujourdhui: dt.date,
+    domaines: Mapping[str, Collection[str]] | None = None,
 ) -> list[DecisionRoutage]:
     """Une decision par fichier joint, dans l'ordre des fichiers du message.
+
+    `adresses` : adresses exactes par dossier (`adresses_par_dossier`).
+    `domaines` : domaines DECLARES par dossier (`domaines_par_dossier`) ; None
+    ou vide desactive tout routage par domaine.
 
     Un message sans fichier produit une decision `NON_ROUTEE / SANS_PIECE_JOINTE`
     (ou `DOUBLON` s'il a deja ete vu). Aucune decision n'est jamais une
@@ -482,7 +580,7 @@ def router(
 
     # 1. Le dossier ne depend que de l'expediteur : resolu une fois, AVANT de
     #    regarder la moindre piece attendue.
-    dossier, motif, detail_dossier = _resoudre_dossier(message.expediteur, adresses)
+    dossier, motif, detail_dossier = _resoudre_dossier(message.expediteur, adresses, domaines)
 
     # 2. Filtre sur le dossier AVANT toute comparaison de montant (regle 5).
     ouvertes: list[PieceAttendue] = []

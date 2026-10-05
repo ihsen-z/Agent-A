@@ -207,14 +207,9 @@ def test_sain_casse_et_alias_restent_dans_le_bon_dossier() -> None:
         assert [(x.dossier, x.reference_operation) for x in d] == [("A", "A-1")]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "La liste des domaines grand public est une liste NOIRE finie : un dossier dont le "
-    "contact est chez hotmail.ca, yahoo.ca, live.co.uk, t-online.de, libero.it ou "
-    "videotron.ca capte par le DOMAINE les pieces de n'importe quel abonne de ce "
-    "fournisseur (autre client compris) : PROPOSEE vers le mauvais dossier."))
 @pytest.mark.parametrize("domaine", ["hotmail.ca", "yahoo.ca", "live.co.uk", "t-online.de",
                                      "libero.it", "videotron.ca"])
-def test_defaut_domaine_grand_public_hors_liste_sert_de_preuve(domaine: str) -> None:
+def test_regression_domaine_grand_public_hors_liste_sert_de_preuve(domaine: str) -> None:
     adresses = {"A": frozenset({f"gerant.a@{domaine}"}), "B": frozenset({"paul@client-b.fr"})}
     # Un inconnu (ou le gerant de B depuis sa boite perso) ecrit depuis le meme fournisseur.
     m = MessageEntrant("<x@y>", f"inconnu@{domaine}", dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc),
@@ -223,10 +218,7 @@ def test_defaut_domaine_grand_public_hors_liste_sert_de_preuve(domaine: str) -> 
     assert all(x.statut is not StatutRoutage.PROPOSEE for x in d), d
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Boucle complete : un e-mail d'un inconnu @hotmail.ca est propose au rattachement "
-    "dans le dossier ALPHA (contact @hotmail.ca) via executer_cycle."))
-def test_defaut_domaine_grand_public_hors_liste_boucle_complete(tmp_path: Path) -> None:
+def test_regression_domaine_grand_public_hors_liste_boucle_complete(tmp_path: Path) -> None:
     dossiers = [["ALPHA", "Alpha SARL", "gerant.alpha@hotmail.ca", "M. Alpha", "15", "courtois", "C-DIRECT", ""],
                 DOSSIERS[1]]
     entree = ecrire_entree(tmp_path / "e", dossiers=dossiers,
