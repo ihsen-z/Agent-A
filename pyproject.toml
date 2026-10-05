@@ -3,7 +3,8 @@ name = "rapprochement-pieces"
 version = "0.1.0"
 description = "Rapprochement bancaire et relance des pieces justificatives manquantes"
 requires-python = ">=3.11"
-dependencies = []
+# tzdata : donnees de fuseaux horaires, necessaires seulement la ou le systeme n'en fournit pas.
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

@@ -163,6 +163,7 @@ class PieceAttendue:
     bloquee: bool = False                 # drapeau, pas un etat (section 9)
     motif_blocage: str = ""
     pieces_rattachees: tuple[str, ...] = ()   # id_piece
+    devise: str = "EUR"                   # celle de l'operation : une relance ne ment pas sur la monnaie
 
 
 class StatutRoutage(str, Enum):

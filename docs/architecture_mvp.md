@@ -140,7 +140,8 @@ class TransitionInterdite(Exception): ...
 PLAFOND_RELANCES = 4
 
 def creer_depuis_rapprochement(r: Rapprochement) -> PieceAttendue
-    # MANQUANT et PARTIEL seulement (ValueError sinon). periode = "AAAA-MM" de l'operation.
+    # MANQUANT seulement. PARTIEL et A_VERIFIER : ValueError (file humaine, jamais de relance
+    # automatique : en cas de doute on ne tranche pas). periode = "AAAA-MM" de l'operation.
 def appliquer(piece: PieceAttendue, evenement: Evenement, *, aujourdhui: dt.date,
               **contexte: Any) -> PieceAttendue
 def etat_periode(pieces: Iterable[PieceAttendue], *, pieces_creees: bool = True,
@@ -154,22 +155,28 @@ est interdit** et leve `TransitionInterdite` :
 |---|---|---|---|---|
 | ATTENDUE | RELANCE_ENVOYEE | `valide_par` non vide et humain | DEMANDEE | `nb_relances`=1, `date_premiere_demande`=`date_derniere_relance`=aujourdhui |
 | ATTENDUE | EXCLUSION_CREEE | `regle_validee=True` | HORS_PERIMETRE | |
+| PROMISE, ESCALADEE | EXCLUSION_CREEE | `regle_validee=True` | HORS_PERIMETRE | |
 | ATTENDUE | PIECE_RATTACHEE | `id_piece`, `confirme_par` non vide | RECUE | ajoute `id_piece` |
 | DEMANDEE | RELANCE_ENVOYEE | `valide_par` | DEMANDEE | `nb_relances`+1, `date_derniere_relance`=aujourdhui. **Refuse si `nb_relances` >= `PLAFOND_RELANCES`.** |
 | DEMANDEE | PIECE_RATTACHEE | idem | RECUE | |
 | DEMANDEE | PROMESSE_SAISIE | `date_promesse` dans [aujourdhui, aujourdhui+15 j] | PROMISE | `date_promesse` |
-| DEMANDEE | DELAI_DEPASSE | | DEMANDEE si `nb_relances` < plafond, **ESCALADEE** sinon | |
+| DEMANDEE | DELAI_DEPASSE | | **ESCALADEE**, toujours | Le compteur n'intervient pas : c'est `cadence.planifier` qui decide QUAND l'escalade est due et n'emet cet evenement qu'a ce moment-la |
 | DEMANDEE | EXCLUSION_CREEE | `regle_validee=True` | HORS_PERIMETRE | |
 | PROMISE | DATE_PROMISE_DEPASSEE | `aujourdhui` > `date_promesse` | DEMANDEE | `date_promesse`=None |
-| PROMISE | PIECE_RATTACHEE | idem | RECUE | |
+| PROMISE | PIECE_RATTACHEE | idem | RECUE | `date_promesse`=None |
 | RECUE | CONTROLE_CONFORME | `controle_par` non vide | VALIDEE | |
-| RECUE | CONTROLE_NON_CONFORME | `controle_par`, `motif` non vides | DEMANDEE | vide `pieces_rattachees` |
+| RECUE | CONTROLE_NON_CONFORME | `controle_par`, `motif` non vides | DEMANDEE | vide `pieces_rattachees`, `date_promesse`=None ; si `date_premiere_demande` est None (piece arrivee avant toute relance), la fixe a aujourdhui |
 | ESCALADEE | ARBITRAGE_CLASSEMENT | `arbitre_par`, `motif` non vides | CLOSE_SANS_SUITE | |
 | ESCALADEE | PIECE_RATTACHEE | idem | RECUE | |
 | tout non terminal | BLOCAGE_SIGNALE | `motif` | meme etat | `bloquee`=True |
 | tout non terminal | BLOCAGE_LEVE | | meme etat | `bloquee`=False |
 
-- Un etat terminal n'accepte aucun evenement.
+- Un etat terminal n'accepte aucun evenement. **Entrer dans un etat terminal remet
+  `bloquee`=False et `motif_blocage`=""** : un drapeau de blocage ne survit jamais a la
+  cloture de la piece.
+- `BLOCAGE_LEVE` vide `motif_blocage` et n'est accepte que sur une piece `bloquee`.
+- Sortir de PROMISE (vers RECUE ou DEMANDEE) remet `date_promesse` a None.
+- `PLAFOND_RELANCES` ne gouverne que `RELANCE_ENVOYEE` (au plus 4 envois par piece).
 - Une piece `bloquee` n'accepte que BLOCAGE_LEVE, PIECE_RATTACHEE, EXCLUSION_CREEE
   et ARBITRAGE_CLASSEMENT.
 - `valide_par` / `confirme_par` / `controle_par` / `arbitre_par` : refuser `""` et
@@ -178,8 +185,8 @@ est interdit** et leve `TransitionInterdite` :
   une politesse.
 - `etat_periode` : `pieces_creees=False` -> OUVERTE. Sinon, si toutes les pieces
   sont terminales (liste vide comprise) -> COMPLETE, et CLOTUREE si `cloturee=True`.
-  Sinon EN_COLLECTE. `cloturee=True` alors qu'une piece n'est pas terminale :
-  `ValueError`. **L'etat de periode est calcule, jamais stocke.**
+  Sinon EN_COLLECTE. `cloturee=True` alors qu'une piece n'est pas terminale, ou alors
+  que `pieces_creees=False` : `ValueError`. **L'etat de periode est calcule, jamais stocke.**
 
 ### 4.4 `routage.py` : rattacher une piece entrante
 
@@ -284,7 +291,8 @@ Regles de `planifier` :
 - Pieces eligibles : `ATTENDUE` (jamais demandee : due tout de suite) ; `DEMANDEE`
   dont `jours_ouvres_entre(date_premiere_demande, aujourdhui) >= JALONS[nb_relances]`
   tant que `nb_relances < len(JALONS)` ; `PROMISE` dont la date est depassee
-  (-> `transitions`, pas de relance dans le meme cycle).
+  de plus de 2 jours ouvres, comme le prevoit le cahier des charges (-> `transitions`
+  `DATE_PROMISE_DEPASSEE`, pas de relance dans le meme cycle).
 - `DEMANDEE` avec `nb_relances >= len(JALONS)` et au moins `JALON_ESCALADE` jours
   ouvres depuis la premiere demande -> `transitions` avec `DELAI_DEPASSE`. Une
   piece deja arrivee au `PLAFOND_RELANCES` y va aussi, sans attendre.
@@ -303,7 +311,7 @@ Regles de `planifier` :
 
 `construire_brouillon` : reutilise le ton et les gabarits de `relances.py` pour un
 seul dossier ; **plusieurs dossiers = une section par dossier** (raison sociale
-en titre). Chaque ligne reclamee vient d'une `PieceAttendue` (date, montant,
+en titre). Chaque ligne reclamee vient d'une `PieceAttendue` (date, montant, **devise**,
 libelle) : **aucune ligne sans operation bancaire source** (CA-07). L'identifiant
 est `identifiant_relance(destinataire, references, niveau, aujourdhui)`. Statut
 `BROUILLON`. Les fonctions existantes `construire_relance` et `construire_toutes`
@@ -338,6 +346,11 @@ def envoyer(depot: Depot, journal: JournalAudit, expediteur: Expediteur,
             id_relance: str, *, maintenant: dt.datetime, fuseau: str = "Europe/Paris",
             creneau_ok: Callable[[dt.datetime], bool] | None = None) -> Brouillon
 def envois_incertains(depot: Depot) -> list[Brouillon]     # statut EN_COURS
+def trancher_envoi_incertain(depot: Depot, journal: JournalAudit, id_relance: str,
+                             par: str, *, parti: bool,
+                             maintenant: dt.datetime) -> Brouillon
+    # humain, apres verification du dossier "Envoyes" : parti=True -> ENVOYEE (+ EnvoiRelance),
+    # parti=False -> VALIDEE (renvoi possible). Seul moyen de sortir de EN_COURS.
 ```
 
 - `valider` : `par` non vide et **humain** (meme liste d'acteurs automatiques refusee
@@ -362,6 +375,11 @@ def envois_incertains(depot: Depot) -> list[Brouillon]     # statut EN_COURS
 - Rappeler `envoyer` sur un brouillon `ENVOYEE` ou `EN_COURS` -> `EnvoiNonValide`.
   C'est ce qui garantit CA-05 (zero doublon d'envoi).
 - `ExpediteurDossier` refuse d'ecraser un `.eml` existant (`ErreurEnvoi`).
+- Toute tentative refusee (`EnvoiNonValide`, `EnvoiHorsCreneau`) ecrit une entree
+  `envoi_refuse` dans le journal avec la raison.
+- La liste des acteurs automatiques n'existe qu'a un endroit : `etats.est_acteur_humain`.
+  `envoi.py` l'importe, il ne la duplique pas. **Limite assumee : l'identite n'est pas
+  authentifiee** ; c'est le CLI qui borne `par` a une liste de validateurs declares.
 
 ## 5. Criteres d'acceptation couverts par le code du MVP
 
