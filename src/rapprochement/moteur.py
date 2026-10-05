@@ -64,6 +64,11 @@ def _montants_compatibles(a: Decimal, b: Decimal) -> bool:
     return ecart <= max(TOLERANCE_ABSOLUE, b * TOLERANCE_RELATIVE)
 
 
+# Alias public : le routage des pieces entrantes applique la meme tolerance que
+# le rapprochement bancaire, il ne doit pas en avoir une deuxieme.
+montants_compatibles = _montants_compatibles
+
+
 def _montants_identiques(a: Decimal, b: Decimal) -> bool:
     """Tolerance au centime seulement.
 

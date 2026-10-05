@@ -375,7 +375,7 @@
     <ol class="rules">
       <li><strong>Normalisation</strong> du libellé bancaire : suppression des préfixes de canal, des références techniques et de la ponctuation, avec conservation de la forme préfixée — « VIREMENT INTERNE » perd son sens si l'on retire « virement ».</li>
       <li><strong>Exclusions</strong> appliquées avant tout appariement, règles propres au dossier d'abord, règles générales ensuite.</li>
-      <li><strong>Appariement au centime</strong>, avec tolérance d'arrondi de 0,02 € ou 0,5 % du montant, la plus petite des deux s'appliquant.</li>
+      <li><strong>Appariement au centime</strong>, avec tolérance d'arrondi de 0,02 € ou 0,5 % du montant, <strong>la plus grande des deux s'appliquant</strong> (soit 5 € sur une facture de 1 000 €). Les paiements groupés, eux, n'admettent que le centime.</li>
       <li><strong>Affectation globale</strong> : les couples les plus sûrs sont affectés en premier, afin qu'un paiement traité tôt ne consomme pas la pièce d'un autre.</li>
       <li><strong>Paiements groupés</strong> (une opération pour 2 à 4 factures) : acceptés seulement si le total tombe au centime, si la combinaison est unique et si le libellé porte un indice de groupement.</li>
       <li><strong>Acomptes</strong> : acceptés seulement si le libellé l'annonce explicitement.</li>

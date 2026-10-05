@@ -12,7 +12,7 @@ import datetime as dt
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from .modeles import Dossier, OperationBancaire, Piece, Sens
+from .modeles import CIRCUITS, Dossier, OperationBancaire, Piece, Sens
 
 _FORMATS_DATE = ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y/%m/%d")
 
@@ -127,7 +127,7 @@ def lire_pieces(chemin: Path | str) -> list[Piece]:
 
 
 def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
-    """dossiers.csv : dossier,raison_sociale,email_contact,nom_contact[,jour_echeance_tva,ton_relance]"""
+    """dossiers.csv : dossier,raison_sociale,email_contact,nom_contact[,jour_echeance_tva,ton_relance,circuit,email_relais]"""
     chemin = Path(chemin)
     dossiers: dict[str, Dossier] = {}
     with open(chemin, newline="", encoding="utf-8-sig") as f:
@@ -139,6 +139,18 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
         )
         for ligne in lecteur:
             code = ligne["dossier"].strip()
+            circuit = (ligne.get("circuit") or "C-DIRECT").strip().upper()
+            email_relais = (ligne.get("email_relais") or "").strip()
+            if circuit not in CIRCUITS:
+                raise ErreurFormat(
+                    f"{chemin.name} : circuit '{circuit}' inconnu pour {code} "
+                    f"(attendu : {', '.join(CIRCUITS)})"
+                )
+            if circuit == "C-RELAIS" and not email_relais:
+                raise ErreurFormat(
+                    f"{chemin.name} : le dossier {code} est en C-RELAIS "
+                    "mais email_relais est vide"
+                )
             dossiers[code] = Dossier(
                 code=code,
                 raison_sociale=(ligne["raison_sociale"] or "").strip(),
@@ -146,5 +158,7 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
                 nom_contact=(ligne.get("nom_contact") or "").strip(),
                 jour_echeance_tva=int(ligne.get("jour_echeance_tva") or 15),
                 ton_relance=(ligne.get("ton_relance") or "courtois").strip(),
+                circuit=circuit,
+                email_relais=email_relais,
             )
     return dossiers
