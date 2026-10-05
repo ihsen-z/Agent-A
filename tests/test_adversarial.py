@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from decimal import Decimal
 from email import policy
 from email.message import EmailMessage
@@ -38,6 +39,7 @@ from rapprochement.modeles import (  # noqa: E402
     EtatPiece,
     FichierEntrant,
     MessageEntrant,
+    MotifNonRoute,
     OperationBancaire,
     Piece,
     PieceAttendue,
@@ -270,11 +272,7 @@ def charger_cli():
     return module
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Le Message-ID d'un e-mail entrant garde ses caracteres de controle (ESC) : la commande "
-    "`file` les imprime tels quels, un expediteur externe pilote le terminal de l'operateur "
-    "(effacer/masquer des lignes de la file humaine, OSC 52 presse-papiers...)."))
-def test_defaut_cli_file_sequences_d_echappement(entree, inst, capsys) -> None:
+def test_regression_cli_file_sequences_d_echappement(entree, inst, capsys) -> None:
     brut = eml("inconnu@evil.example", "<x@y>", fichiers=(("f.pdf", b"%PDF"),))
     brut = brut.replace(b"Message-ID: <x@y>", b"Message-ID: \x1b[1A\x1b[2K\x1b[1A\x1b[2Kcache")
     (inst.entrant / "1.eml").write_bytes(brut)
@@ -284,6 +282,7 @@ def test_defaut_cli_file_sequences_d_echappement(entree, inst, capsys) -> None:
     sortie = capsys.readouterr().out
     assert "cache" in sortie
     assert "\x1b" not in sortie
+    assert "\\x1b[1A" in sortie            # rendu visible, pas supprime
 
 
 def test_sain_cli_par_truque_et_envoi_sans_validation(entree, inst, capsys) -> None:
@@ -329,9 +328,10 @@ def test_sain_statut_forge_en_sql_sans_humain_refuse(entree, inst, valide_par) -
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "UPDATE brouillons SET statut='validee', valide_par='Mallory' en SQL : `envoyer` emet "
-    "alors que Mallory n'est pas dans validateurs.txt et que le journal ne contient aucune "
-    "entree `valide` (aucune verification croisee au moment de l'envoi)."))
+    "LIMITE ASSUMEE (docs/architecture_mvp.md section 7, 'Identite non authentifiee' : "
+    "un acces en ecriture a l'instance permet de tout falsifier). UPDATE brouillons SET "
+    "statut='validee', valide_par='Mallory' en SQL : `envoyer` emet sans verification "
+    "croisee avec validateurs.txt ni avec une entree `valide` du journal."))
 def test_defaut_validation_forgee_en_sql_par_un_inconnu_part(entree, inst) -> None:
     lancer(entree, inst, J0)
     b = brouillon_de(inst, "compta@alpha-sarl.fr")
@@ -388,14 +388,14 @@ def test_sain_validateurs_crlf_et_casse(entree, tmp_path) -> None:
     assert cycle.exiger_validateur(inst, "  paul MARTIN ") == "Paul Martin"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "validateurs.txt enregistre avec BOM UTF-8 (Bloc-notes Windows) : le premier "
-    "validateur devient '\\ufeffMarie Durand' et est refuse (echec ferme, mais la personne "
-    "declaree ne peut plus valider)."))
-def test_defaut_validateurs_avec_bom(tmp_path) -> None:
+def test_regression_validateurs_avec_bom(tmp_path) -> None:
     inst = nouvelle_instance(tmp_path / "i", None)
     inst.validateurs.write_bytes("﻿Marie Durand\r\nPaul Martin\r\n".encode("utf-8"))
     assert cycle.exiger_validateur(inst, "Marie Durand") == "Marie Durand"
+    assert cycle.lire_validateurs(inst) == ("Marie Durand", "Paul Martin")
+    # Le BOM n'ouvre pas de porte : un nom non declare reste refuse.
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.exiger_validateur(inst, "\ufeffMallory")
 
 
 def test_sain_validateurs_illisible_refuse_toujours(tmp_path) -> None:
@@ -450,8 +450,15 @@ def test_regression_envoi_incertain_ignore_par_la_limite_hebdo(tmp_path: Path) -
     lancer(entree, inst, j1)
     b2 = brouillon_de(inst, "compta@alpha-sarl.fr")
     cycle.valider_relance(inst, b2.id_relance, VALIDEUSE, maintenant=a(j1))
-    with pytest.raises(envoi.EnvoiNonValide):
+    # La bonne raison, pas une autre (piece non reclamable, limite hebdo...).
+    with pytest.raises(envoi.EnvoiIncertainEnAttente):
         cycle.envoyer_relance(inst, b2.id_relance, maintenant=a(j1))
+    assert list(inst.outbox.glob("*.eml")) == []
+    # Un humain constate que b1 est parti : la limite hebdomadaire prend le relais.
+    cycle.trancher_envoi(inst, b1.id_relance, VALIDEUSE, parti=True, maintenant=a(j1))
+    with pytest.raises(envoi.EnvoiNonValide, match="7 jours"):
+        cycle.envoyer_relance(inst, b2.id_relance, maintenant=a(j1))
+    assert list(inst.outbox.glob("*.eml")) == []
 
 
 def test_sain_deux_processus_meme_brouillon_un_seul_eml(entree, inst) -> None:
@@ -559,32 +566,42 @@ def test_regression_formule_csv_tableau_suivi(tmp_path) -> None:
     assert not [c for c in cellules(inst.sortie / "tableau_suivi.csv") if c.startswith(CARACTERES_FORMULE)]
 
 
-@pytest.mark.xfail(strict=True, reason="Injection de formule CSV dans pieces_attendues.csv (libelle).")
-def test_defaut_formule_csv_pieces_attendues(tmp_path) -> None:
+def test_regression_formule_csv_pieces_attendues(tmp_path) -> None:
     inst = _sorties_piegees(tmp_path)
     assert not [c for c in cellules(inst.sortie / "pieces_attendues.csv") if c.startswith(CARACTERES_FORMULE)]
 
 
-@pytest.mark.xfail(strict=True, reason="Injection de formule CSV dans a_verifier.csv (libelle d'un credit).")
-def test_defaut_formule_csv_a_verifier(tmp_path) -> None:
+def test_regression_formule_csv_a_verifier(tmp_path) -> None:
     inst = _sorties_piegees(tmp_path)
     assert not [c for c in cellules(inst.sortie / "a_verifier.csv") if c.startswith(CARACTERES_FORMULE)]
 
 
-@pytest.mark.xfail(strict=True, reason="Injection de formule CSV dans escalades.csv (libelle).")
-def test_defaut_formule_csv_escalades(tmp_path) -> None:
+def test_regression_formule_csv_escalades(tmp_path) -> None:
     inst = _sorties_piegees(tmp_path)
     assert (inst.sortie / "escalades.csv").exists()
     assert not [c for c in cellules(inst.sortie / "escalades.csv") if c.startswith(CARACTERES_FORMULE)]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Injection de formule CSV par un expediteur EXTERNE non authentifie : le nom de la piece "
-    "jointe '=IMPORTXML(...)' arrive tel quel dans file_humaine.csv, qui liste les messages "
-    "de TOUS les clients (exfiltration possible des cellules voisines a l'ouverture)."))
-def test_defaut_formule_csv_file_humaine_nom_de_piece_jointe(tmp_path) -> None:
+def test_regression_formule_csv_file_humaine_nom_de_piece_jointe(tmp_path) -> None:
     inst = _sorties_piegees(tmp_path)
-    assert not [c for c in cellules(inst.sortie / "file_humaine.csv") if c.startswith(CARACTERES_FORMULE)]
+    cel = cellules(inst.sortie / "file_humaine.csv")
+    assert not [c for c in cel if c.startswith(CARACTERES_FORMULE)]
+    assert "'" + FORMULE_FICHIER in cel             # neutralise, pas efface
+
+
+def test_regression_formules_neutralisees_sans_perte_dans_tous_les_csv(tmp_path) -> None:
+    """Chaque CSV de sortie : aucune cellule declencheuse, et le texte d'origine survit."""
+    inst = _sorties_piegees(tmp_path)
+    (inst.entrant / "=cmd|' calc'!A0.eml").write_bytes(_imbrique(1000))   # nom en quarantaine
+    lancer(inst.racine.parent / "e", inst, J0)
+    tous = {f.name: cellules(f) for f in inst.sortie.glob("*.csv")}
+    assert {"tableau_suivi.csv", "pieces_attendues.csv", "a_verifier.csv", "file_humaine.csv",
+            "escalades.csv", "periodes.csv", "quarantaine.csv"} <= set(tous)
+    for nom, cel in tous.items():
+        assert not [c for c in cel if c.startswith(CARACTERES_FORMULE)], nom
+    assert "'" + FORMULE_LIBELLE in tous["tableau_suivi.csv"]
+    assert "'=cmd|' calc'!A0.eml" in tous["quarantaine.csv"]
+    assert "120.00" in tous["tableau_suivi.csv"]     # un nombre reste un nombre
 
 
 def test_sain_injection_d_en_tete_par_le_libelle(tmp_path) -> None:
@@ -650,6 +667,10 @@ def test_regression_devise_ignoree_par_le_moteur() -> None:
     pc = Piece("P1", "A", "f.pdf", "LOXAM", dt.date(2026, 9, 2), Decimal("100.00"), devise="EUR")
     [r] = Moteur().rapprocher([op], [pc])
     assert r.statut is not Statut.JUSTIFIE
+    # Temoin : meme devise, le rapprochement fonctionne toujours (pas un moteur casse).
+    [r] = Moteur().rapprocher([op], [Piece("P2", "A", "f.pdf", "LOXAM", dt.date(2026, 9, 2),
+                                            Decimal("100.00"), devise="USD")])
+    assert r.statut is Statut.JUSTIFIE
 
 
 def _imbrique(n: int) -> bytes:
@@ -659,16 +680,20 @@ def _imbrique(n: int) -> bytes:
     return b"From: inconnu@evil.example\r\nMessage-ID: <bombe@x>\r\nMIME-Version: 1.0\r\n" + corps
 
 
-@pytest.mark.xfail(strict=True, raises=RecursionError, reason=(
-    "Un seul .eml d'un inconnu (1 000 message/rfc822 imbriques, ~35 Ko) leve RecursionError "
-    "dans lire_eml : executer_cycle avorte a chaque passage, pour TOUS les clients, "
-    "tant qu'un humain n'a pas retire le fichier (pas de quarantaine)."))
-def test_defaut_eml_imbrique_bloque_tout_le_cycle(entree: Path, inst: cycle.Instance) -> None:
+def test_regression_eml_imbrique_bloque_tout_le_cycle(entree: Path, inst: cycle.Instance) -> None:
     (inst.entrant / "0-bombe.eml").write_bytes(_imbrique(1000))
     (inst.entrant / "1.eml").write_bytes(eml("compta@alpha-sarl.fr", "<ok@x>", objet="facture 120,00 EUR",
                                              fichiers=(("f_2026-09.pdf", b"%PDF"),)))
     resume = lancer(entree, inst, J0)
     assert resume.brouillons_crees == 2 and resume.propositions == 1
+    assert resume.quarantaine == 1
+    with open(inst.sortie / "quarantaine.csv", encoding="utf-8") as f:
+        lignes = list(csv.reader(f))
+    assert [l[0] for l in lignes[1:]] == ["0-bombe.eml"] and "RecursionError" in lignes[1][2]
+    # Retente au cycle suivant, mais journalise une seule fois (pas de flot d'audit).
+    assert lancer(entree, inst, J0).quarantaine == 1
+    from rapprochement.audit import JournalAudit
+    assert sum(e.action == "eml_quarantaine" for e in JournalAudit(inst.audit).lire()) == 1
 
 
 def test_sain_degeneres_releve_vide_dossier_sans_contact(tmp_path) -> None:
@@ -739,27 +764,50 @@ def test_sain_ca08_independant_du_fuseau_de_la_locale_et_du_hash(tmp_path) -> No
     assert any(k.startswith("sortie/") for k in instances[0])
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Coupure de courant pendant l'ecriture du journal (derniere ligne tronquee) : le cycle "
-    "suivant VALIDE en base la creation des pieces puis echoue sur JournalCorrompu ; l'effet "
-    "est persiste sans trace d'audit, et chaque cycle suivant recommence (aucune reprise "
-    "possible sans editer le journal a la main)."))
-def test_defaut_journal_tronque_effets_sans_audit_et_cycle_bloque(tmp_path) -> None:
+def test_regression_journal_tronque_refus_avant_ecriture_puis_reparation(tmp_path) -> None:
+    """Contrat : journal tronque -> refus explicite AVANT toute ecriture en base ;
+    `reparer-audit` retire la fin tronquee (sauvegardee) ; le cycle reprend normalement."""
+    from rapprochement.audit import JournalAudit
     entree = ecrire_entree(tmp_path / "e", operations=[OPERATIONS[0]])
     inst = nouvelle_instance(tmp_path / "i")
     lancer(entree, inst, J0)
+    sain = inst.audit.read_bytes()
     with open(inst.audit, "ab") as f:
         f.write(b'{"acteur":"systeme","action":"pie')          # ecriture interrompue
     ecrire_entree(tmp_path / "e", operations=OPERATIONS)
-    avant = {(p.dossier, p.reference) for p in cycle.pieces(inst)}
+    avant_depot = etat_brut(inst)
     j1 = J0 + dt.timedelta(days=1)
-    try:
+    with pytest.raises(cycle.JournalNonSain):
         lancer(entree, inst, j1)
-    except Exception:
-        # Refus acceptable, mais alors rien ne doit avoir ete valide en base.
-        assert {(p.dossier, p.reference) for p in cycle.pieces(inst)} == avant
-    else:
-        assert cycle.verifier_audit(inst).ok
+    assert etat_brut(inst) == avant_depot
+    # Les decisions humaines sont refusees aussi, sans ecriture.
+    b = brouillon_de(inst, "compta@alpha-sarl.fr")
+    with pytest.raises(cycle.JournalNonSain):
+        cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a(j1))
+    assert etat_brut(inst) == avant_depot
+    # Reparation par la CLI, au nom d'un validateur declare.
+    cli = charger_cli()
+    base = ["--instance", str(inst.racine), "--date", j1.isoformat()]
+    assert cli.main(["cycle", "--entree", str(entree), *base]) == 1
+    assert cli.main(["reparer-audit", "--par", "Mallory", *base]) == 1
+    assert cli.main(["reparer-audit", "--par", VALIDEUSE, *base]) == 0
+    [fragment] = list(inst.racine.glob("audit.jsonl.fragment-*"))
+    assert fragment.read_bytes() == b'{"acteur":"systeme","action":"pie'
+    assert inst.audit.read_bytes().startswith(sain)
+    assert cycle.verifier_audit(inst).ok
+    derniere = JournalAudit(inst.audit).lire()[-1]
+    assert (derniere.action, derniere.acteur) == ("journal_repare", VALIDEUSE)
+    assert cli.main(["reparer-audit", "--par", VALIDEUSE, *base]) == 0      # idempotent
+    assert len(list(inst.racine.glob("audit.jsonl.fragment-*"))) == 1
+    assert cli.main(["cycle", "--entree", str(entree), *base]) == 0
+    assert {p.reference for p in cycle.pieces(inst)} == {"A-001", "A-002", "B-001"}
+    assert cli.main(["verifier-audit", *base]) == 0
+
+
+def etat_brut(inst: cycle.Instance) -> tuple:
+    with Depot(inst.depot) as d:
+        return (d.charger_pieces(), d.lister_brouillons(), d.file_humaine(resolue=None),
+                d.historique_envois())
 
 
 # ===========================================================================
@@ -797,3 +845,355 @@ def test_sain_ca09_5000_operations_20_dossiers_100_emails(tmp_path) -> None:
     duree = time.perf_counter() - t
     assert r.operations == 5000 and r.brouillons_crees == 20
     assert duree < 600, duree   # cible CA-09 ; mesure de reference : ~7 s
+
+
+# ===========================================================================
+# 8. Second passage : code nouveau (reparation du journal, quarantaine,
+#    neutralisation, affichage, deblocage, domaines declares) et boucle CLI
+# ===========================================================================
+
+from rapprochement.audit import JournalAudit, JournalCorrompu  # noqa: E402
+from rapprochement.parseurs import ErreurFormat  # noqa: E402
+
+
+def _journal(tmp_path: Path, n: int = 4) -> JournalAudit:
+    j = JournalAudit(tmp_path / "audit.jsonl")
+    for i in range(n):
+        j.ecrire("systeme", "action", f"objet-{i}", {"i": i},
+                 horodatage=dt.datetime(2026, 10, 5, 10, i, tzinfo=dt.timezone.utc))
+    return j
+
+
+def _fragments(tmp_path: Path) -> list[Path]:
+    return sorted(tmp_path.glob("audit.jsonl.fragment-*"))
+
+
+def test_sain_reparer_refuse_fin_tronquee_plus_alteration_au_milieu(tmp_path) -> None:
+    """Une falsification au milieu + une fin tronquee : rien n'est modifie, la preuve reste."""
+    j = _journal(tmp_path)
+    lignes = j.chemin.read_bytes().split(b"\n")
+    lignes[1] = lignes[1].replace(b'"objet-1"', b'"objet-X"')
+    j.chemin.write_bytes(b"\n".join(lignes) + b'{"seq":5,"acte')
+    avant = j.chemin.read_bytes()
+    with pytest.raises(JournalCorrompu):
+        j.reparer_fin_tronquee()
+    assert j.chemin.read_bytes() == avant and _fragments(tmp_path) == []
+    r = j.verifier()
+    assert not r.ok and r.premiere_erreur_seq == 2
+
+
+@pytest.mark.parametrize("alteration", ["derniere_complete_modifiee", "seq_saute", "ligne_vide_au_milieu"])
+def test_sain_reparer_ne_blanchit_pas_une_entree_complete(tmp_path, alteration) -> None:
+    j = _journal(tmp_path)
+    lignes = j.chemin.read_bytes().split(b"\n")[:-1]
+    if alteration == "derniere_complete_modifiee":
+        lignes[-1] = lignes[-1].replace(b'"objet-3"', b'"objet-Z"')
+    elif alteration == "seq_saute":
+        del lignes[2]
+    else:
+        lignes.insert(2, b"")
+    j.chemin.write_bytes(b"\n".join(lignes) + b"\n" + b'{"seq":9')
+    avant = j.chemin.read_bytes()
+    with pytest.raises(JournalCorrompu):
+        j.reparer_fin_tronquee()
+    assert j.chemin.read_bytes() == avant and _fragments(tmp_path) == []
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Coupure juste avant le saut de ligne final : la derniere entree est COMPLETE et valide "
+    "(hash et chaine corrects) mais `reparer_fin_tronquee` la retire de la chaine comme un "
+    "fragment (copie annexe seulement) ; l'evenement, dont l'effet est deja valide en base "
+    "par le cycle, n'a plus de trace dans le journal. Il suffisait d'ajouter le saut de ligne."))
+def test_defaut_reparer_retire_une_entree_complete_sans_saut_de_ligne(tmp_path) -> None:
+    j = _journal(tmp_path)
+    j.chemin.write_bytes(j.chemin.read_bytes()[:-1])           # seul le '\n' final manque
+    j.reparer_fin_tronquee()
+    r = j.verifier()
+    assert r.ok and r.nb_entrees == 4
+
+
+def test_sain_reparations_concurrentes_et_collision_de_fragment(tmp_path) -> None:
+    j = _journal(tmp_path)
+    sain = j.chemin.read_bytes()
+    j.chemin.write_bytes(sain + b'{"seq":5,"ac')
+    # Noms de fragment deja pris pour les secondes a venir : jamais ecrases.
+    maintenant = dt.datetime.now(dt.timezone.utc)
+    pieges = []
+    for k in range(-1, 6):
+        nom = (maintenant + dt.timedelta(seconds=k)).strftime("%Y%m%dT%H%M%SZ")
+        piege = tmp_path / f"audit.jsonl.fragment-{nom}"
+        piege.write_bytes(b"NE PAS ECRASER")
+        pieges.append(piege)
+    resultats: list[int] = []
+    depart = threading.Barrier(4)
+
+    def reparer() -> None:
+        depart.wait()
+        resultats.append(JournalAudit(j.chemin).reparer_fin_tronquee())
+
+    fils = [threading.Thread(target=reparer) for _ in range(4)]
+    for f in fils:
+        f.start()
+    for f in fils:
+        f.join()
+    assert sorted(resultats) == [0, 0, 0, len(b'{"seq":5,"ac')]
+    assert all(p.read_bytes() == b"NE PAS ECRASER" for p in pieges)
+    nouveaux = [f for f in _fragments(tmp_path) if f not in pieges]
+    assert len(nouveaux) == 1 and nouveaux[0].read_bytes() == b'{"seq":5,"ac'
+    assert j.chemin.read_bytes() == sain and j.verifier().ok
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "En-tete From de 112 Ko fait de 8 000 mots encodes RFC 2047 : l'analyseur d'en-tetes de la "
+    "bibliotheque standard est quadratique (mesure : 3 s et ~0,9 Go ; 224 Ko -> 17 s et 3,6 Go ; "
+    "~450 Ko -> ~14 Go, processus tue par le noyau). Aucune limite de taille avant analyse, "
+    "pas d'exception donc pas de quarantaine, et le fichier est relu a chaque cycle."))
+def test_defaut_en_tete_from_quadratique_ralentit_tout_le_cycle(entree, inst) -> None:
+    (inst.entrant / "lourd.eml").write_bytes(
+        b"From: " + b"=?utf-8?q?a?= " * 8000 + b"<a@b.fr>\r\nMessage-ID: <lourd@x>\r\n\r\nx\r\n")
+    t = time.perf_counter()
+    lancer(entree, inst, J0)
+    assert time.perf_counter() - t < 1.0
+
+
+def test_sain_quarantaine_fichiers_pathologiques(entree, inst, capsys) -> None:
+    """Octets nuls, charset inconnu, 8 bits bruts, boucle de frontieres, nom piege :
+    le cycle va au bout, les autres messages sont traites, rien ne pilote le terminal."""
+    H = b"From: inconnu@evil.example\r\nMessage-ID: <%d@x>\r\n"
+    (inst.entrant / "1-nul.eml").write_bytes(H % 1 + b"Subject: a\x00b\r\n\r\n\x00\x00\r\n")
+    (inst.entrant / "2-charset.eml").write_bytes(
+        H % 2 + b"Content-Type: text/plain; charset=foobar\r\n\r\n12,00 EUR\r\n")
+    (inst.entrant / "3-8bit.eml").write_bytes(
+        H % 3 + b"Subject: \xff\xfe\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Disposition: attachment; filename=\"f\xff\x1b[2J.pdf\"\r\n\r\nPDF\r\n--b--\r\n")
+    (inst.entrant / "4-boucle.eml").write_bytes(
+        H % 4 + b"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        + b"--b\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n" * 2000 + b"--b--\r\n")
+    (inst.entrant / "5-\x1b]52;c;cGF3bmVk\x07=HYPERLINK(1).eml").write_bytes(_imbrique(1000))
+    (inst.entrant / "6-ok.eml").write_bytes(eml("compta@alpha-sarl.fr", "<ok@x>", objet="facture 120,00 EUR",
+                                                fichiers=(("f_2026-09.pdf", b"%PDF"),)))
+    capsys.readouterr()
+    cli = charger_cli()
+    base = ["--instance", str(inst.racine), "--date", J0.isoformat()]
+    assert cli.main(["cycle", "--entree", str(entree), *base]) == 0
+    assert cli.main(["file", *base]) == 0
+    sortie = capsys.readouterr().out
+    assert not [c for c in sortie if c not in "\n" and unicodedata.category(c) in ("Cc", "Cf")]
+    r = lancer(entree, inst, J0)
+    assert r.propositions == 0 and r.doublons >= 1             # 6-ok deja propose
+    quarantaine = cellules(inst.sortie / "quarantaine.csv")
+    assert not [c for c in quarantaine if c.startswith(CARACTERES_FORMULE)]
+    assert any(c.startswith("5-") for c in quarantaine)
+    assert [d.dossier for d in cycle.lister_file(inst) if d.statut is StatutRoutage.PROPOSEE] == ["ALPHA"]
+
+
+@pytest.mark.parametrize("valeur", [
+    "=1+1", "+1+cmd|' /C calc'!A0", "-2+3", "@SUM(A1)", "\t=1", "\r=1",
+    "=HYPERLINK(\"http://x\")\n=1", "-cmd|' /C calc'!A0", "=DDE(\"cmd\";\"/C calc\";\"x\")",
+    "+33 6 12 34 56 78", "-", "=", "@",
+])
+def test_sain_neutraliser_formule_contrat(valeur) -> None:
+    from rapprochement.rapport import neutraliser_formule
+    n = neutraliser_formule(valeur)
+    assert n == "'" + valeur
+
+
+@pytest.mark.parametrize("valeur", ["-12.50", "+3", "-0,5", "12", "texte", "", "1=1"])
+def test_sain_neutraliser_formule_laisse_les_nombres_et_le_texte(valeur) -> None:
+    from rapprochement.rapport import neutraliser_formule
+    assert neutraliser_formule(valeur) == valeur
+
+
+@pytest.mark.parametrize("piege", ["\x9b2J", "\x1b]52;c;cGF3bmVk\x07", "\rFAUX", "\x08\x08\x08X",
+                                   "‮gnp.exe", "\x85NEL", "\x1bc", " L", "\x7f"])
+def test_sain_affichable_cli_file_et_pieces(tmp_path, capsys, piege) -> None:
+    """Toute valeur externe affichee (Message-ID, nom de piece jointe, code, reference)."""
+    dossiers = [["AL" + piege, "Alpha", "compta@alpha-sarl.fr", "M", "15", "courtois", "C-DIRECT", ""]]
+    ops = [["AL" + piege, "2026-09-03", "CB" + piege, "120.00", "", "R" + piege, "EUR"]]
+    entree = ecrire_entree(tmp_path / "e", dossiers=dossiers, operations=ops)
+    inst = nouvelle_instance(tmp_path / "i")
+    brut = eml("inconnu@evil.example", "<x@y>", fichiers=(("f.pdf", b"%PDF"),))
+    brut = brut.replace(b"Message-ID: <x@y>", b"Message-ID: " + ("M" + piege).encode("utf-8"))
+    (inst.entrant / "1.eml").write_bytes(brut)
+    cli = charger_cli()
+    base = ["--instance", str(inst.racine), "--date", J0.isoformat()]
+    capsys.readouterr()
+    assert cli.main(["cycle", "--entree", str(entree), *base]) == 0
+    assert cli.main(["file", *base]) == 0
+    assert cli.main(["pieces", *base]) == 0
+    assert cli.main(["valider", "x" + piege, "--par", VALIDEUSE, *base]) == 1
+    sorties = capsys.readouterr()
+    for flux in (sorties.out, sorties.err):
+        assert not [c for c in flux if c != "\n" and unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp")]
+
+
+def _piece_cli(inst, *args) -> int:
+    return charger_cli().main([*args, "--instance", str(inst.racine), "--date", J0.isoformat()])
+
+
+@pytest.mark.parametrize("motif", ["[cycle] litige", "  [cycle] litige", "[cycle]", "[cycle]x"])
+def test_sain_bloquer_refuse_le_prefixe_du_cycle(entree, inst, motif) -> None:
+    lancer(entree, inst, J0)
+    assert _piece_cli(inst, "bloquer", "--dossier", "ALPHA", "--reference", "A-001",
+                      "--par", VALIDEUSE, "--motif", motif) == 1
+    assert not {p.reference: p for p in cycle.pieces(inst)}["A-001"].bloquee
+
+
+@pytest.mark.parametrize("motif", ["[CYCLE] litige", "​[cycle] litige", "［cycle］ litige"])
+def test_sain_blocage_manuel_jamais_leve_par_le_cycle_ni_rattacher(entree, inst, motif) -> None:
+    lancer(entree, inst, J0)
+    assert _piece_cli(inst, "bloquer", "--dossier", "ALPHA", "--reference", "A-001",
+                      "--par", VALIDEUSE, "--motif", motif) == 0
+    lancer(entree, inst, J0 + dt.timedelta(days=1))
+    assert {p.reference: p for p in cycle.pieces(inst)}["A-001"].bloquee
+    p = cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a(J0 + dt.timedelta(days=1)),
+                              dossier="ALPHA", reference="A-001", id_piece="P1")
+    assert p.bloquee and p.motif_blocage == motif.strip()
+    assert lancer(entree, inst, J0 + dt.timedelta(days=2)).blocages_leves == 0
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Le deblocage humain est memorise PAR PIECE (`deblocage-humain:<dossier>/<ref>`), pas par "
+    "constat du moteur comme l'annonce `debloquer_piece` : une fois debloquee, la piece n'est "
+    "plus jamais rebloquee, meme quand une AUTRE facture la justifie ; le client continue "
+    "d'etre relance pour une piece que le cabinet a deja."))
+def test_defaut_deblocage_humain_ignore_un_nouveau_constat(tmp_path) -> None:
+    ops = [OPERATIONS[0]]
+    entree = ecrire_entree(tmp_path / "e", operations=ops)
+    inst = nouvelle_instance(tmp_path / "i")
+    lancer(entree, inst, J0)
+    j1, j2 = J0 + dt.timedelta(days=1), J0 + dt.timedelta(days=2)
+    ecrire_entree(tmp_path / "e", operations=ops,
+                  pieces=[["P1", "ALPHA", "p1.pdf", "LOXAM", "2026-09-02", "120.00", "EUR"]])
+    lancer(entree, inst, j1)
+    assert {p.reference: p for p in cycle.pieces(inst)}["A-001"].bloquee
+    cycle.debloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="P1 est une autre location",
+                          maintenant=a(j1))
+    ecrire_entree(tmp_path / "e", operations=ops,
+                  pieces=[["P2", "ALPHA", "p2.pdf", "LOXAM", "2026-09-03", "120.00", "EUR"]])
+    lancer(entree, inst, j2)
+    assert {p.reference: p for p in cycle.pieces(inst)}["A-001"].bloquee
+
+
+def test_sain_domaines_declares_temoins(tmp_path) -> None:
+    from rapprochement.modeles import Dossier
+    dossiers = {
+        "A": Dossier("A", "A", "jean@client-a.fr", "J", domaines=("CLIENT-A.FR.", "gmail.com")),
+        "B": Dossier("B", "B", "paul@client-b.fr", "P", domaines=("partage.fr",)),
+        "C": Dossier("C", "C", "x@client-c.fr", "X", domaines=("Partage.FR",)),
+    }
+    adresses = routage.adresses_par_dossier(dossiers)
+    domaines = routage.domaines_par_dossier(dossiers)
+    assert domaines["A"] == frozenset({"client-a.fr"})          # gmail.com ecarte
+
+    def dossier_de(exp: str):
+        m = MessageEntrant("<x@y>", exp, dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc),
+                           "facture 89,90 EUR", "", (FichierEntrant("f.pdf", b"P"),))
+        [d] = routage.router(m, adresses=adresses, attendues=[ATTENDUE_A, ATTENDUE_B],
+                             aujourdhui=J0, domaines=domaines)
+        return d.dossier, d.statut, d.motif
+
+    assert dossier_de("autre@client-a.fr")[:2] == ("A", StatutRoutage.PROPOSEE)
+    assert dossier_de("jean+factures@client-a.fr")[:2] == ("A", StatutRoutage.PROPOSEE)
+    assert dossier_de("x@mail.client-a.fr")[0] is None             # sous-domaine
+    assert dossier_de("x@gmail.com")[0] is None                    # grand public declare : ignore
+    assert dossier_de("x@partage.fr")[2] is MotifNonRoute.DOSSIER_AMBIGU
+    assert dossier_de("x@xn--client-a-x.fr")[0] is None
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Domaine declare 'strasse.de' ecrit 'straße.de' : la normalisation IDNA 2003 de Python le "
+    "replie sur 'strasse.de', un AUTRE domaine enregistrable (IDNA 2008 : xn--strae-oqa.de) ; "
+    "les e-mails d'une autre entreprise sont proposes dans ce dossier."))
+def test_defaut_domaine_declare_idna2003_replie_sur_un_autre_domaine() -> None:
+    from rapprochement.modeles import Dossier
+    dossiers = {"A": Dossier("A", "A", "jean@xn--strae-oqa.de", "J", domaines=("straße.de",))}
+    m = MessageEntrant("<x@y>", "compta@strasse.de", dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc),
+                       "facture 89,90 EUR", "", (FichierEntrant("f.pdf", b"P"),))
+    d = routage.router(m, adresses=routage.adresses_par_dossier(dossiers), attendues=[ATTENDUE_A],
+                       aujourdhui=J0, domaines=routage.domaines_par_dossier(dossiers))
+    assert all(x.dossier is None for x in d), d
+
+
+@pytest.mark.xfail(strict=True, raises=ErreurFormat, reason=(
+    "Colonne `domaines` malformee dans dossiers.csv : `ErreurFormat` n'est pas interceptee par "
+    "le CLI (trace Python au lieu d'un REFUS lisible) ; le cycle de TOUS les clients s'arrete "
+    "pour une cellule d'un seul dossier."))
+@pytest.mark.parametrize("domaines", ["client a.fr", "jean@client-a.fr", "localhost"])
+def test_defaut_cli_domaines_malformes_trace_au_lieu_d_un_refus(tmp_path, capsys, domaines) -> None:
+    dossiers = [DOSSIERS[0][:8] + [domaines], DOSSIERS[1][:8] + [""]]
+    entree = ecrire_entree(tmp_path / "e", dossiers=dossiers)
+    lignes = (entree / "dossiers.csv").read_text(encoding="utf-8").splitlines()
+    lignes[0] += ",domaines"
+    (entree / "dossiers.csv").write_text("\n".join(lignes) + "\n", encoding="utf-8")
+    inst = nouvelle_instance(tmp_path / "i")
+    code = charger_cli().main(["cycle", "--entree", str(entree), "--instance", str(inst.racine),
+                               "--date", J0.isoformat()])
+    assert code == 1 and "domaine" in capsys.readouterr().err
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Incoherence introduite par le correctif : le routage considere `jean+b@x.fr` et "
+    "`jean@x.fr` comme la MEME boite (suffixe +tag), mais la planification et la limite "
+    "hebdomadaire les traitent comme deux destinataires : deux e-mails le meme jour a la meme "
+    "personne."))
+def test_defaut_plus_tag_meme_boite_pour_le_routage_pas_pour_les_relances(tmp_path) -> None:
+    dossiers = [["ALPHA", "Alpha", "jean@relais-x.fr", "J", "15", "courtois", "C-DIRECT", ""],
+                ["BETA", "Beta", "jean+beta@relais-x.fr", "J", "15", "courtois", "C-DIRECT", ""]]
+    entree = ecrire_entree(tmp_path / "e", dossiers=dossiers)
+    inst = nouvelle_instance(tmp_path / "i")
+    assert lancer(entree, inst, J0).brouillons_crees == 1
+
+
+def test_sain_boucle_cli_des_correctifs(tmp_path, capsys) -> None:
+    """Chaque correctif rejoue de bout en bout par la CLI."""
+    dossiers = [["ALPHA", "Alpha SARL", "gerant.alpha@hotmail.ca", "M. Alpha", "15", "courtois", "C-DIRECT", ""],
+                ["CAFÉ", "Cafe", "compta@cafe.fr", "M", "15", "courtois", "C-DIRECT", ""]]
+    ops = [["ALPHA", "2026-09-03", FORMULE_LIBELLE, "120.00", "", "A-001", "USD"],
+           ["CAFÉ", "2026-09-04", "CB LOXAM", "50.00", "", "C-001", "EUR"]]
+    pieces = [["P1", "ALPHA", "p.pdf", "HYPERLINK", "2026-09-02", "120.00", "EUR"]]   # mauvaise devise
+    entree = ecrire_entree(tmp_path / "e", dossiers=dossiers, operations=ops, pieces=pieces)
+    inst = nouvelle_instance(tmp_path / "i", None)
+    inst.validateurs.write_bytes("﻿Marie Durand\r\n".encode("utf-8"))
+    (inst.entrant / "0-bombe.eml").write_bytes(_imbrique(1000))
+    (inst.entrant / "1.eml").write_bytes(eml("inconnu@hotmail.ca", "<p@x>", objet="facture 120,00 EUR",
+                                             fichiers=(("facture_2026-09.pdf", b"%PDF"),)))
+    cli = charger_cli()
+    base = ["--instance", str(inst.racine), "--date", J0.isoformat()]
+    assert cli.main(["cycle", "--entree", str(entree), *base]) == 0
+    assert {p.reference for p in cycle.pieces(inst)} == {"A-001", "C-001"}    # devise, NFC
+    assert [d.statut for d in cycle.lister_file(inst)] == [StatutRoutage.NON_ROUTEE]   # domaine
+    assert not [c for f in inst.sortie.glob("*.csv") for c in cellules(f) if c.startswith(CARACTERES_FORMULE)]
+    ids = sorted(b.id_relance for b in cycle.brouillons(inst, StatutBrouillon.BROUILLON))
+    assert len(ids) == 2
+    for i in ids:
+        assert cli.main(["valider", i, "--par", "marie durand", *base]) == 0       # BOM
+    # Apres tous les correctifs, un envoi valide reste possible, et une seule fois.
+    assert cli.main(["envoyer", ids[0], *base]) == 0
+    assert cli.main(["envoyer", ids[0], *base]) == 1
+    assert len(list(inst.outbox.glob("*.eml"))) == 1
+    assert cli.main(["verifier-audit", *base]) == 0
+
+
+def test_sain_cli_envoi_incertain_bloque_le_suivant(tmp_path, capsys) -> None:
+    entree = ecrire_entree(tmp_path / "e")
+    inst = nouvelle_instance(tmp_path / "i")
+    lancer(entree, inst, J0)
+    b1 = brouillon_de(inst, "compta@alpha-sarl.fr")
+    cycle.valider_relance(inst, b1.id_relance, VALIDEUSE, maintenant=a(J0))
+    with pytest.raises(TimeoutError):
+        cycle.envoyer_relance(inst, b1.id_relance, maintenant=a(J0), expediteur=_Coupure())
+    j1 = J0 + dt.timedelta(days=1)
+    for ref in ("A-001", "A-002"):
+        cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a(j1), dossier="ALPHA", reference=ref, id_piece=ref)
+    ecrire_entree(tmp_path / "e", operations=OPERATIONS + [
+        ["ALPHA", "2026-10-02", "CB AMAZON", "33.00", "", "A-005", "EUR"]])
+    cli = charger_cli()
+    base = ["--instance", str(inst.racine), "--date", j1.isoformat()]
+    assert cli.main(["cycle", "--entree", str(entree), *base]) == 0
+    b2 = brouillon_de(inst, "compta@alpha-sarl.fr")
+    assert cli.main(["valider", b2.id_relance, "--par", VALIDEUSE, *base]) == 0
+    capsys.readouterr()
+    assert cli.main(["envoyer", b2.id_relance, *base]) == 1
+    assert "EnvoiIncertainEnAttente" in capsys.readouterr().err
+    assert list(inst.outbox.glob("*.eml")) == []

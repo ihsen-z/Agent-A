@@ -3,8 +3,9 @@
 
 Sous-commandes : cycle, valider, rejeter, envoyer, trancher, file, rattacher,
 controler, promesse, arbitrer, bloquer, debloquer, pieces, verifier-audit,
-exporter. Toute decision humaine (valider, rejeter, trancher, rattacher,
-controler, promesse, arbitrer, bloquer, debloquer) exige `--par NOM`, NOM etant
+reparer-audit, exporter. Toute decision humaine (valider, rejeter, trancher,
+rattacher, controler, promesse, arbitrer, bloquer, debloquer, reparer-audit)
+exige `--par NOM`, NOM etant
 declare dans `<instance>/validateurs.txt`. Le cycle ne valide jamais rien lui-meme.
 `pieces` est en lecture seule.
 
@@ -33,6 +34,7 @@ from rapprochement.envoi import (                     # noqa: E402
     EnvoiNonValide,
     ErreurEnvoi,
 )
+from rapprochement.audit import JournalCorrompu       # noqa: E402
 from rapprochement.etats import TransitionInterdite   # noqa: E402
 from rapprochement.modeles import EtatPiece           # noqa: E402
 
@@ -130,6 +132,8 @@ def _parseur() -> argparse.ArgumentParser:
     s.add_argument("--etat", help="filtre : " + ", ".join(e.value for e in EtatPiece))
 
     sous.add_parser("verifier-audit", parents=[commun], help="verifie le journal d'audit")
+    sous.add_parser("reparer-audit", parents=[commun, humain],
+                    help="retire une derniere ligne tronquee du journal (coupure), jamais plus")
     s = sous.add_parser("exporter", parents=[commun], help="export JSON complet du depot")
     s.add_argument("--vers", required=True)
     return p
@@ -141,32 +145,34 @@ def _executer(args: argparse.Namespace) -> int:
     c = args.commande
     if c == "cycle":
         resume = cycle.executer_cycle(Path(args.entree), inst, aujourdhui, maintenant)
-        print(resume.texte(), end="")
-        print(f"Sorties : {inst.sortie}")
+        _afficher(resume.texte(), end="")
+        _afficher(f"Sorties : {inst.sortie}")
         return 0
     if c == "valider":
         b = cycle.valider_relance(inst, args.id_relance, args.par, maintenant=maintenant)
-        print(f"{b.id_relance} valide par {b.valide_par}")
+        _afficher(f"{b.id_relance} valide par {b.valide_par}")
         return 0
     if c == "rejeter":
         b = cycle.rejeter_relance(inst, args.id_relance, args.par, args.motif, maintenant=maintenant)
-        print(f"{b.id_relance} rejete")
+        _afficher(f"{b.id_relance} rejete")
         return 0
     if c == "envoyer":
         b = cycle.envoyer_relance(inst, args.id_relance, maintenant=maintenant)
-        print(f"{b.id_relance} envoye a {b.destinataire}")
+        _afficher(f"{b.id_relance} envoye a {b.destinataire}")
         return 0
     if c == "trancher":
         b = cycle.trancher_envoi(inst, args.id_relance, args.par, parti=args.parti, maintenant=maintenant)
-        print(f"{b.id_relance} -> {b.statut.value}")
+        _afficher(f"{b.id_relance} -> {b.statut.value}")
         return 0
     if c == "file":
         entrees = cycle.lister_file(inst)
         for d in entrees:
-            print(f"{d.statut.value:10s} {d.motif.value if d.motif else '-':20s} "
-                  f"{d.dossier or '-':14s} {d.reference_operation or '-':10s} "
-                  f"{d.message_id} {d.empreinte[:12] or '-'} {d.nom_fichier or '-'} : {d.detail}")
-        print(f"{len(entrees)} entree(s) a traiter")
+            v = cycle.affichable   # Message-ID, nom de fichier, detail : choisis par l'expediteur
+            _afficher(f"{d.statut.value:10s} {d.motif.value if d.motif else '-':20s} "
+                      f"{v(d.dossier or '-'):14s} {v(d.reference_operation or '-'):10s} "
+                      f"{v(d.message_id)} {v(d.empreinte[:12] or '-')} {v(d.nom_fichier or '-')} "
+                      f": {v(d.detail)}")
+        _afficher(f"{len(entrees)} entree(s) a traiter")
         return 0
     if c == "rattacher":
         p = cycle.rattacher_piece(
@@ -174,12 +180,12 @@ def _executer(args: argparse.Namespace) -> int:
             empreinte=args.empreinte, dossier=args.dossier, reference=args.reference,
             id_piece=args.piece,
         )
-        print(f"{p.dossier}/{p.reference} -> {p.etat.value}")
+        _afficher(f"{p.dossier}/{p.reference} -> {p.etat.value}")
         return 0
     if c == "controler":
         p = cycle.controler_piece(inst, args.dossier, args.reference, args.par,
                                   conforme=args.conforme, motif=args.motif, maintenant=maintenant)
-        print(f"{p.dossier}/{p.reference} -> {p.etat.value}")
+        _afficher(f"{p.dossier}/{p.reference} -> {p.etat.value}")
         return 0
     if c in ("promesse", "arbitrer", "bloquer", "debloquer"):
         if c == "promesse":
@@ -192,28 +198,46 @@ def _executer(args: argparse.Namespace) -> int:
                          maintenant=maintenant)
         drapeau = " (bloquee)" if p.bloquee else ""
         promesse = f" promise le {p.date_promesse.isoformat()}" if p.date_promesse else ""
-        print(f"{p.dossier}/{p.reference} -> {p.etat.value}{promesse}{drapeau}")
+        _afficher(f"{p.dossier}/{p.reference} -> {p.etat.value}{promesse}{drapeau}")
         return 0
     if c == "pieces":
-        print(cycle.suivi_pieces(inst, aujourdhui, dossier=args.dossier, etat=args.etat).texte(), end="")
+        _afficher(cycle.suivi_pieces(inst, aujourdhui, dossier=args.dossier, etat=args.etat).texte(), end="")
         return 0
     if c == "verifier-audit":
         r = cycle.verifier_audit(inst)
-        print(f"{'OK' if r.ok else 'ALTERE'} : {r.nb_entrees} entree(s) saine(s) ; {r.raison}")
+        _afficher(f"{'OK' if r.ok else 'ALTERE'} : {r.nb_entrees} entree(s) saine(s) ; {r.raison}")
         return 0 if r.ok else 1
+    if c == "reparer-audit":
+        r = cycle.reparer_audit(inst, args.par, maintenant=maintenant)
+        if r.octets_retires:
+            _afficher(f"journal repare : {r.octets_retires} octet(s) retire(s), sauvegardes dans {r.fragment}")
+        else:
+            _afficher("journal sain : rien a reparer")
+        return 0
     if c == "exporter":
-        print(cycle.exporter(inst, args.vers))
+        _afficher(cycle.exporter(inst, args.vers))
         return 0
     raise AssertionError(c)
+
+
+def _afficher(texte: object = "", *, end: str = "\n", file=None) -> None:
+    """print() dont chaque ligne passe par `cycle.affichable` : aucune valeur venue de
+    l'exterieur (Message-ID, nom de fichier, libelle, motif) ne pilote le terminal."""
+    propre = "\n".join(cycle.affichable(ligne) for ligne in str(texte).split("\n"))
+    print(propre, end=end, file=file if file is not None else sys.stdout)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parseur().parse_args(argv)
     try:
         return _executer(args)
+    except JournalCorrompu as exc:
+        # Alteration ailleurs qu'en fin : affichee telle quelle, jamais contournee.
+        _afficher(f"REFUS (JournalCorrompu) : {exc}", file=sys.stderr)
+        return 1
     except (cycle.ErreurCycle, EnvoiNonValide, EnvoiHorsCreneau, ErreurEnvoi,
             TransitionInterdite) as exc:
-        print(f"REFUS ({type(exc).__name__}) : {exc}", file=sys.stderr)
+        _afficher(f"REFUS ({type(exc).__name__}) : {exc}", file=sys.stderr)
         return 1
 
 

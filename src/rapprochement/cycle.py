@@ -76,6 +76,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -87,7 +88,7 @@ from zoneinfo import ZoneInfo
 
 from . import envoi as envoi_mod
 from . import etats, routage
-from .audit import JournalAudit, ResultatVerification
+from .audit import JournalAudit, JournalCorrompu, ResultatVerification
 from .cadence import FENETRE_HEBDO_JOURS, Planification, planifier
 from .depot import Depot
 from .exclusions import Referentiel
@@ -110,7 +111,7 @@ from .modeles import (
 )
 from .moteur import Moteur
 from .parseurs import lire_dossiers, lire_pieces, lire_releve
-from .rapport import ecrire_suivi
+from .rapport import ecrire_suivi, ligne_sure
 from .relances import construire_brouillon
 
 ACTEUR_SYSTEME = "systeme"
@@ -144,6 +145,10 @@ class CollisionReferences(ErreurCycle):
             "(dossiers listes ; corriger les references a la source, le cycle ne tranche pas) :\n"
             + "\n".join(lignes)
         )
+
+
+class JournalNonSain(ErreurCycle):
+    """Le journal d'audit ne verifie pas : aucune ecriture n'est faite tant qu'il ne l'est pas."""
 
 
 class ValidateurRefuse(ErreurCycle):
@@ -196,14 +201,55 @@ class Instance:
             chemin.mkdir(parents=True, exist_ok=True)
 
 
+def exiger_journal_sain(instance: Instance | Path | str) -> JournalAudit:
+    """Verifie le journal d'audit AVANT toute ecriture ; leve `JournalNonSain` sinon.
+
+    Sans cette garde, une derniere ligne tronquee (coupure de courant) laisserait le
+    cycle suivant valider ses effets en base puis echouer en ecrivant le journal :
+    des effets sans trace d'audit, a chaque passage.
+    """
+    inst = Instance.de(instance)
+    journal = JournalAudit(inst.audit)
+    r = journal.verifier()
+    if not r.ok:
+        raise JournalNonSain(
+            f"journal d'audit non sain ({affichable(r.raison)}) : aucune ecriture effectuee. "
+            "Si seule la derniere ligne est tronquee (coupure pendant une ecriture), lancer "
+            "`reparer-audit --par NOM`. Sinon NE PAS modifier le fichier : en garder une copie "
+            "et alerter le responsable (alteration possible)."
+        )
+    return journal
+
+
 @contextmanager
-def _ouvrir(instance: Instance) -> Iterator[tuple[Depot, JournalAudit]]:
+def _ouvrir(instance: Instance, *, ecriture: bool = False) -> Iterator[tuple[Depot, JournalAudit]]:
+    """`ecriture=True` : refuse (`JournalNonSain`) avant d'ouvrir la base si le journal
+    d'audit ne verifie pas. Les lectures (liste, export) restent possibles."""
     instance.preparer()
+    journal = exiger_journal_sain(instance) if ecriture else JournalAudit(instance.audit)
     depot = Depot(instance.depot)
     try:
-        yield depot, JournalAudit(instance.audit)
+        yield depot, journal
     finally:
         depot.fermer()
+
+
+_CARACTERES_INVISIBLES = ("Cc", "Cf", "Zl", "Zp")
+
+
+def affichable(valeur: object) -> str:
+    """Texte sans caractere de controle ni de mise en forme invisible (ESC, CR, LF,
+    U+202E...) : chacun devient une sequence visible `\\xNN` / `\\uNNNN`. Pour tout
+    affichage d'une valeur venue de l'exterieur (Message-ID, nom de fichier, libelle,
+    motif) : elle ne pilote jamais le terminal de l'operateur."""
+    texte = str(valeur)
+    sortie = []
+    for c in texte:
+        if unicodedata.category(c) in _CARACTERES_INVISIBLES:
+            sortie.append(f"\\x{ord(c):02x}" if ord(c) < 0x100 else f"\\u{ord(c):04x}")
+        else:
+            sortie.append(c)
+    return "".join(sortie)
 
 
 def lire_validateurs(instance: Instance | Path | str) -> tuple[str, ...]:
@@ -211,8 +257,15 @@ def lire_validateurs(instance: Instance | Path | str) -> tuple[str, ...]:
     chemin = Instance.de(instance).validateurs
     if not chemin.exists():
         return ()
+    try:
+        # utf-8-sig : un BOM (Bloc-notes Windows) ne doit pas coller au premier nom.
+        contenu = chemin.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValidateurRefuse(
+            f"{chemin.name} illisible ({type(exc).__name__}) : enregistrer le fichier en UTF-8"
+        ) from None
     noms = []
-    for ligne in chemin.read_text(encoding="utf-8").splitlines():
+    for ligne in contenu.splitlines():
         nom = ligne.strip()
         if nom and not nom.startswith("#"):
             noms.append(nom)
@@ -401,6 +454,7 @@ class ResumeCycle:
     reportees: dict[str, int] = field(default_factory=dict)
     bloquees: int = 0
     anomalies: list[str] = field(default_factory=list)
+    quarantaine: int = 0
 
     def en_dict(self) -> dict[str, Any]:
         return {
@@ -415,7 +469,7 @@ class ResumeCycle:
             "brouillons_crees": self.brouillons_crees,
             "brouillons_du_jour": list(self.brouillons_du_jour),
             "reportees": dict(sorted(self.reportees.items())), "bloquees": self.bloquees,
-            "anomalies": list(self.anomalies),
+            "anomalies": list(self.anomalies), "quarantaine": self.quarantaine,
         }
 
     def texte(self) -> str:
@@ -430,7 +484,7 @@ class ResumeCycle:
         lignes.append(f"  brouillons du jour          : {len(self.brouillons_du_jour)}")
         lignes += [f"    {i}" for i in self.brouillons_du_jour]
         lignes.append(f"  anomalies                   : {len(self.anomalies)}")
-        lignes += [f"    {a}" for a in self.anomalies]
+        lignes += [f"    {affichable(a)}" for a in self.anomalies]
         return "\n".join(lignes) + "\n"
 
 
@@ -525,7 +579,8 @@ def executer_cycle(
     rapprochements = Moteur(entrees.referentiel).rapprocher(entrees.operations, entrees.pieces)
     resume = ResumeCycle(aujourdhui=aujourdhui, operations=len(rapprochements))
 
-    with _ouvrir(inst) as (depot, journal):
+    # Journal d'audit sain AVANT toute ecriture en base (sinon : effets sans trace).
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         # 2 bis. Collisions entre le releve et le depot.
         collisions = collisions_de_reference(entrees.operations, depot.charger_pieces())
         if collisions:
@@ -544,7 +599,7 @@ def executer_cycle(
         a_verifier = _etape_pieces(depot, notes, rapprochements, aujourdhui, resume)
         _panne(panne, "apres_pieces")
 
-        _etape_routage(depot, notes, inst, entrees.dossiers, aujourdhui, resume)
+        quarantaine = _etape_routage(depot, notes, inst, entrees.dossiers, aujourdhui, resume)
         _panne(panne, "apres_routage")
 
         pieces_avant = depot.charger_pieces()
@@ -555,7 +610,7 @@ def executer_cycle(
         _etape_brouillons(depot, notes, plan, pieces_avant, entrees.dossiers, aujourdhui, resume, panne)
         _panne(panne, "avant_sorties")
 
-        ecrire_sorties(inst, depot, rapprochements, a_verifier, resume)
+        ecrire_sorties(inst, depot, rapprochements, a_verifier, resume, quarantaine=quarantaine)
         journal.ecrire(ACTEUR_SYSTEME, "cycle_termine", aujourdhui.isoformat(),
                        resume.en_dict(), horodatage=maintenant)
     return resume
@@ -640,18 +695,59 @@ def _cles_message(message: Any) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class FichierEnQuarantaine:
+    nom: str
+    empreinte: str        # SHA-256 du fichier brut, "" s'il est illisible sur disque
+    raison: str           # type et message de l'exception, sans trace Python
+
+
+CLE_QUARANTAINE = "eml-quarantaine:"
+
+
+def _raison(exc: BaseException) -> str:
+    message = " ".join(str(exc).split())[:300]
+    return f"{type(exc).__name__} : {message}" if message else type(exc).__name__
+
+
 def _etape_routage(depot: Depot, notes: _Notes, inst: Instance, dossiers: Mapping[str, Dossier],
-                   aujourdhui: dt.date, resume: ResumeCycle) -> None:
-    """Etape 5 : routage des .eml ; rien n'est rattache sans confirmation humaine."""
-    messages = routage.lire_dossier_eml(inst.entrant)
+                   aujourdhui: dt.date, resume: ResumeCycle) -> list[FichierEnQuarantaine]:
+    """Etape 5 : routage des .eml ; rien n'est rattache sans confirmation humaine.
+
+    Chaque fichier est lu et route isolement : un .eml pathologique (imbrication
+    profonde -> RecursionError, encodage casse...) part en quarantaine
+    (`sortie/quarantaine.csv`, journal `eml_quarantaine` une fois par empreinte) et
+    les autres messages sont traites normalement. Il est retente a chaque cycle.
+    """
     adresses = routage.adresses_par_dossier(dossiers)
-    resume.messages_lus = len(messages)
-    for message in messages:
-        attendues = depot.charger_pieces()
-        deja_vus = {c for c in _cles_message(message) if depot.est_vu(c)}
-        decisions = routage.router(
-            message, adresses=adresses, attendues=attendues, deja_vus=deja_vus, aujourdhui=aujourdhui,
-        )
+    domaines = routage.domaines_par_dossier(dossiers)
+    chemins = sorted(
+        (p for p in inst.entrant.iterdir() if p.is_file() and p.suffix.lower() == ".eml"),
+        key=lambda p: p.name,
+    )   # meme selection et meme ordre que routage.lire_dossier_eml
+    quarantaine: list[FichierEnQuarantaine] = []
+    for chemin in chemins:
+        try:
+            message = routage.lire_eml(chemin)
+            attendues = depot.charger_pieces()
+            deja_vus = {c for c in _cles_message(message) if depot.est_vu(c)}
+            decisions = routage.router(
+                message, adresses=adresses, attendues=attendues, deja_vus=deja_vus,
+                aujourdhui=aujourdhui, domaines=domaines,
+            )
+        except Exception as exc:  # noqa: BLE001 - un fichier ne doit jamais bloquer les autres
+            try:
+                empreinte = routage.empreinte_contenu(chemin.read_bytes())
+            except OSError:
+                empreinte = ""
+            q = FichierEnQuarantaine(chemin.name, empreinte, _raison(exc))
+            quarantaine.append(q)
+            with _transaction(depot, notes):
+                if depot.marquer_vu(CLE_QUARANTAINE + (empreinte or "illisible:" + chemin.name)):
+                    notes.noter("eml_quarantaine", chemin.name,
+                                {"empreinte": empreinte, "raison": q.raison})
+            continue
+        resume.messages_lus += 1
         with _transaction(depot, notes):
             for d in decisions:
                 if d.statut is StatutRoutage.DOUBLON:
@@ -673,6 +769,8 @@ def _etape_routage(depot: Depot, notes: _Notes, inst: Instance, dossiers: Mappin
                     resume.non_routees += 1
                     details["motif"] = d.motif.value if d.motif else ""
                     notes.noter("message_en_file_humaine", d.message_id, details)
+    resume.quarantaine = len(quarantaine)
+    return quarantaine
 
 
 def _etape_transitions(depot: Depot, notes: _Notes, plan: Planification,
@@ -746,7 +844,8 @@ def _ecrire_csv(chemin: Path, entetes: Sequence[str], lignes: Iterable[Sequence[
     ecrivain = csv.writer(tampon, lineterminator="\n")
     ecrivain.writerow(entetes)
     for ligne in lignes:
-        ecrivain.writerow(["" if v is None else v for v in ligne])
+        # Toute cellule texte est neutralisee (formule de tableur) ; un vrai nombre reste un nombre.
+        ecrivain.writerow(ligne_sure(["" if v is None else v for v in ligne]))
     chemin.write_bytes(tampon.getvalue().encode("utf-8"))
 
 
@@ -769,7 +868,11 @@ def texte_brouillon(b: Brouillon) -> str:
 
 
 def ecrire_sorties(inst: Instance, depot: Depot, rapprochements: list[Rapprochement],
-                   a_verifier: list[LigneAVerifier], resume: ResumeCycle) -> None:
+                   a_verifier: list[LigneAVerifier], resume: ResumeCycle, *,
+                   quarantaine: Sequence[FichierEnQuarantaine] = ()) -> None:
+    """Toutes les sorties. Chaque CSV passe par `rapport.ligne_sure` (formules de
+    tableur neutralisees : libelles, noms de pieces jointes et Message-ID viennent
+    de l'exterieur)."""
     sortie = inst.sortie
     sortie.mkdir(parents=True, exist_ok=True)
     ecrire_suivi(rapprochements, sortie / "tableau_suivi.csv")
@@ -817,6 +920,10 @@ def ecrire_sorties(inst: Instance, depot: Depot, rapprochements: list[Rapprochem
         int(p.bloquee), p.motif_blocage,
     ] for p in pieces if p.etat is EtatPiece.ESCALADEE))
 
+    _ecrire_csv(sortie / "quarantaine.csv", ("nom_fichier", "empreinte", "raison"), (
+        [q.nom, q.empreinte, q.raison] for q in sorted(quarantaine, key=lambda q: q.nom)
+    ))
+
     dossier_b = sortie / "brouillons"
     dossier_b.mkdir(exist_ok=True)
     for b in depot.lister_brouillons():
@@ -834,7 +941,7 @@ def valider_relance(instance: Instance | Path | str, id_relance: str, par: str, 
                     maintenant: dt.datetime) -> Brouillon:
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
-    with _ouvrir(inst) as (depot, journal):
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         return envoi_mod.valider(depot, journal, id_relance, nom, maintenant=maintenant)
 
 
@@ -842,7 +949,7 @@ def rejeter_relance(instance: Instance | Path | str, id_relance: str, par: str, 
                     maintenant: dt.datetime) -> Brouillon:
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
-    with _ouvrir(inst) as (depot, journal):
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         return envoi_mod.rejeter(depot, journal, id_relance, nom, motif, maintenant=maintenant)
 
 
@@ -891,7 +998,7 @@ def envoyer_relance(
     l'etape 4. Un crash entre les deux est rattrape par le cycle suivant.
     """
     inst = Instance.de(instance)
-    with _ouvrir(inst) as (depot, journal):
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         b = depot.charger_brouillon(id_relance)
         if b is not None and b.statut is StatutBrouillon.VALIDEE:
             _controler_avant_envoi(depot, journal, b, maintenant)
@@ -910,7 +1017,7 @@ def trancher_envoi(instance: Instance | Path | str, id_relance: str, par: str, *
                    maintenant: dt.datetime) -> Brouillon:
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
-    with _ouvrir(inst) as (depot, journal):
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         tranche = envoi_mod.trancher_envoi_incertain(
             depot, journal, id_relance, nom, parti=parti, maintenant=maintenant,
         )
@@ -952,7 +1059,7 @@ def rattacher_piece(
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
     aujourdhui = _jour_local(maintenant)
-    with _ouvrir(inst) as (depot, journal):
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         notes = _Notes(journal, maintenant)
         entree: DecisionRoutage | None = None
         if message_id is not None:
@@ -994,7 +1101,7 @@ def controler_piece(instance: Instance | Path | str, dossier: str, reference: st
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
     aujourdhui = _jour_local(maintenant)
-    with _ouvrir(inst) as (depot, journal):
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         notes = _Notes(journal, maintenant)
         with _transaction(depot, notes):
             piece = _piece(depot, dossier, reference)
@@ -1040,7 +1147,7 @@ def _decision_sur_piece(
     if not isinstance(maintenant, dt.datetime) or maintenant.utcoffset() is None:
         raise ValueError("maintenant doit etre un datetime avec fuseau")
     aujourdhui = _jour_local(maintenant)
-    with _ouvrir(inst) as (depot, journal):
+    with _ouvrir(inst, ecriture=True) as (depot, journal):
         notes = _Notes(journal, maintenant)
         with _transaction(depot, notes):
             piece = _piece(depot, dossier, reference)
@@ -1125,12 +1232,13 @@ class SuiviPieces:
         for l in self.lignes:
             p = l.piece
             sortie.append(
-                f"  {p.dossier:14s} {p.reference:12s} {p.periode} {p.etat.value:16s} "
-                f"relances={p.nb_relances} echeance={_iso(l.echeance) or '-':10s} "
-                f"{p.montant:>10} {p.devise}  {l.action}"
+                f"  {affichable(p.dossier):14s} {affichable(p.reference):12s} {p.periode} "
+                f"{p.etat.value:16s} relances={p.nb_relances} "
+                f"echeance={_iso(l.echeance) or '-':10s} "
+                f"{p.montant:>10} {affichable(p.devise)}  {affichable(l.action)}"
             )
         sortie.append(f"Periodes (etat calcule) : {len(self.periodes)}")
-        sortie += [f"  {d:14s} {per} {e.value}" for d, per, e in self.periodes]
+        sortie += [f"  {affichable(d):14s} {affichable(per)} {e.value}" for d, per, e in self.periodes]
         return "\n".join(sortie) + "\n"
 
 
@@ -1221,7 +1329,7 @@ def suivi_pieces(instance: Instance | Path | str, aujourdhui: dt.date, *,
             continue
         quand, action = echeances.get((p.dossier, p.reference), (None, _action_humaine(p)))
         b = en_attente.get((p.dossier, p.reference))
-        if b is not None and p.etat not in ETATS_TERMINAUX:
+        if b is not None and p.etat not in ETATS_TERMINAUX and not p.bloquee:
             action = f"brouillon {b.id_relance} {b.statut.value} : valider puis envoyer"
         lignes.append(LigneSuivi(p, quand, action))
     groupes: dict[tuple[str, str], list[PieceAttendue]] = {}
@@ -1236,6 +1344,38 @@ def verifier_audit(instance: Instance | Path | str) -> ResultatVerification:
     if not inst.audit.exists():
         return ResultatVerification(False, 0, None, "fichier du journal absent")
     return JournalAudit(inst.audit).verifier()
+
+
+@dataclass(frozen=True)
+class ReparationAudit:
+    octets_retires: int
+    fragment: str         # nom du fichier ou le fragment retire a ete sauvegarde, "" si rien
+
+
+def reparer_audit(instance: Instance | Path | str, par: str, *,
+                  maintenant: dt.datetime) -> ReparationAudit:
+    """Retire une derniere ligne tronquee du journal (`JournalAudit.reparer_fin_tronquee`),
+    puis journalise `journal_repare` (octets retires, fragment sauvegarde) au nom de `par`.
+
+    Validateur declare obligatoire. Journal sain : rien n'est fait, rien n'est ecrit
+    (idempotent). Journal altere AILLEURS qu'en fin : `audit.JournalCorrompu` remonte
+    tel quel, sans rien modifier (reparer effacerait la preuve d'une falsification)."""
+    inst = Instance.de(instance)
+    nom = exiger_validateur(inst, par)
+    if not isinstance(maintenant, dt.datetime) or maintenant.utcoffset() is None:
+        raise ValueError("maintenant doit etre un datetime avec fuseau")
+    journal = JournalAudit(inst.audit)
+    motif = f"{inst.audit.name}.fragment-*"
+    avant = {p.name for p in inst.racine.glob(motif)}
+    octets = journal.reparer_fin_tronquee()
+    if octets == 0:
+        return ReparationAudit(0, "")
+    nouveaux = sorted(p.name for p in inst.racine.glob(motif) if p.name not in avant)
+    fragment = nouveaux[-1] if nouveaux else ""
+    journal.ecrire(nom, "journal_repare", inst.audit.name,
+                   {"par": nom, "octets_retires": octets, "fragment": fragment},
+                   horodatage=maintenant)
+    return ReparationAudit(octets, fragment)
 
 
 def exporter(instance: Instance | Path | str, chemin: Path | str) -> Path:
@@ -1255,7 +1395,9 @@ def brouillons(instance: Instance | Path | str,
 
 
 __all__ = [
-    "CollisionReferences", "EnvoiRefuse", "ErreurCycle", "Instance", "LigneSuivi",
+    "CollisionReferences", "EnvoiRefuse", "ErreurCycle", "FichierEnQuarantaine", "Instance",
+    "JournalNonSain", "LigneSuivi", "ReparationAudit", "affichable", "exiger_journal_sain",
+    "reparer_audit",
     "ResumeCycle", "SuiviPieces", "ValidateurRefuse", "arbitrer_piece", "bloquer_piece",
     "brouillons", "collisions_de_reference", "controler_piece", "debloquer_piece",
     "saisir_promesse", "suivi_pieces",
