@@ -219,7 +219,9 @@ class Moteur:
         return [
             p
             for p in disponibles.get(operation.dossier, [])
-            if p.id_piece not in consommees and _dans_la_fenetre(operation, p)
+            if p.id_piece not in consommees
+            and p.devise == operation.devise
+            and _dans_la_fenetre(operation, p)
         ]
 
     def _similarite(self, operation: OperationBancaire, piece: Piece) -> float:

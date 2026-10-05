@@ -251,11 +251,7 @@ def test_sain_boucle_complete_nom_affiche_usurpe(entree: Path, inst: cycle.Insta
     assert [(d.statut, d.dossier) for d in file] == [(StatutRoutage.NON_ROUTEE, None)]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Code dossier en forme decomposee (NFD, export macOS) dans le releve et composee (NFC) "
-    "dans dossiers.csv : un meme client devient deux dossiers ; ses pieces sont reportees "
-    "DOSSIER_INCONNU a chaque cycle et ne sont jamais reclamees, sans erreur."))
-def test_defaut_code_dossier_nfc_nfd_jamais_relance(tmp_path: Path) -> None:
+def test_regression_code_dossier_nfc_nfd_jamais_relance(tmp_path: Path) -> None:
     nfc, nfd = "CAFÉ", "CAFÉ"
     dossiers = [[nfc, "Cafe SARL", "compta@cafe.fr", "M. Cafe", "15", "courtois", "C-DIRECT", ""]]
     ops = [[nfd, "2026-09-03", "CB LOXAM", "120.00", "", "C-001", "EUR"]]
@@ -442,11 +438,7 @@ class _Coupure:
         raise TimeoutError("connexion SMTP coupee apres DATA")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Un envoi INCERTAIN (EN_COURS, peut-etre parti) vers un destinataire n'est pas compte "
-    "par la limite hebdomadaire (seule la table `envois` l'est) : le lendemain, un second "
-    "brouillon vers le meme client part sans obstacle -> deux e-mails dans la semaine."))
-def test_defaut_envoi_incertain_ignore_par_la_limite_hebdo(tmp_path: Path) -> None:
+def test_regression_envoi_incertain_ignore_par_la_limite_hebdo(tmp_path: Path) -> None:
     entree = ecrire_entree(tmp_path / "e")
     inst = nouvelle_instance(tmp_path / "i")
     lancer(entree, inst, J0)
@@ -570,10 +562,7 @@ def _sorties_piegees(tmp_path: Path) -> cycle.Instance:
     return inst
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Injection de formule CSV : un libelle de releve '=HYPERLINK(...)' est ecrit tel quel "
-    "dans tableau_suivi.csv (destine a Google Sheets/Excel)."))
-def test_defaut_formule_csv_tableau_suivi(tmp_path) -> None:
+def test_regression_formule_csv_tableau_suivi(tmp_path) -> None:
     inst = _sorties_piegees(tmp_path)
     assert not [c for c in cellules(inst.sortie / "tableau_suivi.csv") if c.startswith(CARACTERES_FORMULE)]
 
@@ -664,10 +653,7 @@ def test_sain_nom_de_piece_jointe_traversee(tmp_path) -> None:
 # ===========================================================================
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Le moteur ignore la devise : une operation de 100,00 USD est JUSTIFIEE par une facture "
-    "de 100,00 EUR ; la vraie piece n'est jamais reclamee."))
-def test_defaut_devise_ignoree_par_le_moteur() -> None:
+def test_regression_devise_ignoree_par_le_moteur() -> None:
     op = OperationBancaire("R1", "A", dt.date(2026, 9, 3), "CB LOXAM", Decimal("100.00"), Sens.DEBIT, devise="USD")
     pc = Piece("P1", "A", "f.pdf", "LOXAM", dt.date(2026, 9, 2), Decimal("100.00"), devise="EUR")
     [r] = Moteur().rapprocher([op], [pc])

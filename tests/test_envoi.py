@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rapprochement import envoi, etats
 from rapprochement.envoi import (
     EnvoiHorsCreneau,
+    EnvoiIncertainEnAttente,
     EnvoiLimiteHebdomadaire,
     EnvoiNonValide,
     ErreurEnvoi,
@@ -1120,8 +1121,12 @@ def test_limite_hebdo_casse_du_destinataire_ignoree(depot, journal, valide, anci
 
 
 def test_limite_hebdo_ne_compte_pas_un_brouillon_en_cours_d_un_autre_message(depot, journal, valide) -> None:
-    autre = faire_brouillon(id_relance="autre", references=("OPZ",), statut=S.EN_COURS, valide_par="Bob")
-    depot.sauver_brouillon(autre)  # EN_COURS : pas un envoi enregistre
+    """Un EN_COURS n'est pas un envoi enregistre : il n'alimente pas la fenetre (il bloque autrement,
+    voir EnvoiIncertainEnAttente, et seulement vers le meme destinataire)."""
+    autre = faire_brouillon(id_relance="autre", destinataire="ailleurs@exemple.fr", references=("OPZ",),
+                            statut=S.EN_COURS, valide_par="Bob")
+    depot.sauver_brouillon(autre)
+    assert depot.historique_envois() == []
     exp = Espion()
     envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
     assert exp.n == 1
@@ -1158,3 +1163,105 @@ def test_limite_hebdo_un_envoi_incertain_ne_declenche_pas_de_second_envoi(depot,
     with pytest.raises(EnvoiNonValide):
         envoyer(depot, journal, exp, premier.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
     assert exp.n == 0
+
+
+# ---------------------------------------------------------------------------
+# Un envoi incertain d'un autre brouillon bloque le meme destinataire jusqu'a decision humaine
+# ---------------------------------------------------------------------------
+
+
+def mettre_en_incertain(depot, journal, ident: str, destinataire: str = "client@exemple.fr") -> Brouillon:
+    br = valider_un_autre(depot, journal, ident, destinataire)
+    with pytest.raises(TimeoutError):
+        envoyer(depot, journal, Espion(leve=TimeoutError("coupure")), ident, maintenant=MAINTENANT,
+                creneau_ok=lambda _: True)
+    assert statut(depot, br) is S.EN_COURS
+    return br
+
+
+def test_incertain_en_attente_bloque_le_meme_destinataire(depot, journal) -> None:
+    mettre_en_incertain(depot, journal, "aaaa")
+    second = valider_un_autre(depot, journal, "bbbb")
+    exp = Espion()
+    lendemain = MAINTENANT + dt.timedelta(days=1)
+    with pytest.raises(EnvoiIncertainEnAttente) as info:
+        envoyer(depot, journal, exp, second.id_relance, maintenant=lendemain, creneau_ok=lambda _: True)
+    assert isinstance(info.value, EnvoiNonValide) and "aaaa" in str(info.value)
+    assert exp.n == 0 and statut(depot, second) is S.VALIDEE
+    (e,) = refus(journal)
+    assert e.acteur == "systeme" and e.objet == "bbbb" and e.details["operation"] == "envoyer"
+    assert e.details["type"] == "EnvoiIncertainEnAttente" and "aaaa" in e.details["raison"]
+    assert "envoi_demarre" not in journal.actions()[journal.actions().index("envoi_incertain"):]
+    assert statut(depot, faire_brouillon(id_relance="aaaa")) is S.EN_COURS
+
+
+def test_pas_de_fenetre_de_temps_pour_l_incertain(depot, journal) -> None:
+    mettre_en_incertain(depot, journal, "aaaa")
+    second = valider_un_autre(depot, journal, "bbbb")
+    exp = Espion()
+    for jours in (1, 8, 365):
+        with pytest.raises(EnvoiIncertainEnAttente):
+            envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT + dt.timedelta(days=jours),
+                    creneau_ok=lambda _: True)
+    assert exp.n == 0 and statut(depot, second) is S.VALIDEE
+
+
+@pytest.mark.parametrize("parti", [False, True])
+def test_incertain_tranche_debloque(depot, journal, parti) -> None:
+    mettre_en_incertain(depot, journal, "aaaa")
+    second = valider_un_autre(depot, journal, "bbbb")
+    trancher_envoi_incertain(depot, journal, "aaaa", "Alice", parti=parti, maintenant=MAINTENANT)
+    exp = Espion()
+    if parti:
+        # Plus d'envoi incertain, mais le message confirme parti compte pour la limite hebdomadaire.
+        with pytest.raises(EnvoiLimiteHebdomadaire):
+            envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT, creneau_ok=lambda _: True)
+        assert exp.n == 0
+        envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT + dt.timedelta(days=7),
+                creneau_ok=lambda _: True)
+    else:
+        envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 1 and statut(depot, second) is S.ENVOYEE
+    assert not any(e.details.get("type") == "EnvoiIncertainEnAttente" for e in refus(journal))
+
+
+def test_incertain_autre_destinataire_non_bloque(depot, journal) -> None:
+    mettre_en_incertain(depot, journal, "aaaa", "client@exemple.fr")
+    autre = valider_un_autre(depot, journal, "bbbb", "autre@exemple.fr")
+    exp = Espion()
+    envoyer(depot, journal, exp, autre.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 1 and statut(depot, autre) is S.ENVOYEE
+
+
+@pytest.mark.parametrize("variante", ["CLIENT@Exemple.FR", "  client@exemple.fr "])
+def test_incertain_casse_du_destinataire_ignoree(depot, journal, variante) -> None:
+    mettre_en_incertain(depot, journal, "aaaa", variante)
+    second = valider_un_autre(depot, journal, "bbbb", "client@exemple.fr")
+    exp = Espion()
+    with pytest.raises(EnvoiIncertainEnAttente):
+        envoyer(depot, journal, exp, second.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 0 and statut(depot, second) is S.VALIDEE
+
+
+def test_le_brouillon_incertain_lui_meme_reste_refuse_par_son_statut(depot, journal) -> None:
+    br = mettre_en_incertain(depot, journal, "aaaa")
+    exp = Espion()
+    with pytest.raises(EnvoiNonValide) as info:
+        envoyer(depot, journal, exp, br.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert not isinstance(info.value, EnvoiIncertainEnAttente)  # refus de statut, pas de blocage croise
+    assert exp.n == 0
+
+
+def test_plusieurs_incertains_il_faut_tous_les_trancher(depot, journal) -> None:
+    mettre_en_incertain(depot, journal, "aaaa")
+    # Forge un second EN_COURS (cas d'un incident passe) sans passer par envoyer.
+    forge = faire_brouillon(id_relance="cccc", references=("C",), statut=S.EN_COURS, valide_par="Bob")
+    depot.sauver_brouillon(forge)
+    second = valider_un_autre(depot, journal, "bbbb")
+    trancher_envoi_incertain(depot, journal, "aaaa", "Alice", parti=False, maintenant=MAINTENANT)
+    exp = Espion()
+    with pytest.raises(EnvoiIncertainEnAttente):
+        envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    trancher_envoi_incertain(depot, journal, "cccc", "Alice", parti=False, maintenant=MAINTENANT)
+    envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 1 and statut(depot, second) is S.ENVOYEE

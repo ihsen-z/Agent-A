@@ -9,6 +9,35 @@ from pathlib import Path
 
 from .modeles import Rapprochement, Statut
 
+# Un tableur (Excel, Google Sheets) interprete comme une FORMULE toute cellule qui
+# commence par l'un de ces caracteres. Les libelles bancaires et les noms de
+# pieces jointes viennent de l'exterieur : sans precaution, un libelle
+# `=HYPERLINK(...)` s'execute a l'ouverture du tableau de suivi.
+_DECLENCHEURS_DE_FORMULE = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _est_nombre(valeur: str) -> bool:
+    try:
+        Decimal(valeur.replace(",", ".").strip())
+    except Exception:
+        return False
+    return True
+
+
+def neutraliser_formule(valeur: str) -> str:
+    """Prefixe d'une apostrophe une cellule qu'un tableur lirait comme une formule.
+
+    Un vrai nombre (`-12.50`) reste intact : il doit rester numerique.
+    """
+    if valeur and valeur[0] in _DECLENCHEURS_DE_FORMULE and not _est_nombre(valeur):
+        return "'" + valeur
+    return valeur
+
+
+def ligne_sure(cellules: list[object]) -> list[object]:
+    """Neutralise les formules dans toute cellule de type texte d'une ligne CSV."""
+    return [neutraliser_formule(c) if isinstance(c, str) else c for c in cellules]
+
 ENTETES_SUIVI = (
     "dossier",
     "reference",
@@ -37,7 +66,7 @@ def ecrire_suivi(rapprochements: list[Rapprochement], chemin: Path | str) -> Pat
             key=lambda x: (x.operation.dossier, x.operation.date_operation),
         ):
             ecrivain.writerow(
-                [
+                ligne_sure([
                     r.operation.dossier,
                     r.operation.reference,
                     r.operation.date_operation.isoformat(),
@@ -50,7 +79,7 @@ def ecrire_suivi(rapprochements: list[Rapprochement], chemin: Path | str) -> Pat
                     " + ".join(p.fournisseur for p in r.pieces),
                     r.motif,
                     r.regle,
-                ]
+                ])
             )
     return chemin
 

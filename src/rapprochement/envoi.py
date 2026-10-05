@@ -49,6 +49,10 @@ class EnvoiLimiteHebdomadaire(EnvoiNonValide):
     """Un message est deja parti vers ce destinataire dans la fenetre de 7 jours glissants."""
 
 
+class EnvoiIncertainEnAttente(EnvoiNonValide):
+    """Un autre envoi vers ce destinataire est EN_COURS : un humain doit d'abord le trancher."""
+
+
 class EnvoiHorsCreneau(Exception):
     """Hors du creneau d'envoi : rien n'est parti, le brouillon reste VALIDEE."""
 
@@ -290,7 +294,7 @@ def _preparer_envoi(
     if not creneau_ok(maintenant):
         raise EnvoiHorsCreneau(f"{maintenant.isoformat()} est hors du creneau d'envoi")
 
-    # 3. Limite hebdomadaire, au dernier maillon (garde-fou non parametrable) puis
+    # 3. Limite hebdomadaire et envoi incertain en attente, au dernier maillon (garde-fou non parametrable) puis
     #    VALIDEE -> EN_COURS, persiste et journalise AVANT d'emettre. On relit dans la
     #    transaction : deux appels qui se chevauchent ne passent pas tous les deux.
     #    Import tardif de la fenetre (comme le creneau) : cadence.py est ecrit en parallele.
@@ -309,6 +313,16 @@ def _preparer_envoi(
                 f"un message est deja parti vers ce destinataire le {dernier.date_envoi.isoformat()} "
                 f"(relance {dernier.id_relance}) : limite d'un e-mail par {FENETRE_HEBDO_JOURS} jours"
             )
+        # Un envoi dont on ignore l'issue (EN_COURS) est peut-etre deja parti : pas de fenetre
+        # de temps, un humain doit le trancher (`trancher_envoi_incertain`) avant tout nouvel
+        # envoi vers le meme destinataire (casse et espaces de bord ignores).
+        cible = courant.destinataire.strip().casefold()
+        for autre in depot.lister_brouillons(StatutBrouillon.EN_COURS):
+            if autre.id_relance != courant.id_relance and autre.destinataire.strip().casefold() == cible:
+                raise EnvoiIncertainEnAttente(
+                    f"l'envoi {autre.id_relance} vers ce destinataire est EN_COURS (resultat inconnu) : "
+                    "a trancher par un humain avant tout nouvel envoi"
+                )
         en_cours = dataclasses.replace(courant, statut=StatutBrouillon.EN_COURS)
         _maj(depot, en_cours)
         journal.ecrire(

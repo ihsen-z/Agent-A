@@ -21,6 +21,7 @@ from rapprochement.audit import JournalAudit
 from rapprochement.depot import Depot
 from rapprochement.envoi import (
     EnvoiHorsCreneau,
+    EnvoiIncertainEnAttente,
     EnvoiLimiteHebdomadaire,
     EnvoiNonValide,
     ErreurEnvoi,
@@ -256,3 +257,21 @@ def test_limite_hebdomadaire_avec_le_vrai_depot(depot, journal, b) -> None:
     # 7 jours plus tard (mardi suivant, 10h) : autorise.
     envoyer(depot, journal, exp, "autre01", maintenant=MARDI_10H + dt.timedelta(days=7))
     assert exp.n == 2 and journal.verifier().ok
+
+
+def test_incertain_en_attente_bloque_le_meme_destinataire_vrai_depot(depot, journal, b) -> None:
+    second = Brouillon("autre02", "Client@Exemple.fr", "o", "c", ("D1",), ("OP8",), 1, dt.date(2026, 10, 5))
+    depot.sauver_brouillon(second)
+    valider(depot, journal, b.id_relance, "Alice", maintenant=MARDI_10H)
+    valider(depot, journal, "autre02", "Alice", maintenant=MARDI_10H)
+    with pytest.raises(TimeoutError):
+        envoyer(depot, journal, Espion(leve=TimeoutError("t")), b.id_relance, maintenant=MARDI_10H)
+    exp = Espion()
+    lendemain = MARDI_10H + dt.timedelta(days=1)
+    with pytest.raises(EnvoiIncertainEnAttente):
+        envoyer(depot, journal, exp, "autre02", maintenant=lendemain)
+    assert exp.n == 0 and statut(depot, second) is S.VALIDEE
+    assert actions(journal)[-1] == ("systeme", "envoi_refuse")
+    trancher_envoi_incertain(depot, journal, b.id_relance, "Alice", parti=False, maintenant=lendemain)
+    envoyer(depot, journal, exp, "autre02", maintenant=lendemain)
+    assert exp.n == 1 and statut(depot, second) is S.ENVOYEE and journal.verifier().ok

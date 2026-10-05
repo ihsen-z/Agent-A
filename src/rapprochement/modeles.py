@@ -67,6 +67,11 @@ class Dossier:
     # comme C-DIRECT, ce qui reproduit le comportement historique.
     circuit: str = "C-DIRECT"
     email_relais: str = ""
+    # Domaines d'entreprise que le cabinet DECLARE comme appartenant a ce client.
+    # Seul moyen d'identifier un dossier par le domaine d'un expediteur : une liste
+    # noire de messageries grand public serait incomplete par nature (hotmail.ca,
+    # t-online.de...). Vide par defaut : on ne route alors que par adresse exacte.
+    domaines: tuple[str, ...] = ()
 
     @property
     def destinataire(self) -> str:

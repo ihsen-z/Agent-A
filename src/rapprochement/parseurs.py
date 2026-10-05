@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import hashlib
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -59,6 +60,15 @@ def _exiger(entetes: set[str], attendues: set[str], fichier: str) -> None:
         )
 
 
+def _nfc(texte: str) -> str:
+    """Forme de composition unique : 'e' + accent combinant devient 'e accentue'.
+
+    Sans cela, deux codes dossier qui s'affichent a l'identique sont deux cles
+    differentes, et le client dont le code est ecrit autrement n'est jamais relance.
+    """
+    return unicodedata.normalize("NFC", texte.strip())
+
+
 def _reference_de_repli(
     dossier: str,
     date_operation: dt.date,
@@ -101,7 +111,7 @@ def lire_releve(chemin: Path | str, dossier_defaut: str | None = None) -> list[O
                 continue
             sens = Sens.DEBIT if debit != 0 else Sens.CREDIT
             montant = abs(debit) if sens is Sens.DEBIT else abs(credit)
-            dossier = (ligne.get("dossier") or dossier_defaut or "").strip()
+            dossier = _nfc(ligne.get("dossier") or dossier_defaut or "")
             if not dossier:
                 raise ErreurFormat(
                     f"{chemin.name} ligne {numero} : dossier absent et aucun dossier par defaut"
@@ -147,7 +157,7 @@ def lire_pieces(chemin: Path | str) -> list[Piece]:
             pieces.append(
                 Piece(
                     id_piece=ligne["id_piece"].strip(),
-                    dossier=ligne["dossier"].strip(),
+                    dossier=_nfc(ligne["dossier"]),
                     fichier=(ligne.get("fichier") or "").strip(),
                     fournisseur=(ligne["fournisseur"] or "").strip(),
                     date_facture=lire_date(ligne["date_facture"]),
@@ -161,7 +171,7 @@ def lire_pieces(chemin: Path | str) -> list[Piece]:
 
 
 def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
-    """dossiers.csv : dossier,raison_sociale,email_contact,nom_contact[,jour_echeance_tva,ton_relance,circuit,email_relais]"""
+    """dossiers.csv : dossier,raison_sociale,email_contact,nom_contact[,jour_echeance_tva,ton_relance,circuit,email_relais,domaines]"""
     chemin = Path(chemin)
     dossiers: dict[str, Dossier] = {}
     with open(chemin, newline="", encoding="utf-8-sig") as f:
@@ -172,7 +182,7 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
             chemin.name,
         )
         for ligne in lecteur:
-            code = ligne["dossier"].strip()
+            code = _nfc(ligne["dossier"])
             circuit = (ligne.get("circuit") or "C-DIRECT").strip().upper()
             email_relais = (ligne.get("email_relais") or "").strip()
             if circuit not in CIRCUITS:
@@ -185,6 +195,16 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
                     f"{chemin.name} : le dossier {code} est en C-RELAIS "
                     "mais email_relais est vide"
                 )
+            domaines = tuple(
+                d for d in (x.strip().lower() for x in (ligne.get("domaines") or "").split(";")) if d
+            )
+            for domaine in domaines:
+                if "@" in domaine or " " in domaine or "." not in domaine:
+                    raise ErreurFormat(
+                        f"{chemin.name} : domaine '{domaine}' invalide pour {code} "
+                        "(attendu : un nom de domaine comme cabinet-martin.fr, "
+                        "plusieurs separes par des points-virgules)"
+                    )
             dossiers[code] = Dossier(
                 code=code,
                 raison_sociale=(ligne["raison_sociale"] or "").strip(),
@@ -194,5 +214,6 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
                 ton_relance=(ligne.get("ton_relance") or "courtois").strip(),
                 circuit=circuit,
                 email_relais=email_relais,
+                domaines=domaines,
             )
     return dossiers

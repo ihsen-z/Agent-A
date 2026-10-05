@@ -263,6 +263,97 @@ class JournalAudit:
         entree, _ = _analyser_ligne(ligne[:-1])
         return entree
 
+    def reparer_fin_tronquee(self) -> int:
+        """Retire une derniere ligne incomplete laissee par une coupure.
+
+        Repare SI ET SEULEMENT SI la derniere ligne est incomplete (pas de saut
+        de ligne final, ou JSON invalide) ET que toutes les lignes completes qui
+        la precedent verifient (chaine intacte). Le fragment est d'abord copie
+        dans `<chemin>.fragment-<AAAAMMJJTHHMMSSZ>` (jamais de suppression
+        silencieuse), puis le fichier est tronque juste avant et synchronise.
+        Renvoie le nombre d'octets retires.
+
+        Renvoie 0, sans rien toucher, si le journal est vide ou sain. Leve
+        `JournalCorrompu`, sans RIEN modifier, si une entree complete est
+        alteree ou si la chaine est rompue ailleurs qu'en fin : reparer
+        effacerait la preuve d'une falsification. Meme verrou exclusif que
+        `ecrire` ; idempotent.
+        """
+        with self._verrou_thread, open(self.chemin, "a+b") as f:
+            self._verrouiller(f, exclusif=True)
+            f.seek(0)
+            donnees = f.read()
+            if not donnees:
+                return 0
+            lignes = donnees.split(b"\n")
+            termine = lignes[-1] == b""
+            if termine:
+                lignes.pop()
+            candidate = lignes[-1]
+            precedentes = lignes[:-1]
+
+            precedent = HASH_INITIAL
+            for rang, brut in enumerate(precedentes, start=1):
+                try:
+                    precedent = self._controler(brut, rang, precedent)
+                except JournalCorrompu as exc:
+                    raise JournalCorrompu(
+                        f"ligne {rang} alteree, reparation refusee (rien modifie) : {exc}"
+                    ) from exc
+
+            rang = len(precedentes) + 1
+            if termine:
+                try:
+                    self._controler(candidate, rang, precedent)
+                    return 0  # derniere ligne complete et valide : journal sain
+                except JournalCorrompu as exc:
+                    try:
+                        _analyser_ligne(candidate)
+                    except JournalCorrompu:
+                        pass  # JSON invalide : fin abimee, a reparer
+                    else:
+                        raise JournalCorrompu(
+                            f"ligne {rang} alteree, reparation refusee (rien modifie) : {exc}"
+                        ) from exc
+            longueur = len(candidate) + (1 if termine else 0)
+            debut = len(donnees) - longueur
+            fragment = donnees[debut:]
+            self._sauver_fragment(fragment)
+            f.truncate(debut)
+            f.flush()
+            os.fsync(f.fileno())
+            return len(fragment)
+
+    @staticmethod
+    def _controler(brut: bytes, rang: int, precedent: str) -> str:
+        """Verifie une ligne complete ; renvoie son hash ou leve `JournalCorrompu`."""
+        entree, brutes = _analyser_ligne(brut)
+        if entree.seq != rang:
+            raise JournalCorrompu(f"seq non contigu (attendu {rang}, trouve {entree.seq})")
+        if entree.hash_precedent != precedent:
+            raise JournalCorrompu("chaine rompue")
+        if _calculer_hash(_sans_hash(brutes)) != entree.hash:
+            raise JournalCorrompu("entree modifiee")
+        if brut != _canonique(brutes).encode("ascii"):
+            raise JournalCorrompu("ligne non canonique")
+        return entree.hash
+
+    def _sauver_fragment(self, fragment: bytes) -> Path:
+        horodatage = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        base = self.chemin.with_name(f"{self.chemin.name}.fragment-{horodatage}")
+        for n in range(1000):
+            cible = base if n == 0 else base.with_name(f"{base.name}-{n}")
+            try:
+                with open(cible, "xb") as g:
+                    g.write(fragment)
+                    g.flush()
+                    os.fsync(g.fileno())
+                self._fsync_repertoire()
+                return cible
+            except FileExistsError:
+                continue
+        raise OSError("impossible de creer un fichier fragment")
+
     @staticmethod
     def _dernier(f: Any, taille: int) -> tuple[int, str]:
         """(seq, hash) de la derniere entree, lue par la fin du fichier.

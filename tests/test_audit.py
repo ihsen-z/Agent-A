@@ -586,3 +586,133 @@ def test_gros_journal_ecriture_lit_seulement_la_fin(chemin):
     j.ecrire("a", "b", "c", {"gros": "x" * 200_000})
     e = j.ecrire("a", "b", "c")
     assert e.seq == 2 and j.verifier().ok
+
+
+# --- reparer_fin_tronquee ---------------------------------------------------
+
+
+def fragments(chemin: Path) -> list[Path]:
+    return sorted(chemin.parent.glob(chemin.name + ".fragment-*"))
+
+
+def test_reparation_fin_tronquee_puis_la_chaine_continue(chemin):
+    j = remplir(chemin, 4)
+    brut = chemin.read_bytes()
+    chemin.write_bytes(brut[:-25])
+    assert not j.verifier().ok
+    retires = j.reparer_fin_tronquee()
+    assert retires > 0
+    r = j.verifier()
+    assert r.ok and r.nb_entrees == 3
+    e = j.ecrire("alice", "suite", "x", horodatage=T0)
+    assert e.seq == 4 and e.hash_precedent == j.lire()[2].hash
+    assert j.verifier().ok and j.verifier().nb_entrees == 4
+
+
+def test_reparation_sauvegarde_le_fragment(chemin):
+    j = remplir(chemin, 4)
+    brut = chemin.read_bytes()
+    coupe = brut[:-25]
+    chemin.write_bytes(coupe)
+    debut_fragment = coupe.rfind(b"\n") + 1
+    retires = j.reparer_fin_tronquee()
+    (frag,) = fragments(chemin)
+    assert frag.read_bytes() == coupe[debut_fragment:]
+    assert retires == len(coupe) - debut_fragment
+    assert chemin.read_bytes() == coupe[:debut_fragment]
+    assert frag.name.split(".fragment-")[1].endswith("Z")
+
+
+def test_reparation_ligne_complete_sans_saut_de_ligne_final(chemin):
+    j = remplir(chemin, 3)
+    chemin.write_bytes(chemin.read_bytes()[:-1])
+    assert j.reparer_fin_tronquee() > 0
+    assert j.verifier().ok and j.verifier().nb_entrees == 2
+    assert len(fragments(chemin)) == 1
+
+
+def test_reparation_json_invalide_en_derniere_ligne(chemin):
+    j = remplir(chemin, 3)
+    with open(chemin, "ab") as f:
+        f.write(b"ceci n'est pas du JSON\n")
+    retires = j.reparer_fin_tronquee()
+    assert retires == len(b"ceci n'est pas du JSON\n")
+    assert j.verifier().ok and j.verifier().nb_entrees == 3
+    assert fragments(chemin)[0].read_bytes() == b"ceci n'est pas du JSON\n"
+
+
+def test_reparation_seule_ligne_tronquee(chemin):
+    j = remplir(chemin, 1)
+    chemin.write_bytes(chemin.read_bytes()[:20])
+    assert j.reparer_fin_tronquee() == 20
+    assert chemin.read_bytes() == b""
+    assert j.ecrire("a", "b", "c").seq == 1
+
+
+def test_reparation_refuse_si_une_entree_du_milieu_est_alteree(chemin):
+    j = remplir(chemin, 5)
+    ls = lignes(chemin)
+    ls[1] = modifier_ligne(ls[1], lambda d: d["details"].__setitem__("valeur", 999))
+    reecrire(chemin, ls)
+    chemin.write_bytes(chemin.read_bytes()[:-25])  # fin tronquee EN PLUS
+    avant = chemin.read_bytes()
+    with pytest.raises(JournalCorrompu):
+        j.reparer_fin_tronquee()
+    assert chemin.read_bytes() == avant
+    assert fragments(chemin) == []
+
+
+def test_reparation_refuse_si_la_chaine_est_rompue_ailleurs(chemin):
+    j = remplir(chemin, 5)
+    ls = lignes(chemin)
+    del ls[2]
+    reecrire(chemin, ls)
+    avant = chemin.read_bytes()
+    with pytest.raises(JournalCorrompu):
+        j.reparer_fin_tronquee()
+    assert chemin.read_bytes() == avant and fragments(chemin) == []
+
+
+def test_reparation_refuse_si_derniere_entree_complete_est_modifiee(chemin):
+    """Ligne terminee, JSON valide mais hash faux : falsification, pas troncature."""
+    j = remplir(chemin, 3)
+    ls = lignes(chemin)
+    ls[2] = modifier_ligne(ls[2], lambda d: d["details"].__setitem__("valeur", 0))
+    reecrire(chemin, ls)
+    avant = chemin.read_bytes()
+    with pytest.raises(JournalCorrompu):
+        j.reparer_fin_tronquee()
+    assert chemin.read_bytes() == avant and fragments(chemin) == []
+
+
+def test_reparation_idempotente(chemin):
+    j = remplir(chemin, 3)
+    chemin.write_bytes(chemin.read_bytes()[:-25])
+    assert j.reparer_fin_tronquee() > 0
+    apres = chemin.read_bytes()
+    assert j.reparer_fin_tronquee() == 0
+    assert chemin.read_bytes() == apres
+    assert len(fragments(chemin)) == 1
+
+
+def test_reparation_fichier_vide(chemin):
+    j = JournalAudit(chemin)
+    assert j.reparer_fin_tronquee() == 0
+    assert chemin.read_bytes() == b"" and fragments(chemin) == []
+
+
+def test_reparation_journal_sain_ne_touche_a_rien(chemin):
+    j = remplir(chemin, 4)
+    avant = chemin.read_bytes()
+    assert j.reparer_fin_tronquee() == 0
+    assert chemin.read_bytes() == avant and fragments(chemin) == []
+
+
+def test_deux_reparations_dans_la_meme_seconde_ne_s_ecrasent_pas(chemin):
+    j = remplir(chemin, 3)
+    for _ in range(2):
+        chemin.write_bytes(chemin.read_bytes() + b'{"seq": 9')
+        j.reparer_fin_tronquee()
+    assert len(fragments(chemin)) == 2
+    assert all(p.read_bytes() == b'{"seq": 9' for p in fragments(chemin))
+    assert j.verifier().ok
