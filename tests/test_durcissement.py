@@ -157,3 +157,14 @@ def test_aucun_domaine_par_defaut(tmp_path):
 def test_domaine_invalide_refuse_avec_un_message_clair(tmp_path, invalide):
     with pytest.raises(ErreurFormat, match="domaine"):
         _dossiers(tmp_path, invalide)
+
+
+@pytest.mark.parametrize("non_ascii", ["stra\u00dfe.de", "caf\u00e9.fr", "\u043f\u0440\u0438\u043c\u0435\u0440.ru"])
+def test_domaine_non_ascii_refuse_avec_la_forme_a_declarer(tmp_path, non_ascii):
+    with pytest.raises(ErreurFormat, match="punycode"):
+        _dossiers(tmp_path, non_ascii)
+
+
+def test_domaine_punycode_accepte(tmp_path):
+    assert _dossiers(tmp_path, "xn--strae-oqa.de")["D1"].domaines == ("xn--strae-oqa.de",)
+

@@ -448,8 +448,46 @@ assumee.
 - Une piece `ESCALADEE` n'a pas de sortie vers `DEMANDEE` : le responsable peut
   l'arbitrer (`CLOSE_SANS_SUITE`) ou la rattacher, pas relancer a nouveau.
 - Pas de relance prioritaire a J-5 de l'echeance TVA ; fuseau fixe `Europe/Paris`.
+- **Le deblocage humain vaut pour la piece, pas pour le constat.** Une piece que
+  le cycle a bloquee (le moteur l'a retrouvee dans l'inventaire) puis qu'un humain a
+  debloquee n'est jamais rebloquee, meme si une AUTRE facture la justifie plus tard.
+  Effet : une relance en trop possible, jamais une piece perdue.
+- **`+tag` coherent pour le routage, pas pour les relances.** `jean+b@x.fr` et
+  `jean@x.fr` sont la meme boite pour le routage des pieces entrantes, mais deux
+  destinataires distincts pour la limite d'un e-mail par semaine. Effet : deux
+  relances le meme jour vers une meme boite, si deux dossiers declarent les deux
+  formes.
+- **Routage : ce que le cabinet perd en rappel.** Un collegue du client, ecrivant
+  d'une adresse non enregistree et d'un domaine non declare, part en file humaine.
+  Tant qu'un dossier n'a aucun domaine declare, seule l'adresse exacte (casse et
+  `+tag` ignores) route. C'est le prix de la securite : declarer les domaines
+  d'entreprise dans la colonne `domaines` de `dossiers.csv`, en ASCII ou punycode.
+- **Une cellule precedee d'une espace avant `=` ou commençant par un `=` pleine
+  chasse n'est pas neutralisee.** Je n'ai pas pu demontrer qu'un tableur l'execute.
+  Par prudence, a corriger en phase 2.
+- **`entrant/` n'est jamais purge** et chaque `.eml` est relu a chaque cycle
+  (environ 34 ms par message). Au-dela de quelques milliers de messages accumules, le
+  cycle ralentit ; vers 17 000 il depasse les 10 minutes de CA-09. Archiver
+  regulierement.
 - **Point ouvert du cahier des charges.** Le garde-fou « un e-mail par destinataire
   sur 7 jours glissants » gagne sur les jalons : le jalon T+3 ne s'execute jamais.
   Cadence reelle : demande initiale, relance a 7 jours, relance a 14 jours,
   escalade a 14 jours ouvres (environ J+18). A trancher avant la phase 2.
+
+## 8. Conditions d'un pilote sur portefeuille reel
+
+Verdict du reviewer independant, apres deux passages d'attaque : **un pilote est
+possible sur un portefeuille reel reduit**, sous ces conditions.
+
+1. Les `.eml` sont filtres en amont par taille (le cycle plafonne l'en-tete et le
+   fichier, mais les en-tetes des parties imbriquees restent a surveiller).
+2. Les domaines d'entreprise sont declares en ASCII ou punycode.
+3. L'instance est sur disque local, a acces restreint (la protection contre une
+   validation forgee en SQL est l'acces disque, voir section 7).
+4. Le dernier hash du journal d'audit est ancre hors de l'instance chaque jour.
+5. Les validateurs sont formes a relire CHAQUE proposition de rattachement : le
+   systeme ne rattache jamais seul, et c'est ce qui rend le routage sur.
+6. Les trois criteres bloquants CA-01, CA-02 et CA-03 sont mesures sur les donnees
+   REELLES du cabinet avant toute decision de generalisation. Le corpus synthetique
+   ne prouve pas l'exactitude : il detecte les regressions.
 

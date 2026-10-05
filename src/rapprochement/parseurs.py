@@ -199,6 +199,12 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
                 d for d in (x.strip().lower() for x in (ligne.get("domaines") or "").split(";")) if d
             )
             for domaine in domaines:
+                if not domaine.isascii():
+                    raise ErreurFormat(
+                        f"{chemin.name} : domaine '{domaine}' non ASCII pour {code}. "
+                        "Declarez sa forme punycode (xn--...) : la conversion automatique "
+                        "peut confondre deux domaines distincts (straße.de et strasse.de)"
+                    )
                 if "@" in domaine or " " in domaine or "." not in domaine:
                     raise ErreurFormat(
                         f"{chemin.name} : domaine '{domaine}' invalide pour {code} "
