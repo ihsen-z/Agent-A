@@ -191,9 +191,81 @@ def _rapprochement_depuis_piece(piece: PieceAttendue) -> Rapprochement:
     return Rapprochement(operation=operation, statut=Statut.MANQUANT)
 
 
+def _est_demandee(piece: PieceAttendue) -> bool:
+    """Piece effectivement demandee : seule source licite d'une date de demande."""
+    return piece.etat is EtatPiece.DEMANDEE and piece.date_premiere_demande is not None
+
+
 def _date_demande(pieces: list[PieceAttendue], aujourdhui: dt.date) -> dt.date:
-    dates = [p.date_premiere_demande for p in pieces if p.date_premiere_demande]
+    """Plus ancienne demande parmi les pieces DEMANDEES ; `aujourdhui` s'il n'y en a pas.
+
+    Une piece jamais demandee ne fournit jamais de date : on ne cite pas au
+    client une demande qui n'a pas eu lieu.
+    """
+    dates = [p.date_premiere_demande for p in pieces if _est_demandee(p)]
     return min(dates) if dates else aujourdhui
+
+
+def _separer(pieces: list[PieceAttendue]) -> tuple[list[PieceAttendue], list[PieceAttendue]]:
+    """(deja demandees, nouvelles), chacune triee par (date_operation, reference)."""
+    demandees = [p for p in pieces if _est_demandee(p)]
+    nouvelles = [p for p in pieces if not _est_demandee(p)]
+    return _tri_pieces(demandees), _tri_pieces(nouvelles)
+
+
+def _blocs_mixtes(
+    demandees: list[PieceAttendue], nouvelles: list[PieceAttendue], aujourdhui: dt.date
+) -> list[str]:
+    """Deux blocs distincts : pieces deja demandees (avec leur date), puis nouvelles."""
+    date = _date_demande(demandees, aujourdhui).strftime("%d/%m/%Y")
+    return [
+        f"Pieces deja demandees le {date} :",
+        "",
+        *[_ligne_piece(_rapprochement_depuis_piece(p)) for p in demandees],
+        "",
+        "Nouvelles pieces a nous transmettre :",
+        "",
+        *[_ligne_piece(_rapprochement_depuis_piece(p)) for p in nouvelles],
+    ]
+
+
+_PAIEMENTS_PHRASE = (
+    "Il s'agit de paiements visibles sur le compte bancaire pour lesquels "
+    "nous n'avons pas la facture correspondante"
+)
+
+
+def _composer_mixte_un_dossier(
+    dossier: Dossier,
+    demandees: list[PieceAttendue],
+    nouvelles: list[PieceAttendue],
+    niveau: int,
+    aujourdhui: dt.date,
+) -> tuple[str, str]:
+    """Objet et corps d'un dossier unique dont le groupe melange demandees et nouvelles."""
+    total = len(demandees) + len(nouvelles)
+    echeance = _prochaine_echeance(dossier.jour_echeance_tva, aujourdhui)
+    ton = "urgent" if (echeance - aujourdhui).days <= 5 else dossier.ton_relance
+    pied = _PIED.get(ton, _PIED["courtois"]).format(echeance=echeance.strftime("%d/%m/%Y"))
+    salutation = f"Bonjour {dossier.nom_contact}," if dossier.nom_contact else "Bonjour,"
+    corps = "\n".join(
+        [
+            salutation,
+            "",
+            _EN_TETE[1].format(societe=dossier.raison_sociale, nombre=total, date_demande=""),
+            "",
+            _PAIEMENTS_PHRASE + ".",
+            "",
+            *_blocs_mixtes(demandees, nouvelles, aujourdhui),
+            "",
+            "Un envoi par retour de cet email suffit (photo lisible acceptee).",
+            "",
+            pied,
+        ]
+    )
+    prefixe = "Relance" if niveau > 1 else "Justificatifs"
+    objet = f"{prefixe} - {total} justificatif(s) manquant(s) - {dossier.raison_sociale}"
+    return objet, corps
 
 
 def _tri_pieces(pieces: list[PieceAttendue]) -> list[PieceAttendue]:
@@ -210,6 +282,8 @@ def construire_brouillon(
 
     - Un seul dossier : meme texte que `construire_relance` (meme gabarit, meme
       ton, meme calcul d'urgence TVA).
+    - Groupe mixte (pieces jamais demandees + pieces deja relancees) : deux blocs
+      distincts, la date de demande ne venant que des pieces DEMANDEES.
     - Plusieurs dossiers : une section par dossier, titree par la raison
       sociale ; le pied est commun (urgent si un dossier est a J-5 de son
       echeance TVA, avec l'echeance la plus proche).
@@ -259,16 +333,23 @@ def construire_brouillon(
     niveau = planifiee.niveau
     if len(codes) == 1:
         dossier = dossiers[codes[0]]
-        liste = _tri_pieces(par_dossier[codes[0]])
-        relance = construire_relance(
-            dossier,
-            [_rapprochement_depuis_piece(p) for p in liste],
-            niveau=niveau,
-            date_demande=_date_demande(liste, aujourdhui),
-            aujourdhui=aujourdhui,
-        )
-        assert relance is not None
-        objet, corps = relance.objet, relance.corps
+        demandees, nouvelles = _separer(par_dossier[codes[0]])
+        if demandees and nouvelles:
+            objet, corps = _composer_mixte_un_dossier(
+                dossier, demandees, nouvelles, niveau, aujourdhui
+            )
+        else:
+            liste = demandees or nouvelles
+            relance = construire_relance(
+                dossier,
+                [_rapprochement_depuis_piece(p) for p in liste],
+                # sans piece demandee, aucun texte de relance : on ne cite pas de demande
+                niveau=niveau if demandees else 1,
+                date_demande=_date_demande(liste, aujourdhui),
+                aujourdhui=aujourdhui,
+            )
+            assert relance is not None
+            objet, corps = relance.objet, relance.corps
     else:
         objet, corps = _composer_multi(codes, par_dossier, dossiers, niveau, aujourdhui)
 
@@ -319,21 +400,32 @@ def _composer_multi(
     ]
     for code in codes:
         dossier = dossiers[code]
-        liste = _tri_pieces(par_dossier[code])
-        en_tete = _EN_TETE[min(niveau, 2)].format(
+        demandees, nouvelles = _separer(par_dossier[code])
+        titre = dossier.raison_sociale
+        lignes += ["", titre, "-" * len(titre)]
+        if demandees and nouvelles:
+            lignes += [
+                _EN_TETE[1].format(
+                    societe=dossier.raison_sociale,
+                    nombre=len(demandees) + len(nouvelles),
+                    date_demande="",
+                ),
+                "",
+                _PAIEMENTS_PHRASE + ".",
+                "",
+                *_blocs_mixtes(demandees, nouvelles, aujourdhui),
+            ]
+            continue
+        liste = demandees or nouvelles
+        en_tete = _EN_TETE[2 if demandees else 1].format(
             societe=dossier.raison_sociale,
             nombre=len(liste),
             date_demande=_date_demande(liste, aujourdhui).strftime("%d/%m/%Y"),
         )
-        titre = dossier.raison_sociale
         lignes += [
-            "",
-            titre,
-            "-" * len(titre),
             en_tete,
             "",
-            "Il s'agit de paiements visibles sur le compte bancaire pour lesquels "
-            "nous n'avons pas la facture correspondante :",
+            _PAIEMENTS_PHRASE + " :",
             "",
             *[_ligne_piece(_rapprochement_depuis_piece(p)) for p in liste],
         ]

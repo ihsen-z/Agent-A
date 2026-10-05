@@ -21,6 +21,7 @@ from rapprochement.audit import JournalAudit
 from rapprochement.depot import Depot
 from rapprochement.envoi import (
     EnvoiHorsCreneau,
+    EnvoiLimiteHebdomadaire,
     EnvoiNonValide,
     ErreurEnvoi,
     ErreurEnvoiCertaine,
@@ -239,3 +240,19 @@ def test_refus_journalise_et_chaine_valide(depot, journal, b) -> None:
         envoyer(depot, journal, Espion(), b.id_relance, maintenant=MARDI_10H)
     assert actions(journal) == [("systeme", "envoi_refuse")] * 2
     assert journal.verifier().ok
+
+
+def test_limite_hebdomadaire_avec_le_vrai_depot(depot, journal, b) -> None:
+    autre = Brouillon("autre01", "CLIENT@exemple.fr", "o", "c", ("D1",), ("OP9",), 1, dt.date(2026, 10, 5))
+    depot.sauver_brouillon(autre)
+    valider(depot, journal, b.id_relance, "Alice", maintenant=MARDI_10H)
+    valider(depot, journal, "autre01", "Alice", maintenant=MARDI_10H)
+    exp = Espion()
+    envoyer(depot, journal, exp, b.id_relance, maintenant=MARDI_10H)
+    with pytest.raises(EnvoiLimiteHebdomadaire):
+        envoyer(depot, journal, exp, "autre01", maintenant=MARDI_10H)
+    assert exp.n == 1 and statut(depot, autre) is S.VALIDEE
+    assert actions(journal)[-1] == ("systeme", "envoi_refuse")
+    # 7 jours plus tard (mardi suivant, 10h) : autorise.
+    envoyer(depot, journal, exp, "autre01", maintenant=MARDI_10H + dt.timedelta(days=7))
+    assert exp.n == 2 and journal.verifier().ok

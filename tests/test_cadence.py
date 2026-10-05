@@ -948,3 +948,171 @@ def test_ligne_en_usd_dans_un_brouillon_multi_dossiers():
     lignes = [l for l in b.corps.split("\n") if l.startswith("  - ")]
     assert "120,50 USD" in lignes[0] and "120,50 EUR" in lignes[1]
     assert b.corps.count("USD") == 1
+
+
+# ---------------------------------------------------------------------------
+# Groupe mixte : jamais de date de demande citee pour une piece jamais demandee
+# ---------------------------------------------------------------------------
+
+
+def lignes_reclamees(corps: str) -> list[str]:
+    return [l for l in corps.split("\n") if l.startswith("  - ")]
+
+
+def test_groupe_mixte_deux_blocs_et_bonne_date():
+    d = dossier("D1")
+    anciennes = [
+        demandee("R1", nb=1, premiere=D(2026, 9, 28), date_operation=D(2026, 9, 3), libelle="CB LOXAM"),
+        demandee("R3", nb=1, premiere=D(2026, 9, 25), date_operation=D(2026, 9, 2), libelle="CB SNCF"),
+    ]
+    neuve = piece("R2", date_operation=D(2026, 10, 2), libelle="CB BUREAU VALLEE",
+                  montant=Decimal("80.00"))
+    ps = {p.reference: p for p in [*anciennes, neuve]}
+    plan = planifier(list(ps.values()), dossiers_de(d), [], LUNDI)
+    (rel,) = plan.relances
+    assert rel.niveau == 2
+    b = construire_brouillon(rel, ps, dossiers_de(d), LUNDI)
+    lignes = b.corps.split("\n")
+    i_dem = lignes.index("Pieces deja demandees le 25/09/2026 :")      # la plus ancienne
+    i_new = lignes.index("Nouvelles pieces a nous transmettre :")
+    assert i_dem < i_new
+    bloc_dem, bloc_new = lignes[i_dem:i_new], lignes[i_new:]
+    assert len(lignes_reclamees("\n".join(bloc_dem))) == 2
+    assert "LOXAM" in "\n".join(bloc_dem) and "SNCF" in "\n".join(bloc_dem)
+    assert "BUREAU VALLEE" not in "\n".join(bloc_dem)
+    assert len(lignes_reclamees("\n".join(bloc_new))) == 1 and "BUREAU VALLEE" in "\n".join(bloc_new)
+    # aucune date de demande pour la piece nouvelle, ni la date du jour
+    assert "demandes le" not in b.corps
+    assert b.corps.count("demandees le") == 1
+    assert "05/10/2026" not in b.corps and "28/09/2026" not in b.corps
+    assert b.objet.startswith("Relance - 3 justificatif(s)")
+    assert b.niveau == 2 and b.references == ("R1", "R2", "R3")
+
+
+def test_groupe_mixte_la_date_ne_vient_jamais_d_une_piece_non_demandee():
+    d = dossier("D1")
+    # une ATTENDUE porteuse (incoherente) d'une date ancienne ne doit pas etre citee
+    neuve = piece("R2", date_premiere_demande=D(2020, 1, 6), date_operation=D(2026, 10, 2))
+    ancienne = demandee("R1", nb=1, premiere=D(2026, 9, 28), date_operation=D(2026, 9, 3))
+    ps = {"R1": ancienne, "R2": neuve}
+    b = construire_brouillon(RelancePlanifiee("a@client.fr", ("D1",), ("R1", "R2"), 2), ps,
+                             dossiers_de(d), LUNDI)
+    assert "28/09/2026" in b.corps and "06/01/2020" not in b.corps
+
+
+def test_groupe_mixte_multi_dossiers_section_par_dossier():
+    d1 = dossier("D1", "a@x.fr", raison_sociale="Alpha SARL")
+    d2 = dossier("D2", "a@x.fr", raison_sociale="Beta SAS")
+    d3 = dossier("D3", "a@x.fr", raison_sociale="Gamma SA")
+    ps = {p.reference: p for p in [
+        demandee("R1", "D1", premiere=D(2026, 9, 28), date_operation=D(2026, 9, 3), libelle="ALPHA ANCIEN"),
+        piece("R2", "D1", date_operation=D(2026, 10, 2), libelle="ALPHA NEUF"),
+        demandee("R3", "D2", premiere=D(2026, 9, 25), date_operation=D(2026, 9, 3), libelle="BETA ANCIEN"),
+        piece("R4", "D3", date_operation=D(2026, 10, 2), libelle="GAMMA NEUF"),
+    ]}
+    rel = RelancePlanifiee("a@x.fr", ("D1", "D2", "D3"), ("R1", "R2", "R3", "R4"), 2)
+    b = construire_brouillon(rel, ps, {"D1": d1, "D2": d2, "D3": d3}, LUNDI)
+    corps = b.corps
+    alpha = corps[corps.index("Alpha SARL\n"):corps.index("Beta SAS\n")]
+    beta = corps[corps.index("Beta SAS\n"):corps.index("Gamma SA\n")]
+    gamma = corps[corps.index("Gamma SA\n"):]
+    assert "Pieces deja demandees le 28/09/2026" in alpha and "Nouvelles pieces a nous transmettre" in alpha
+    assert alpha.index("ALPHA ANCIEN") < alpha.index("Nouvelles pieces") < alpha.index("ALPHA NEUF")
+    # dossier homogene demande : texte de relance, avec SA date
+    assert "demandes le 25/09/2026" in beta and "Nouvelles pieces" not in beta
+    # dossier homogene nouveau : texte de premiere demande, aucune date de demande
+    assert "demandes le" not in gamma and "demandees le" not in gamma
+    assert "Nous finalisons la comptabilite de Gamma SA" in gamma
+    assert "05/10/2026" not in corps
+
+
+def test_groupe_homogene_texte_inchange():
+    d = dossier("D1")
+    # tout demande : gabarit de relance, date = plus ancienne demande
+    dem = [demandee("R1", nb=1, premiere=D(2026, 9, 28)), demandee("R2", nb=2, premiere=D(2026, 9, 25))]
+    b = construire_brouillon(RelancePlanifiee("a@client.fr", ("D1",), ("R1", "R2"), 3),
+                             {p.reference: p for p in dem}, dossiers_de(d), LUNDI)
+    attendu = construire_relance(d, [rapprochement_de(p) for p in dem], niveau=3,
+                                 date_demande=D(2026, 9, 25), aujourdhui=LUNDI)
+    assert (b.corps, b.objet) == (attendu.corps, attendu.objet)
+    assert "Nouvelles pieces" not in b.corps and "demandes le 25/09/2026" in b.corps
+    # tout nouveau : gabarit de premiere demande
+    neuves = [piece("R1"), piece("R2", montant=Decimal("5"))]
+    b = construire_brouillon(RelancePlanifiee("a@client.fr", ("D1",), ("R1", "R2"), 1),
+                             {p.reference: p for p in neuves}, dossiers_de(d), LUNDI)
+    attendu = construire_relance(d, [rapprochement_de(p) for p in neuves], niveau=1,
+                                 date_demande=LUNDI, aujourdhui=LUNDI)
+    assert (b.corps, b.objet) == (attendu.corps, attendu.objet)
+    assert "demandes le" not in b.corps and "Pieces deja demandees" not in b.corps
+
+
+def jeu_coherent(graine: int):
+    """Donnees coherentes : une piece n'est jamais demandee avant son operation."""
+    rnd = random.Random(graine)
+    ds = {}
+    for i in range(rnd.randint(1, 3)):
+        ds[f"D{i}"] = dossier(f"D{i}", "a@x.fr", jour_echeance_tva=rnd.choice([8, 15, 24]),
+                              nom_contact=rnd.choice(["", "M. Dupont"]))
+    pieces = []
+    for j in range(rnd.randint(2, 14)):
+        code = rnd.choice(list(ds))
+        montant = Decimal(1000 + 7 * j + graine) / 100         # montants distincts : lignes identifiables
+        if rnd.random() < 0.5:
+            pieces.append(PieceAttendue(
+                f"R{graine}-{j}", code, "2026-09", montant,
+                D(2026, 8, 1) + dt.timedelta(days=rnd.randrange(0, 58)), f"LIB DEM {j}",
+                etat=EtatPiece.DEMANDEE, nb_relances=rnd.randint(1, 2),
+                date_premiere_demande=D(2026, 9, 29) + dt.timedelta(days=rnd.randrange(0, 4)),
+            ))
+        else:
+            pieces.append(PieceAttendue(
+                f"R{graine}-{j}", code, "2026-10", montant,
+                D(2026, 8, 1) + dt.timedelta(days=rnd.randrange(0, 66)),   # parfois apres les demandes
+                f"LIB NEUF {j}",
+            ))
+    return pieces, ds
+
+
+@pytest.mark.parametrize("graine", range(80))
+def test_aucune_date_citee_anterieure_a_l_operation_ni_pour_une_piece_non_demandee(graine):
+    pieces, ds = jeu_coherent(graine)
+    par_ref = {p.reference: p for p in pieces}
+    par_ligne = {attendu_depuis(p): p for p in pieces}
+    cite_re = re.compile(r"demandee?s le (\d{2}/\d{2}/\d{4})")
+    for rel in planifier(pieces, ds, [], LUNDI).relances:
+        b = construire_brouillon(rel, par_ref, ds, LUNDI)
+        cite = None
+        vues = 0
+        for ligne in b.corps.split("\n"):
+            m = cite_re.search(ligne)
+            if m:
+                cite = dt.datetime.strptime(m.group(1), "%d/%m/%Y").date()
+            elif ligne.startswith("Nouvelles pieces") or ligne.startswith("Nous finalisons"):
+                cite = None
+            elif ligne.startswith("  - "):
+                p = par_ligne[attendu_depuis_ligne(ligne)]
+                vues += 1
+                if cite is None:
+                    assert p.etat is EtatPiece.ATTENDUE, "piece demandee sans date citee"
+                else:
+                    assert p.etat is EtatPiece.DEMANDEE, "date de demande citee pour une piece nouvelle"
+                    assert cite >= p.date_operation
+                    assert cite in {q.date_premiere_demande for q in pieces if q.etat is EtatPiece.DEMANDEE}
+        assert vues == len(rel.references)
+
+
+def attendu_depuis_ligne(ligne: str) -> tuple[str, str, str]:
+    m = LIGNE.match(ligne)
+    assert m
+    return m.groups()
+
+
+def test_propriete_couvre_des_groupes_mixtes():
+    mixtes = 0
+    for graine in range(80):
+        pieces, ds = jeu_coherent(graine)
+        par_ref = {p.reference: p for p in pieces}
+        for rel in planifier(pieces, ds, [], LUNDI).relances:
+            etats = {par_ref[r].etat for r in rel.references}
+            mixtes += etats == {EtatPiece.ATTENDUE, EtatPiece.DEMANDEE}
+    assert mixtes >= 5

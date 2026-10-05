@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rapprochement import envoi, etats
 from rapprochement.envoi import (
     EnvoiHorsCreneau,
+    EnvoiLimiteHebdomadaire,
     EnvoiNonValide,
     ErreurEnvoi,
     ErreurEnvoiCertaine,
@@ -108,7 +109,16 @@ class FauxDepot:
     def historique_envois(
         self, *, destinataire: str | None = None, depuis: dt.date | None = None
     ) -> list[EnvoiRelance]:
-        return [e for e in self.envois.values() if destinataire in (None, e.destinataire)]
+        """Comme le vrai Depot : destinataire sans casse ni espaces de bord, `depuis` inclusif."""
+        def norm(d: str) -> str:
+            return d.strip().casefold()
+
+        return sorted(
+            (e for e in self.envois.values()
+             if (destinataire is None or norm(e.destinataire) == norm(destinataire))
+             and (depuis is None or e.date_envoi >= depuis)),
+            key=lambda e: (e.date_envoi, e.id_relance),
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1031,3 +1041,120 @@ def test_trancher_parti_enregistrement_en_echec_reste_en_cours(depot, journal, i
         trancher_envoi_incertain(depot, journal, incertain.id_relance, "Alice", parti=True, maintenant=LENDEMAIN)
     assert statut(depot, incertain) is S.EN_COURS
     assert "envoi_confirme_par_humain" not in journal.actions()
+
+
+# ---------------------------------------------------------------------------
+# Limite d'un e-mail par destinataire sur 7 jours glissants (dernier maillon)
+# ---------------------------------------------------------------------------
+
+JOUR0 = dt.date(2026, 10, 6)  # mardi
+
+
+def a_10h(jour: dt.date) -> dt.datetime:
+    return dt.datetime(jour.year, jour.month, jour.day, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+
+
+def deja_parti(depot: FauxDepot, destinataire: str, jour: dt.date, ident: str = "ancien") -> None:
+    depot.enregistrer_envoi(EnvoiRelance(ident, destinataire, jour, ("D1",), ("OPX",)))
+
+
+def valider_un_autre(depot, journal, ident: str, destinataire: str = "client@exemple.fr") -> Brouillon:
+    br = faire_brouillon(id_relance=ident, destinataire=destinataire, references=(ident,))
+    depot.sauver_brouillon(br)
+    return valider(depot, journal, ident, "Alice", maintenant=MAINTENANT)
+
+
+def test_limite_hebdo_deux_brouillons_meme_jour_un_seul_part(depot, journal) -> None:
+    premier = valider_un_autre(depot, journal, "aaaa")
+    second = valider_un_autre(depot, journal, "bbbb")
+    exp = Espion()
+    envoyer(depot, journal, exp, premier.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    with pytest.raises(EnvoiLimiteHebdomadaire):
+        envoyer(depot, journal, exp, second.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 1
+    assert statut(depot, second) is S.VALIDEE
+
+
+@pytest.mark.parametrize("ecoules,refuse", [(0, True), (1, True), (6, True), (7, False), (8, False), (30, False)])
+def test_limite_hebdo_fenetre_6_jours_refuse_7_jours_autorise(depot, journal, valide, ecoules, refuse) -> None:
+    deja_parti(depot, "client@exemple.fr", JOUR0 - dt.timedelta(days=ecoules))
+    exp = Espion()
+    if refuse:
+        with pytest.raises(EnvoiLimiteHebdomadaire):
+            envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+        assert exp.n == 0 and statut(depot, valide) is S.VALIDEE
+    else:
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+        assert exp.n == 1 and statut(depot, valide) is S.ENVOYEE
+
+
+def test_limite_hebdo_exception_est_un_envoi_non_valide_et_journalisee(depot, journal, valide) -> None:
+    assert issubclass(EnvoiLimiteHebdomadaire, EnvoiNonValide)
+    deja_parti(depot, "client@exemple.fr", JOUR0 - dt.timedelta(days=3), "ancien42")
+    exp = Espion()
+    with pytest.raises(EnvoiNonValide):
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    (e,) = refus(journal)
+    assert e.acteur == "systeme" and e.objet == valide.id_relance
+    assert e.details["type"] == "EnvoiLimiteHebdomadaire" and e.details["operation"] == "envoyer"
+    assert "2026-10-03" in e.details["raison"] and "ancien42" in e.details["raison"]
+    assert "envoi_demarre" not in journal.actions()
+    assert exp.n == 0 and statut(depot, valide) is S.VALIDEE
+    assert envois_incertains(depot) == []
+
+
+def test_limite_hebdo_autre_destinataire_non_bloque(depot, journal, valide) -> None:
+    deja_parti(depot, "autre@exemple.fr", JOUR0)
+    exp = Espion()
+    envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 1
+
+
+@pytest.mark.parametrize("ancien", ["CLIENT@Exemple.FR", "  client@exemple.fr "])
+def test_limite_hebdo_casse_du_destinataire_ignoree(depot, journal, valide, ancien) -> None:
+    deja_parti(depot, ancien, JOUR0)
+    exp = Espion()
+    with pytest.raises(EnvoiLimiteHebdomadaire):
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 0
+
+
+def test_limite_hebdo_ne_compte_pas_un_brouillon_en_cours_d_un_autre_message(depot, journal, valide) -> None:
+    autre = faire_brouillon(id_relance="autre", references=("OPZ",), statut=S.EN_COURS, valide_par="Bob")
+    depot.sauver_brouillon(autre)  # EN_COURS : pas un envoi enregistre
+    exp = Espion()
+    envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 1
+
+
+def test_limite_hebdo_dates_locales_du_fuseau_passe(depot, journal, valide) -> None:
+    """23h30 UTC le 13 octobre = 01h30 le 14 a Paris : l'envoi du 7 est a 7 jours locaux (autorise)
+    mais a 6 jours si on raisonnait en UTC (13 - 7)."""
+    deja_parti(depot, "client@exemple.fr", dt.date(2026, 10, 7))
+    tard = dt.datetime(2026, 10, 13, 23, 30, tzinfo=dt.timezone.utc)
+    exp = Espion()
+    envoyer(depot, journal, exp, valide.id_relance, maintenant=tard, creneau_ok=lambda _: True)
+    assert exp.n == 1
+
+
+def test_limite_hebdo_apres_le_creneau_et_apres_le_statut(depot, journal, valide) -> None:
+    deja_parti(depot, "client@exemple.fr", JOUR0)
+    with pytest.raises(EnvoiHorsCreneau):  # le creneau est controle avant la limite
+        envoyer(depot, journal, Espion(), valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: False)
+    brouillon = faire_brouillon(id_relance="zzzz", references=("Z",))
+    depot.sauver_brouillon(brouillon)
+    with pytest.raises(EnvoiNonValide) as info:  # statut BROUILLON : refus de statut, pas de limite
+        envoyer(depot, journal, Espion(), "zzzz", maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert not isinstance(info.value, EnvoiLimiteHebdomadaire)
+
+
+def test_limite_hebdo_un_envoi_incertain_ne_declenche_pas_de_second_envoi(depot, journal) -> None:
+    """Un envoi incertain (EN_COURS) n'est pas dans l'historique : sa protection reste le statut."""
+    premier = valider_un_autre(depot, journal, "aaaa")
+    with pytest.raises(TimeoutError):
+        envoyer(depot, journal, Espion(leve=TimeoutError("t")), "aaaa", maintenant=MAINTENANT,
+                creneau_ok=lambda _: True)
+    exp = Espion()
+    with pytest.raises(EnvoiNonValide):
+        envoyer(depot, journal, exp, premier.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    assert exp.n == 0

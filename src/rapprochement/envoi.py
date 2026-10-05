@@ -45,6 +45,10 @@ class EnvoiNonValide(Exception):
     """Le brouillon n'est pas dans un etat qui autorise l'operation demandee."""
 
 
+class EnvoiLimiteHebdomadaire(EnvoiNonValide):
+    """Un message est deja parti vers ce destinataire dans la fenetre de 7 jours glissants."""
+
+
 class EnvoiHorsCreneau(Exception):
     """Hors du creneau d'envoi : rien n'est parti, le brouillon reste VALIDEE."""
 
@@ -267,10 +271,11 @@ def _preparer_envoi(
     journal: JournalAudit,
     id_relance: str,
     maintenant: dt.datetime,
+    jour_envoi: dt.date,
     fuseau: str,
     creneau_ok: Callable[[dt.datetime], bool] | None,
 ) -> Brouillon:
-    """Etapes 1 a 3 : controles, creneau, puis VALIDEE -> EN_COURS persiste. N'emet rien."""
+    """Etapes 1 a 3 : controles, creneau, limite hebdomadaire, puis VALIDEE -> EN_COURS. N'emet rien."""
     # 1. Statut et validation humaine.
     _exiger_envoyable(_exiger_brouillon(depot, id_relance))
 
@@ -285,11 +290,25 @@ def _preparer_envoi(
     if not creneau_ok(maintenant):
         raise EnvoiHorsCreneau(f"{maintenant.isoformat()} est hors du creneau d'envoi")
 
-    # 3. VALIDEE -> EN_COURS, persiste et journalise AVANT d'emettre. On relit
-    #    dans la transaction : deux appels qui se chevauchent ne passent pas tous les deux.
+    # 3. Limite hebdomadaire, au dernier maillon (garde-fou non parametrable) puis
+    #    VALIDEE -> EN_COURS, persiste et journalise AVANT d'emettre. On relit dans la
+    #    transaction : deux appels qui se chevauchent ne passent pas tous les deux.
+    #    Import tardif de la fenetre (comme le creneau) : cadence.py est ecrit en parallele.
+    from .cadence import FENETRE_HEBDO_JOURS
+
     with depot.transaction():
         courant = _exiger_brouillon(depot, id_relance)
         _exiger_envoyable(courant)
+        # Meme definition que `cadence.planifier` : refuse si (jour - date_envoi).days < 7,
+        # donc 6 jours ecoules = refuse, 7 = autorise. Dates locales du fuseau de l'appel.
+        depuis = jour_envoi - dt.timedelta(days=FENETRE_HEBDO_JOURS - 1)
+        deja = depot.historique_envois(destinataire=courant.destinataire, depuis=depuis)
+        if deja:
+            dernier = max(deja, key=lambda e: e.date_envoi)
+            raise EnvoiLimiteHebdomadaire(
+                f"un message est deja parti vers ce destinataire le {dernier.date_envoi.isoformat()} "
+                f"(relance {dernier.id_relance}) : limite d'un e-mail par {FENETRE_HEBDO_JOURS} jours"
+            )
         en_cours = dataclasses.replace(courant, statut=StatutBrouillon.EN_COURS)
         _maj(depot, en_cours)
         journal.ecrire(
@@ -320,7 +339,7 @@ def envoyer(
     _exiger_horodatage(maintenant)
     jour_envoi = maintenant.astimezone(ZoneInfo(fuseau)).date()  # avant tout effet : echec = rien ne part
     try:
-        en_cours = _preparer_envoi(depot, journal, id_relance, maintenant, fuseau, creneau_ok)
+        en_cours = _preparer_envoi(depot, journal, id_relance, maintenant, jour_envoi, fuseau, creneau_ok)
     except (EnvoiNonValide, EnvoiHorsCreneau) as exc:
         _refus(journal, "envoyer", id_relance, exc, maintenant)
         raise
