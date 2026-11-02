@@ -449,10 +449,18 @@ def main() -> None:
                 "nom_contact": contact,
                 "jour_echeance_tva": echeance,
                 "ton_relance": ton,
+                # Corpus de demonstration : le cabinet ecrit directement au client
+                # (circuit C-DIRECT). Le circuit est OBLIGATOIRE hors mode test (D6).
+                "circuit": "C-DIRECT",
+                "email_relais": "",
+                "domaines": email.split("@", 1)[1],
             }
             for code, raison, email, contact, echeance, ton in DOSSIERS
         ],
-        ("dossier", "raison_sociale", "email_contact", "nom_contact", "jour_echeance_tva", "ton_relance"),
+        (
+            "dossier", "raison_sociale", "email_contact", "nom_contact", "jour_echeance_tva",
+            "ton_relance", "circuit", "email_relais", "domaines",
+        ),
     )
 
     print(f"Corpus genere dans {sortie}")

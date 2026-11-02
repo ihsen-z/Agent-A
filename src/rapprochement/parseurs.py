@@ -14,6 +14,7 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from .normalisation import normaliser
 from .modeles import CIRCUITS, Dossier, OperationBancaire, Piece, Sens
 
 _FORMATS_DATE = ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y/%m/%d")
@@ -170,8 +171,56 @@ def lire_pieces(chemin: Path | str) -> list[Piece]:
     return pieces
 
 
-def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
-    """dossiers.csv : dossier,raison_sociale,email_contact,nom_contact[,jour_echeance_tva,ton_relance,circuit,email_relais,domaines]"""
+def lire_alias(chemin: Path | str | None) -> dict[str, str]:
+    """alias_fournisseurs.csv : alias,fournisseur  ->  {alias: fournisseur}.
+
+    Resout un libelle bancaire abrege (« AMZN MKTPLACE ») vers le nom de fournisseur
+    de la facture (« Amazon EU Sarl »). Fichier absent ou chemin `None` : aucun alias,
+    sans erreur. Fichier mal forme : `ErreurFormat` lisible, avec le numero de ligne.
+    """
+    if not chemin or not Path(chemin).exists():
+        return {}
+    chemin = Path(chemin)
+    alias: dict[str, str] = {}
+    vus: dict[str, tuple[str, int]] = {}      # alias normalise -> (fournisseur, ligne)
+    with open(chemin, newline="", encoding="utf-8-sig") as f:
+        lecteur = csv.DictReader(f)
+        _exiger(set(lecteur.fieldnames or []), {"alias", "fournisseur"}, chemin.name)
+        for numero, ligne in enumerate(lecteur, start=2):
+            cle = (ligne.get("alias") or "").strip()
+            valeur = (ligne.get("fournisseur") or "").strip()
+            if not cle or not valeur:
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : `alias` et `fournisseur` sont obligatoires"
+                )
+            forme = normaliser(cle)
+            if not forme:
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : l'alias « {cle} » est vide une fois normalise "
+                    "(il ne contient que des mots de canal ou de la ponctuation) : il apparierait "
+                    "n'importe quel libelle"
+                )
+            if forme in vus and vus[forme][0] != valeur:
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : l'alias « {cle} » est deja defini ligne "
+                    f"{vus[forme][1]} pour « {vus[forme][0]} » : deux fournisseurs pour un meme alias"
+                )
+            vus.setdefault(forme, (valeur, numero))
+            alias[cle] = valeur
+    return alias
+
+
+def lire_dossiers(
+    chemin: Path | str, *, circuit_obligatoire: bool = False
+) -> dict[str, Dossier]:
+    """dossiers.csv : dossier,raison_sociale,email_contact,nom_contact[,jour_echeance_tva,ton_relance,circuit,email_relais,domaines]
+
+    `circuit_obligatoire` (decision D6 du cahier des charges) : qui relance qui est un
+    parametre OBLIGATOIRE du dossier. Un dossier sans circuit explicite est alors
+    refuse, au lieu de recevoir C-DIRECT en silence, c'est-a-dire d'ecrire directement
+    au client final, ce que D6 veut precisement eviter. Le defaut `False` conserve le
+    comportement historique (corpus anterieurs, mode test).
+    """
     chemin = Path(chemin)
     dossiers: dict[str, Dossier] = {}
     with open(chemin, newline="", encoding="utf-8-sig") as f:
@@ -183,7 +232,14 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
         )
         for ligne in lecteur:
             code = _nfc(ligne["dossier"])
-            circuit = (ligne.get("circuit") or "C-DIRECT").strip().upper()
+            circuit_saisi = (ligne.get("circuit") or "").strip().upper()
+            if circuit_obligatoire and not circuit_saisi:
+                raise ErreurFormat(
+                    f"{chemin.name} : circuit manquant pour {code}. Le circuit de relance "
+                    f"est obligatoire ({', '.join(CIRCUITS)}) : il dit a QUI les relances "
+                    "sont envoyees (client final, cabinet donneur d'ordre ou collaborateur)"
+                )
+            circuit = circuit_saisi or "C-DIRECT"
             email_relais = (ligne.get("email_relais") or "").strip()
             if circuit not in CIRCUITS:
                 raise ErreurFormat(

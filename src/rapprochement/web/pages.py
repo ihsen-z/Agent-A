@@ -19,7 +19,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..audit import EntreeAudit, ResultatVerification
-from ..cycle import LigneSuivi
+from ..cycle import ControleEnvois, LigneSuivi
 from ..modeles import (
     ETATS_TERMINAUX,
     Brouillon,
@@ -71,6 +71,7 @@ MESSAGES_FAIT = {
     "tranche_parti": "Envoi confirmé comme parti.",
     "tranche_non_parti": "Envoi déclaré non parti : le brouillon est de nouveau validé et peut être renvoyé.",
     "rattache": "Rattachement confirmé : la pièce est reçue et attend son contrôle.",
+    "rattache_force": "Rattachement FORCÉ vers un autre dossier : il est journalisé avec votre motif.",
     "controle": "Contrôle enregistré.",
     "promesse": "Promesse enregistrée.",
     "bloque": "Pièce bloquée : elle ne sera plus relancée.",
@@ -199,6 +200,8 @@ class Contexte:
     csrf: str
     mode_test: bool
     actif: str = ""
+    garde_fous: tuple[str, ...] = ()      # garde-fous d'envoi coupes par le mode test
+    alertes: tuple[str, ...] = ()         # config.json invalide, repli des roles...
 
 
 _NAVIGATION = (
@@ -212,8 +215,15 @@ _NAVIGATION = (
 
 
 def document(ctx: Contexte, titre: str, contenu: Html, *, message: Html | None = None) -> Html:
-    bandeau = (gabarit('<div class="bandeau-test" role="note"><p>{t}</p></div>', t=BANDEAU_MODE_TEST)
-               if ctx.mode_test else Html(""))
+    bandeau = Html("")
+    if ctx.mode_test:
+        coupes = (gabarit('<p class="bandeau-detail">Garde-fous coupés : {g}</p>', g=" ; ".join(ctx.garde_fous))
+                  if ctx.garde_fous else
+                  gabarit('<p class="bandeau-detail">{t}</p>', t="Aucun garde-fou d’envoi coupé."))
+        bandeau = gabarit('<div class="bandeau-test" role="note"><p>{t}</p>{c}</div>', t=BANDEAU_MODE_TEST, c=coupes)
+    if ctx.alertes:
+        bandeau = joindre([bandeau] + [
+            gabarit('<div class="bandeau-alerte" role="alert"><p>{a}</p></div>', a=a) for a in ctx.alertes])
     if ctx.utilisateur is not None:
         u = ctx.utilisateur
         liens = []
@@ -399,7 +409,7 @@ def _lignes_pieces_reclamees(b: Brouillon, pieces: Mapping[tuple[str, str], Piec
 
 
 def page_brouillon(ctx: Contexte, b: Brouillon, *, pieces: Mapping[tuple[str, str], PieceAttendue],
-                   dossiers: Mapping[str, Dossier]) -> Html:
+                   dossiers: Mapping[str, Dossier], envoye_par: str = "") -> Html:
     fiche = definitions([
         ("Statut", badge_brouillon(b.statut)),
         ("Destinataire", b.destinataire),
@@ -409,6 +419,7 @@ def page_brouillon(ctx: Contexte, b: Brouillon, *, pieces: Mapping[tuple[str, st
         ("Créé le", date_fr(b.cree_le)),
         ("Validé par", f"{b.valide_par} le {date_fr(b.valide_le)}" if b.valide_par else "—"),
         ("Envoyé le", date_fr(b.envoye_le)),
+        ("Envoyé par", envoye_par or "—"),
         ("Identifiant", b.id_relance),
     ])
     message = gabarit(
@@ -480,33 +491,67 @@ def page_confirmation_envoi(ctx: Contexte, b: Brouillon) -> Html:
 # ---------------------------------------------------------------------------
 
 
-def page_non_rattaches(ctx: Contexte, entrees: Sequence[tuple[str, DecisionRoutage]],
+def _case_forcer(cle: str) -> Html:
+    return gabarit(
+        '<p class="champ champ-case"><input type="checkbox" id="fo-{i}" name="forcer" value="oui">'
+        '<label for="fo-{i}">{t}</label></p>', i=cle[:16],
+        t="Forcer vers un autre dossier que celui de la décision (responsable, journalisé)")
+
+
+def _formulaire_rattachement(ctx: Contexte, cle: str, d: DecisionRoutage, bouton: str) -> Html:
+    """Dossier + reference ; pour un responsable seulement, la case « Forcer » et son motif.
+    Le refus d'un rattachement inter-dossiers est decide par `cycle.rattacher_piece`."""
+    champs = [
+        champ_cache("cle", cle),
+        champ_texte("dossier", "Dossier", f"dossier-{cle[:16]}", requis=True, valeur=d.dossier or "", max_=100),
+        champ_texte("reference", "Référence d’opération", f"ref-{cle[:16]}", requis=True, max_=100),
+    ]
+    responsable = ctx.utilisateur is not None and ctx.utilisateur.est_responsable
+    if responsable and d.dossier:
+        champs += [_case_forcer(cle),
+                   champ_texte("motif", "Motif du forçage (obligatoire si forcé)", f"mf-{cle[:16]}")]
+    return formulaire("/non-rattaches/confirmer", ctx.csrf, joindre(champs), bouton,
+                      classe="formulaire formulaire-compact")
+
+
+def _origine_message(d: DecisionRoutage, contexte: Mapping[str, str]) -> Html:
+    """Expediteur, date de reception, objet (textes EXTERNES, echappes comme tout le reste)."""
+    lignes = []
+    for cle, etiquette in (("expediteur", "De"), ("recu_le", "Reçu le"), ("objet", "Objet")):
+        valeur = contexte.get(cle)
+        if valeur:
+            lignes.append(gabarit('<div><dt>{e}</dt><dd>{v}</dd></div>', e=etiquette, v=valeur))
+    lignes.append(gabarit('<div><dt>{e}</dt><dd>{v}</dd></div>', e="Message-ID", v=d.message_id))
+    return gabarit('<dl class="fiche fiche-compacte">{l}</dl>', l=joindre(lignes))
+
+
+def page_non_rattaches(ctx: Contexte, entrees: Sequence[tuple[str, DecisionRoutage, Mapping[str, str]]],
                        pieces: Mapping[tuple[str, str], PieceAttendue]) -> Html:
     lignes = []
-    for cle, d in entrees:
+    for cle, d, contexte in entrees:
         if d.statut is StatutRoutage.PROPOSEE:
             p = pieces.get((d.dossier or "", d.reference_operation or ""))
             proposition = (gabarit('{d}/{r} — {l} — {m}', d=p.dossier, r=p.reference, l=p.libelle,
                                    m=montant(p.montant, p.devise))
                            if p else gabarit("{d}/{r}", d=d.dossier, r=d.reference_operation))
             situation = gabarit('<span class="etat statut-proposee">Proposition</span><br>{p}', p=proposition)
-            action = formulaire("/non-rattaches/confirmer", ctx.csrf, champ_cache("cle", cle),
-                                "Confirmer le rattachement")
+            action = joindre([
+                formulaire("/non-rattaches/confirmer", ctx.csrf, champ_cache("cle", cle), "Confirmer le rattachement"),
+                gabarit('<details class="actions"><summary>Rattacher à une autre opération</summary>{f}</details>',
+                        f=_formulaire_rattachement(ctx, cle, d, "Rattacher")),
+            ])
         else:
             motif = LIBELLES_MOTIF.get(d.motif, d.motif.value if d.motif else "non routé")
-            situation = gabarit('<span class="etat statut-non-routee">Non routée</span><br>{m}', m=motif)
-            champs = joindre([
-                champ_cache("cle", cle),
-                champ_texte("dossier", "Dossier", f"dossier-{cle[:16]}", requis=True, valeur=d.dossier or "", max_=100),
-                champ_texte("reference", "Référence d’opération", f"ref-{cle[:16]}", requis=True, max_=100),
-            ])
-            action = formulaire("/non-rattaches/confirmer", ctx.csrf, champs, "Rattacher",
-                                classe="formulaire formulaire-compact")
-        lignes.append(ligne(d.nom_fichier or "—", d.message_id, situation, d.detail or "—", action))
+            dossier = gabarit("<br>Dossier : {d}", d=d.dossier) if d.dossier else Html("")
+            situation = gabarit('<span class="etat statut-non-routee">Non routée</span><br>{m}{d}', m=motif, d=dossier)
+            action = _formulaire_rattachement(ctx, cle, d, "Rattacher")
+        lignes.append(ligne(d.nom_fichier or "—", _origine_message(d, contexte), situation,
+                            contexte.get("raison") or "—", action))
     return joindre([
         gabarit("<p>{t}</p>", t="Chaque pièce reçue par e-mail attend ici une décision humaine : le système "
-                "ne rattache jamais seul. Vérifiez le dossier et l’opération avant de confirmer."),
-        tableau("Pièces reçues à rattacher", ["Fichier", "Message-ID", "Situation", "Détail", "Décision"],
+                "ne rattache jamais seul. Vérifiez le dossier et l’opération avant de confirmer. Une pièce "
+                "n’est jamais rattachée au dossier d’un autre client sans forçage motivé par un responsable."),
+        tableau("Pièces reçues à rattacher", ["Fichier", "Message", "Situation", "Raison", "Décision"],
                 lignes, vide="Aucun message en attente."),
     ])
 
@@ -623,8 +668,31 @@ def _details_audit(details: Mapping[str, Any]) -> str:
     return texte if len(texte) <= 400 else texte[:397] + "..."
 
 
+def _carte_controle_envois(controle: ControleEnvois) -> Html:
+    """Verdict de `cycle.controler_envois` : chaque envoi a-t-il une validation anterieure
+    par une personne declaree (CA-06) ? Lecture seule."""
+    if controle.ok:
+        resume = gabarit('<p><span class="etat etat-ok">Conforme</span> {t}</p>',
+                         t=f"{len(controle.lignes)} envoi(s) contrôlé(s) : chacun suit une validation par une "
+                           "personne déclarée, aucun brouillon n’est parti deux fois.")
+    else:
+        resume = gabarit('<p><span class="etat etat-alerte">Anomalie</span> {t}</p>',
+                         t=f"{controle.nb_anomalies} anomalie(s) sur {len(controle.lignes)} envoi(s). "
+                           f"Chaîne du journal : {'saine' if controle.chaine_ok else 'NON SAINE'} "
+                           f"({controle.raison_chaine}).")
+    lignes = []
+    for l in controle.lignes:
+        verdict = (Html('<span class="etat etat-ok">OK</span>') if not l.anomalies else
+                   gabarit('<span class="etat etat-alerte">Anomalie</span> {a}', a=" ; ".join(l.anomalies)))
+        lignes.append(ligne(l.id_relance, l.destinataire, l.valide_par or "—", l.envoye_par or "—", l.envoye_le,
+                            "envoi effectué" if l.nature == "effectue" else "tranché comme parti", verdict))
+    return carte("Contrôle des envois", joindre([resume, tableau(
+        "Contrôle des envois", ["Brouillon", "Destinataire", "Validé par", "Envoyé par", "Envoyé le", "Nature",
+                                "Verdict"], lignes, vide="Aucun envoi dans le journal.")]))
+
+
 def page_audit(ctx: Contexte, verification: ResultatVerification, entrees: Sequence[EntreeAudit] | None,
-               erreur_lecture: str = "", total: int = 0) -> Html:
+               erreur_lecture: str = "", total: int = 0, *, controle: ControleEnvois | None = None) -> Html:
     if verification.ok:
         etat = gabarit('<p><span class="etat etat-ok">Intègre</span> Chaîne de hachage vérifiée : {n} entrée(s). {r}</p>',
                        n=verification.nb_entrees, r=verification.raison)
@@ -651,6 +719,7 @@ def page_audit(ctx: Contexte, verification: ResultatVerification, entrees: Seque
         gabarit('<div class="deux-colonnes">{a}{b}</div>', a=carte("Vérification", etat),
                 b=carte("Actions", joindre(actions))),
         avis(erreur_lecture, "erreur") if erreur_lecture else Html(""),
+        _carte_controle_envois(controle) if controle is not None else Html(""),
         tableau(titre_table, [("N°", "nombre"), "Horodatage", "Acteur", "Action", "Objet", "Détails"],
                 lignes, vide="Journal vide."),
     ])

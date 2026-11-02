@@ -17,8 +17,9 @@ Securite (voir docs/application_web.md) :
 - erreur du domaine : message en francais dans la page ; erreur interne : page
   generique, detail dans `<instance>/logs/web.log` (jamais de mot de passe ni de jeton).
 
-Les decisions sont serialisees par un verrou d'ecriture : sans `fcntl` (Windows),
-le journal d'audit ne protege pas deux ecritures concurrentes du meme processus.
+Les decisions sont serialisees par un verrou d'ecriture (defense en profondeur, en plus
+du verrou de fichier du journal d'audit). Les droits web (role du compte) doublent ceux
+du cycle (`responsables.txt`) : une operation de responsable est refusee des deux cotes.
 """
 
 from __future__ import annotations
@@ -412,11 +413,33 @@ class Application:
             return False
         return isinstance(donnees, dict) and donnees.get("mode_test") is True
 
+    def _cadre(self) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
+        """(mode test, garde-fous d'envoi coupes, alertes) pour le bandeau de CHAQUE page.
+
+        Les garde-fous coupes et l'avertissement sur les roles viennent de `cycle`
+        (`garde_fous_mode_test`, `avertissement_roles`) : memes regles que l'envoi."""
+        mode = self.mode_test()
+        garde_fous: tuple[str, ...] = ()
+        alertes: list[str] = []
+        try:
+            cycle.charger_config(self.instance)               # valide config.json (ConfigInvalide)
+            if mode:
+                garde_fous = tuple(cycle.garde_fous_mode_test(self.instance))
+            avertissement = cycle.avertissement_roles(self.instance)
+            if avertissement:
+                alertes.append(avertissement)
+        except cycle.ConfigInvalide as exc:
+            alertes.append(f"{exc} Les envois et décisions sont refusés tant qu’il n’est pas corrigé.")
+        except Exception:  # noqa: BLE001 - le bandeau ne doit jamais empecher d'afficher une page
+            self.journal.warning("bandeau : lecture de la configuration impossible", exc_info=True)
+        return mode, garde_fous, tuple(alertes)
+
     def _contexte(self, req: Requete | None, actif: str = "", csrf: str | None = None) -> Contexte:
         utilisateur = req.utilisateur if req is not None else None
         if csrf is None:
             csrf = req.session.csrf if req is not None and req.session is not None else ""
-        return Contexte(utilisateur, csrf, self.mode_test(), actif)
+        mode, garde_fous, alertes = self._cadre()
+        return Contexte(utilisateur, csrf, mode, actif, garde_fous=garde_fous, alertes=alertes)
 
     def _html(self, contenu: str, statut: int = 200, entetes: list[tuple[str, str]] | None = None) -> Reponse:
         return Reponse(statut, contenu.encode("utf-8"), entetes=entetes or [])
@@ -511,7 +534,8 @@ class Application:
         nonce = req.cookies.get(COOKIE_PRE, "")
         if not _NONCE.fullmatch(nonce):
             nonce = secrets.token_urlsafe(24)
-        ctx = Contexte(None, self._jeton_pre_session(nonce), self.mode_test())
+        mode, garde_fous, alertes = self._cadre()
+        ctx = Contexte(None, self._jeton_pre_session(nonce), mode, garde_fous=garde_fous, alertes=alertes)
         corps = pages.page_connexion(ctx, erreur=erreur, identifiant=identifiant)
         return self._html(corps, statut, [self._cookie(COOKIE_PRE, nonce)])
 
@@ -577,9 +601,28 @@ class Application:
             pieces = {(p.dossier, p.reference): p for d in b.dossiers for p in depot.charger_pieces(dossier=d)}
         return b, pieces
 
+    def _envoye_par(self, ident: str) -> str:
+        """Qui a DECLENCHE l'envoi de ce brouillon, lu dans le journal d'audit (`envoye_par`,
+        ecrit par `cycle.envoyer_relance`) ; ou qui a tranche un envoi incertain comme parti."""
+        if not self.instance.audit.exists():
+            return ""
+        try:
+            entrees = JournalAudit(self.instance.audit).lire()
+        except JournalCorrompu:
+            return ""
+        for e in reversed(entrees):
+            if e.objet != ident:
+                continue
+            if e.action == "envoi_effectue":
+                return str(e.details.get("envoye_par") or "")
+            if e.action == "envoi_confirme_par_humain":
+                return f"{e.acteur} (envoi incertain tranché comme parti)"
+        return ""
+
     def get_brouillon(self, req: Requete, ident: str) -> Reponse:
         b, pieces = self._brouillon(ident)
-        contenu = pages.page_brouillon(self._contexte(req), b, pieces=pieces, dossiers=self._dossiers())
+        contenu = pages.page_brouillon(self._contexte(req), b, pieces=pieces, dossiers=self._dossiers(),
+                                       envoye_par=self._envoye_par(ident))
         return self._page(req, "brouillons", "Brouillon de relance", contenu)
 
     def get_envoyer(self, req: Requete, ident: str) -> Reponse:
@@ -610,8 +653,11 @@ class Application:
             raise ErreurHttp(400, "Confirmation manquante",
                              "L’envoi doit être confirmé depuis la page de confirmation.",
                              retour=f"/brouillons/{ident}/envoyer")
+        u = req.utilisateur
+        assert u is not None
+        # Envoi NOMINATIF : le journal d'audit nomme la personne qui declenche (`envoye_par`).
         self._action(req, "envoyer", f"/brouillons/{ident}", lambda: cycle.envoyer_relance(
-            self.instance, ident, maintenant=self._maintenant()))
+            self.instance, ident, maintenant=self._maintenant(), par=u.nom))
         return self._vers_brouillon(ident, "envoye")
 
     def post_trancher(self, req: Requete, ident: str) -> Reponse:
@@ -629,7 +675,7 @@ class Application:
         with self._lecture() as depot:
             file = depot.file_humaine(resolue=False) if depot else []
             pieces = {(p.dossier, p.reference): p for p in depot.charger_pieces()} if depot else {}
-        entrees = [(cle_entree(d.message_id, d.empreinte), d) for d in file]
+        entrees = [(cle_entree(d.message_id, d.empreinte), d, cycle.contexte_file(d)) for d in file]
         return self._page(req, "non-rattaches", "Messages non rattachés",
                           pages.page_non_rattaches(self._contexte(req), entrees, pieces))
 
@@ -643,14 +689,35 @@ class Application:
         if len(trouvees) != 1:
             raise ErreurHttp(409, "Action refusée", "Entrée introuvable ou déjà traitée.", retour="/non-rattaches")
         d = trouvees[0]
-        dossier = reference = None
-        if d.statut is not StatutRoutage.PROPOSEE:
-            dossier = req.f("dossier", requis=True, max_=100).strip()
-            reference = req.f("reference", requis=True, max_=100).strip()
-        self._action(req, "rattacher", "/non-rattaches", lambda: cycle.rattacher_piece(
-            self.instance, u.nom, maintenant=self._maintenant(), message_id=d.message_id,
-            empreinte=d.empreinte, dossier=dossier, reference=reference))
-        return self._rediriger("/non-rattaches?fait=rattache")
+        forcer = req.f("forcer") == "oui"
+        if forcer and not u.est_responsable:
+            self.journal.warning("refus 403 forcage de rattachement pour %s", u.identifiant)
+            raise ErreurHttp(403, "Accès refusé", "Forcer un rattachement vers un autre dossier est réservé "
+                             "au responsable.", retour="/non-rattaches")
+        motif = req.f("motif", requis=forcer).strip()
+        dossier = req.f("dossier", max_=100).strip() or None
+        reference = req.f("reference", max_=100).strip() or None
+        if (d.statut is not StatutRoutage.PROPOSEE or dossier or reference) and not (dossier and reference):
+            raise ErreurHttp(400, "Saisie incomplète", "Indiquez le dossier ET la référence d’opération.",
+                             retour="/non-rattaches")
+        try:
+            self._action(req, "rattacher-force" if forcer else "rattacher", "/non-rattaches",
+                         lambda: cycle.rattacher_piece(
+                             self.instance, u.nom, maintenant=self._maintenant(), message_id=d.message_id,
+                             empreinte=d.empreinte, dossier=dossier, reference=reference,
+                             forcer=forcer, motif=motif))
+        except ErreurHttp as exc:
+            if exc.statut == 409 and not forcer and d.dossier and dossier and dossier != d.dossier:
+                suite = ("Si ce transfert est voulu, cochez « Forcer » et indiquez un motif : il sera journalisé."
+                         if u.est_responsable else
+                         "Seul un responsable peut forcer ce rattachement, avec un motif journalisé.")
+                raise ErreurHttp(
+                    409, "Rattachement refusé",
+                    f"Rattachement refusé : cette pièce a été reçue pour le dossier « {d.dossier} », pas "
+                    f"« {dossier} ». Une pièce ne passe jamais d’un client à un autre par mégarde : corrigez "
+                    f"le dossier. {suite}", retour="/non-rattaches") from None
+            raise
+        return self._rediriger("/non-rattaches?fait=" + ("rattache_force" if forcer else "rattache"))
 
     def get_pieces(self, req: Requete) -> Reponse:
         dossier, etat = req.q("dossier"), req.q("etat")
@@ -726,6 +793,7 @@ class Application:
 
     def get_audit(self, req: Requete) -> Reponse:
         verification = cycle.verifier_audit(self.instance)
+        controle = cycle.controler_envois(self.instance)          # lecture seule (recette CA-06)
         entrees, erreur, total = None, "", 0
         if self.instance.audit.exists():
             try:
@@ -735,7 +803,8 @@ class Application:
             except JournalCorrompu as exc:
                 erreur = f"Lecture du journal impossible : {exc}"
         return self._page(req, "audit", "Journal d’audit",
-                          pages.page_audit(self._contexte(req), verification, entrees, erreur, total))
+                          pages.page_audit(self._contexte(req), verification, entrees, erreur, total,
+                                           controle=controle))
 
     def post_exporter(self, req: Requete) -> Reponse:
         horodatage = self._maintenant().astimezone(FUSEAU).strftime("%Y%m%d-%H%M%S")
@@ -763,7 +832,9 @@ class Application:
 
 
 _MESSAGES_TYPE = {
-    "ValidateurRefuse": "Votre nom n’est pas (ou plus) déclaré dans validateurs.txt : décision refusée.",
+    "ValidateurRefuse": "Votre nom n’est pas déclaré dans la liste qu’exige cette opération (validateurs.txt ; "
+                        "responsables.txt pour arbitrer, trancher un envoi ou réparer le journal) : décision refusée.",
+    "ConfigInvalide": "config.json de l’instance est invalide : action refusée tant qu’il n’est pas corrigé.",
     "EnvoiHorsCreneau": "Envoi hors créneau : les relances ne partent que les jours ouvrés, de 8 h à 18 h "
                         "(heure de Paris). Le brouillon reste validé.",
     "EnvoiLimiteHebdomadaire": "Limite d’un e-mail par destinataire sur 7 jours glissants atteinte.",

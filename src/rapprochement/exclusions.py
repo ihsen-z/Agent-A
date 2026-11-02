@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .modeles import OperationBancaire, Sens
 from .normalisation import normaliser
+from .parseurs import ErreurFormat
 
 
 def _formes(libelle: str) -> tuple[str, str]:
@@ -169,24 +170,80 @@ def _contre_exemple(operation: OperationBancaire) -> bool:
     )
 
 
-class Referentiel:
-    """Regles generales + exclusions apprises par dossier."""
+STATUTS_REGLE = ("validee", "proposee")
 
-    def __init__(self, apprises: dict[str, list[tuple[str, str]]] | None = None) -> None:
-        # dossier -> [(motif_regex, motif_lisible)]
+
+class Referentiel:
+    """Regles generales + exclusions apprises par dossier.
+
+    Une regle apprise a un cycle de vie (cahier des charges section 8) : PROPOSEE
+    puis VALIDEE. Une regle PROPOSEE ne s'applique PAS : une expression reguliere
+    trop large clorait des pieces en etat terminal (HORS_PERIMETRE), sans auteur ni
+    date, et la piece reellement manquante ne serait plus jamais reclamee. Elle est
+    seulement exposee dans `provisoires` pour que le responsable la valide.
+    """
+
+    def __init__(
+        self,
+        apprises: dict[str, list[tuple[str, ...]]] | None = None,
+        provisoires: list[dict[str, str]] | None = None,
+    ) -> None:
+        # dossier -> [(motif_regex, motif_lisible[, nom])] : regles VALIDEES, appliquees
         self.apprises = apprises or {}
+        # regles proposees, non appliquees : [{dossier, motif_regex, motif, nom, auteur, date_activation}]
+        self.provisoires = provisoires or []
 
     @classmethod
     def depuis_csv(cls, chemin: Path | str | None) -> "Referentiel":
-        """Charge exclusions_dossier.csv : dossier,motif_regex,motif."""
-        apprises: dict[str, list[tuple[str, str]]] = {}
+        """Charge exclusions_dossier.csv : dossier,motif_regex[,motif,nom,auteur,date_activation,statut].
+
+        Les trois premieres colonnes suffisent (format historique : toutes les regles
+        sont alors validees). `statut` vaut `validee` (defaut) ou `proposee`. Une
+        expression reguliere invalide est refusee ICI, avec le numero de ligne : elle
+        ferait sinon planter le cycle de tous les dossiers au moment de l'appliquer.
+        """
+        apprises: dict[str, list[tuple[str, ...]]] = {}
+        provisoires: list[dict[str, str]] = []
         if chemin and Path(chemin).exists():
-            with open(chemin, newline="", encoding="utf-8") as f:
-                for ligne in csv.DictReader(f):
-                    apprises.setdefault(ligne["dossier"], []).append(
-                        (ligne["motif_regex"], ligne.get("motif", "Exclu par le cabinet"))
+            nom_fichier = Path(chemin).name
+            with open(chemin, newline="", encoding="utf-8-sig") as f:
+                lecteur = csv.DictReader(f)
+                manquantes = {"dossier", "motif_regex"} - set(lecteur.fieldnames or [])
+                if manquantes:
+                    raise ErreurFormat(
+                        f"{nom_fichier} : colonne(s) manquante(s) : {', '.join(sorted(manquantes))}"
                     )
-        return cls(apprises)
+                for numero, ligne in enumerate(lecteur, start=2):
+                    dossier = (ligne.get("dossier") or "").strip()
+                    motif_regex = (ligne.get("motif_regex") or "").strip()
+                    if not dossier or not motif_regex:
+                        raise ErreurFormat(
+                            f"{nom_fichier} ligne {numero} : `dossier` et `motif_regex` sont obligatoires"
+                        )
+                    try:
+                        re.compile(motif_regex)
+                    except re.error as erreur:
+                        raise ErreurFormat(
+                            f"{nom_fichier} ligne {numero} : expression reguliere invalide "
+                            f"« {motif_regex} » ({erreur})"
+                        ) from None
+                    statut = (ligne.get("statut") or "validee").strip().lower()
+                    if statut not in STATUTS_REGLE:
+                        raise ErreurFormat(
+                            f"{nom_fichier} ligne {numero} : statut « {statut} » inconnu "
+                            f"(attendu : {', '.join(STATUTS_REGLE)})"
+                        )
+                    motif = (ligne.get("motif") or "Exclu par le cabinet").strip()
+                    nom = (ligne.get("nom") or "").strip()
+                    if statut == "proposee":
+                        provisoires.append({
+                            "dossier": dossier, "motif_regex": motif_regex, "motif": motif, "nom": nom,
+                            "auteur": (ligne.get("auteur") or "").strip(),
+                            "date_activation": (ligne.get("date_activation") or "").strip(),
+                        })
+                        continue
+                    apprises.setdefault(dossier, []).append((motif_regex, motif, nom))
+        return cls(apprises, provisoires)
 
     def exclure(self, operation: OperationBancaire) -> tuple[bool, str, str]:
         """Renvoie (exclue, motif lisible, nom de la regle)."""
@@ -194,9 +251,11 @@ class Referentiel:
             return False, "", ""
 
         formes = _formes(operation.libelle)
-        for motif_regex, motif in self.apprises.get(operation.dossier, []):
+        for regle_apprise in self.apprises.get(operation.dossier, []):
+            motif_regex, motif, *reste = regle_apprise
             if any(re.search(motif_regex, forme) for forme in formes):
-                return True, motif, f"apprise:{operation.dossier}"
+                nom = reste[0] if reste and reste[0] else ""
+                return True, motif, f"apprise:{operation.dossier}" + (f":{nom}" if nom else "")
 
         for regle in REGLES:
             if regle.correspond(operation):

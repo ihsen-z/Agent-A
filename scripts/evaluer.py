@@ -24,7 +24,7 @@ sys.path.insert(0, str(RACINE / "src"))
 from rapprochement.exclusions import Referentiel          # noqa: E402
 from rapprochement.modeles import Statut                   # noqa: E402
 from rapprochement.moteur import Moteur                    # noqa: E402
-from rapprochement.parseurs import lire_pieces, lire_releve  # noqa: E402
+from rapprochement.parseurs import lire_alias, lire_pieces, lire_releve  # noqa: E402
 
 # Le comptable ne distingue pas "justifie" de "a verifier" : dans les deux cas
 # il ne relance pas le client. On evalue donc sur l'action, pas sur l'etiquette.
@@ -57,7 +57,10 @@ def main() -> int:
     with open(entree / "verite_terrain.csv", newline="", encoding="utf-8") as f:
         verite = {l["reference"]: l for l in csv.DictReader(f)}
 
-    moteur = Moteur(Referentiel.depuis_csv(entree / "exclusions_dossier.csv"))
+    moteur = Moteur(
+        Referentiel.depuis_csv(entree / "exclusions_dossier.csv"),
+        alias=lire_alias(entree / "alias_fournisseurs.csv"),
+    )
     rapprochements = moteur.rapprocher(operations, pieces)
 
     matrice: Counter[tuple[str, str]] = Counter()

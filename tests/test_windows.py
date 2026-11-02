@@ -40,6 +40,7 @@ from rapprochement.modeles import EtatPiece, StatutBrouillon  # noqa: E402
 PARIS = ZoneInfo("Europe/Paris")
 J0 = dt.date(2026, 10, 5)            # lundi
 VALIDEUSE = "Marie Durand"
+RESPONSABLE = "Paul Martin"
 CORPUS = RACINE / "data" / "corpus"
 
 
@@ -88,6 +89,7 @@ def nouvelle_instance(rep: Path) -> cycle.Instance:
     inst = cycle.Instance(rep)
     inst.preparer()
     inst.validateurs.write_text(f"{VALIDEUSE}\nPaul Martin\n", encoding="utf-8")
+    inst.responsables.write_text("Paul Martin\n", encoding="utf-8")     # A14 : operations de responsable
     return inst
 
 
@@ -275,12 +277,12 @@ def test_d_validateurs_et_config_avec_bom_et_crlf(tmp_path):
     assert r.mode_test and cycle.exiger_validateur(inst, "marie durand") == "Marie Durand"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "exclusions.py (Referentiel.depuis_csv) ouvre exclusions_dossier.csv en `utf-8` et non "
-    "`utf-8-sig`, contrairement aux trois autres lecteurs : un fichier enregistre par Excel "
-    "('CSV UTF-8') ou le Bloc-notes porte un BOM, la premiere colonne devient '\\ufeffdossier' "
-    "et le cycle est refuse (KeyError). Les trois autres CSV d'entree sont corrects."))
-def test_d_defaut_exclusions_avec_bom(tmp_path):
+# Etat initial (defaut corrige, test de regression) : exclusions.py ouvrait
+# exclusions_dossier.csv en `utf-8` et non `utf-8-sig`, contrairement aux trois autres lecteurs.
+# Un fichier enregistre par Excel ("CSV UTF-8") ou le Bloc-notes porte un BOM : la premiere
+# colonne devenait '\ufeffdossier' et le cycle etait refuse (KeyError). Ce test etait un xfail
+# strict ; il est devenu rouge (XPASS) quand exclusions.py a ete corrige.
+def test_d_exclusions_avec_bom_et_crlf(tmp_path):
     entree = ecrire_entree(tmp_path / "e")
     (entree / "exclusions_dossier.csv").write_bytes(
         "﻿dossier,motif_regex,motif\r\nALPHA,loxam,Location refacturee\r\n".encode("utf-8"))
@@ -343,7 +345,7 @@ def test_e_aucun_nom_ecrit_ne_derive_d_une_donnee_externe_illegale(tmp_path):
     lancer(entree, inst, J0 + dt.timedelta(days=1))                               # alimente quarantaine.csv
     with open(inst.audit, "ab") as f:
         f.write(b'{"acteur":"sys')                                                 # coupure -> fragment d'audit
-    cycle.reparer_audit(inst, VALIDEUSE, maintenant=a_10h(J0))
+    cycle.reparer_audit(inst, RESPONSABLE, maintenant=a_10h(J0))
     cycle.exporter(inst, inst.racine / "export.json")
 
     fichiers = sorted(p for p in inst.racine.rglob("*"))
@@ -440,7 +442,7 @@ def test_f_aucun_descripteur_ouvert_apres_chaque_operation_et_repertoire_supprim
         assert not list(inst.racine.glob("*.tmp"))
         with open(inst.audit, "ab") as f:
             f.write(b'{"acteur":"sys')
-        cycle.reparer_audit(inst, VALIDEUSE, maintenant=a_10h(J0))
+        cycle.reparer_audit(inst, RESPONSABLE, maintenant=a_10h(J0))
         rien_d_ouvert("export + reparation d'audit")
         # Panne au milieu d'un cycle : la base est fermee aussi sur le chemin d'erreur.
         with pytest.raises(RuntimeError):
@@ -530,7 +532,7 @@ def test_fuseaux_cli_complet_sans_base_de_fuseaux(tmp_path):
     (b, *_) = cycle.brouillons(inst)
     r = sous_processus([cli, "valider", *base, "--par", VALIDEUSE, b.id_relance], **env)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
-    r = sous_processus([cli, "envoyer", *base, "--mode-test", b.id_relance], **env)
+    r = sous_processus([cli, "envoyer", *base, "--mode-test", "--par", VALIDEUSE, b.id_relance], **env)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
     assert (inst.outbox / f"{b.id_relance}.eml").exists()
 

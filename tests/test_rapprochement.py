@@ -231,7 +231,12 @@ def test_une_piece_ne_sert_qu_une_fois():
         [piece("P1", "OVH SAS", "83.99")],
     )
     statuts = sorted(r.statut.value for r in resultats)
-    assert statuts == ["justifie", "manquant"]
+    # Principe : une facture ne justifie JAMAIS deux paiements. Deux paiements identiques
+    # a dix jours d'ecart pour une seule facture sont une AMBIGUITE que le cahier des
+    # charges interdit de trancher (section 6, regle 7) : aucun n'est declare justifie
+    # (voir tests/test_moteur_regressions.py pour les bornes de cette regle).
+    assert statuts.count("justifie") <= 1
+    assert "manquant" in statuts
 
 
 # --- alias fournisseurs ---------------------------------------------------

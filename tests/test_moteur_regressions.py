@@ -115,11 +115,80 @@ def test_un_ecart_d_arrondi_de_deux_centimes_reste_justifie():
 
 
 # ------------------------------------------------------------------------------
+# Cause 5 : deux paiements equivalents, une seule facture : on ne tranche pas.
+# ------------------------------------------------------------------------------
+def test_deux_paiements_equivalents_pour_une_seule_facture_ne_sont_pas_tranches():
+    ops = [
+        operation("OP129", "2026-04-02", "CARTE 03/03 AMZN MKTPLACE FR", "447.03"),
+        operation("OP140", "2026-04-10", "CARTE 16/03 AMZN MKTPLACE FR", "447.03"),
+    ]
+    pieces = [piece("P39", "2026-03-16", "AMZN MKTPLACE FR", "447.03")]
+    resultat = rapprochements(ops, pieces)
+    assert resultat["OP129"].statut is Statut.MANQUANT
+    assert resultat["OP140"].statut is Statut.MANQUANT, "on ne sait pas lequel des deux est justifie"
+    assert "ambiguite_non_tranchee" in {r.regle for r in resultat.values()}
+
+
+def test_deux_paiements_assez_espaces_restent_departages_par_la_date():
+    ops = [
+        operation("OP1", "2026-04-02", "PRLV SEPA OVH", "83.99"),
+        operation("OP2", "2026-05-20", "PRLV SEPA OVH", "83.99"),
+    ]
+    pieces = [piece("P1", "2026-03-30", "OVH SAS", "83.99")]
+    resultat = statuts(ops, pieces)
+    assert resultat["OP1"] is Statut.JUSTIFIE
+    assert resultat["OP2"] is Statut.MANQUANT
+
+
+def test_chaque_paiement_garde_sa_facture_quand_il_y_en_a_autant():
+    ops = [
+        operation("OP1", "2026-04-02", "PRLV SEPA OVH", "83.99"),
+        operation("OP2", "2026-04-10", "PRLV SEPA OVH", "83.99"),
+    ]
+    pieces = [piece("P1", "2026-03-30", "OVH SAS", "83.99"), piece("P2", "2026-04-08", "OVH SAS", "83.99")]
+    resultat = statuts(ops, pieces)
+    assert resultat == {"OP1": Statut.JUSTIFIE, "OP2": Statut.JUSTIFIE}
+
+
+def test_un_paiement_mensuel_identique_sans_facture_au_milieu_n_est_pas_ambigu():
+    ops = [
+        operation("JAN", "2026-01-05", "PRLV SEPA ORANGE FRANCE", "100.00"),
+        operation("FEV", "2026-02-05", "PRLV SEPA ORANGE FRANCE", "100.00"),
+        operation("MAR", "2026-03-05", "PRLV SEPA ORANGE FRANCE", "100.00"),
+    ]
+    pieces = [piece("PJ", "2026-01-03", "Orange France", "100.00"), piece("PM", "2026-03-03", "Orange France", "100.00")]
+    resultat = statuts(ops, pieces)
+    assert resultat == {"JAN": Statut.JUSTIFIE, "FEV": Statut.MANQUANT, "MAR": Statut.JUSTIFIE}
+
+
+# ------------------------------------------------------------------------------
+# Reglement groupe : les trois exigences du cahier (section 6, regle 5).
+# ------------------------------------------------------------------------------
+def _groupe(libelle, total="1633.62", pieces_montants=("848.13", "438.16", "347.33")):
+    pieces = [piece(f"G{i}", f"2026-03-{22 - 4 * i:02d}", "Point P Materiaux", m) for i, m in enumerate(pieces_montants)]
+    return rapprochements([operation("OPGRP", "2026-04-03", libelle, total)], pieces)["OPGRP"]
+
+
+def test_un_reglement_groupe_exige_un_indice_dans_le_libelle_meme_a_trois_factures():
+    assert _groupe("VIR SEPA POINT P MATERIAUX REGLT GROUPE 03/04").statut is not Statut.MANQUANT
+    assert _groupe("VIR SEPA POINT P MATERIAUX 03/04").statut is Statut.MANQUANT, (
+        "trois factures sans indice de groupement : un total fortuit pourrait masquer une piece manquante"
+    )
+
+
+def test_un_reglement_groupe_exige_un_total_exact_au_centime():
+    libelle = "VIR SEPA POINT P MATERIAUX REGLT GROUPE 03/04"
+    assert _groupe(libelle, total="1633.62").statut is not Statut.MANQUANT
+    assert _groupe(libelle, total="1633.63").statut is Statut.MANQUANT, "un centime d'ecart n'est pas un total exact"
+    assert _groupe(libelle, total="1633.61").statut is Statut.MANQUANT
+
+
+# ------------------------------------------------------------------------------
 # Les graines qui ont deja fait echouer le moteur. CA-02 = zero manque rate.
 # ------------------------------------------------------------------------------
 GRAINES_A_PROBLEME = [
     (4, 0.18), (12, 0.18), (18, 0.18), (19, 0.18), (24, 0.18), (31, 0.18),
-    (35, 0.18), (60, 0.18), (1153, 0.18), (1167, 0.18), (7071, 0.40),
+    (35, 0.18), (60, 0.18), (1153, 0.18), (1167, 0.18), (7071, 0.40), (60021, 0.40),
 ]
 
 
@@ -134,5 +203,9 @@ def test_aucun_manque_rate_sur_les_graines_qui_ont_deja_fait_echouer_le_moteur(t
         [sys.executable, str(RACINE / "scripts" / "evaluer.py"), "--entree", str(tmp_path), "--detail"],
         capture_output=True, text=True,
     )
+    # CA-02 : zero manque rate, SANS tolerance. CA-01 : fausses alertes < 2 %. Une fausse
+    # alerte isolee est le prix d'une ambiguite non tranchee (cahier, section 6, regle 7).
     assert re.search(r"Manques rates\s*:\s*0/", sortie.stdout), sortie.stdout
-    assert re.search(r"Fausses alertes\s*:\s*0/", sortie.stdout), sortie.stdout
+    fausses = re.search(r"Fausses alertes\s*:\s*(\d+)/(\d+)", sortie.stdout)
+    assert fausses, sortie.stdout
+    assert int(fausses.group(1)) / int(fausses.group(2)) < 0.02, sortie.stdout

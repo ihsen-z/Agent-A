@@ -3,10 +3,12 @@
 
 Sous-commandes : cycle, valider, rejeter, envoyer, trancher, file, rattacher,
 controler, promesse, arbitrer, bloquer, debloquer, pieces, verifier-audit,
-reparer-audit, exporter. Toute decision humaine (valider, rejeter, trancher,
-rattacher, controler, promesse, arbitrer, bloquer, debloquer, reparer-audit)
-exige `--par NOM`, NOM etant
-declare dans `<instance>/validateurs.txt`. Le cycle ne valide jamais rien lui-meme.
+controler-envois, reparer-audit, exporter. Toute decision humaine (valider, rejeter,
+envoyer, trancher, rattacher, controler, promesse, arbitrer, bloquer, debloquer,
+reparer-audit) exige `--par NOM`, NOM etant declare dans `<instance>/validateurs.txt` (ou
+`responsables.txt`). `arbitrer`, `trancher` et `reparer-audit` sont reservees aux
+RESPONSABLES (`responsables.txt` ; absent : refus, sauf repli annonce en mode test).
+`controler-envois` (recette de CA-06) et `pieces` sont en lecture seule. Le cycle ne valide jamais rien lui-meme.
 `pieces` est en lecture seule.
 
 Exception de nommage : pour `promesse`, `--date` est la date PROMISE par le
@@ -104,7 +106,8 @@ def _parseur() -> argparse.ArgumentParser:
     commun = argparse.ArgumentParser(add_help=False, parents=[base])
     commun.add_argument("--date", dest="jour", type=_date, help="AAAA-MM-JJ (defaut : aujourd'hui)")
     humain = argparse.ArgumentParser(add_help=False)
-    humain.add_argument("--par", required=True, help="nom declare dans validateurs.txt")
+    humain.add_argument("--par", required=True,
+                        help="nom declare dans validateurs.txt (ou responsables.txt)")
     piece = argparse.ArgumentParser(add_help=False)
     piece.add_argument("--dossier", required=True)
     piece.add_argument("--reference", required=True)
@@ -126,7 +129,7 @@ def _parseur() -> argparse.ArgumentParser:
     s = sous.add_parser("rejeter", parents=[commun, humain], help="rejette un brouillon")
     s.add_argument("id_relance")
     s.add_argument("--motif", required=True)
-    s = sous.add_parser("envoyer", parents=[commun], help="emet un brouillon valide")
+    s = sous.add_parser("envoyer", parents=[commun, humain], help="emet un brouillon valide")
     s.add_argument("id_relance")
     s.add_argument("--mode-test", action="store_true",
                    help="mode test : le message part vers l'adresse de test, jamais vers le client")
@@ -135,6 +138,8 @@ def _parseur() -> argparse.ArgumentParser:
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--parti", dest="parti", action="store_true")
     g.add_argument("--non-parti", dest="parti", action="store_false")
+    s.add_argument("--mode-test", action="store_true",
+                   help="mode test : repli sur validateurs.txt si responsables.txt est absent")
 
     sous.add_parser("file", parents=[commun], help="liste la file humaine")
 
@@ -144,6 +149,12 @@ def _parseur() -> argparse.ArgumentParser:
     s.add_argument("--dossier")
     s.add_argument("--reference")
     s.add_argument("--piece", help="identifiant de la piece (defaut : fichier#empreinte)")
+    s.add_argument("--forcer", action="store_true",
+                   help="autorise un dossier DIFFERENT de celui de la decision de routage "
+                        "(RESPONSABLE seulement ; exige --motif)")
+    s.add_argument("--mode-test", action="store_true",
+                   help="mode test : repli sur validateurs.txt si responsables.txt est absent (--forcer)")
+    s.add_argument("--motif", default="", help="motif obligatoire avec --forcer (journalise)")
 
     s = sous.add_parser("controler", parents=[commun, humain], help="controle une piece recue")
     s.add_argument("--dossier", required=True)
@@ -159,8 +170,10 @@ def _parseur() -> argparse.ArgumentParser:
                    help="date PROMISE, AAAA-MM-JJ, dans [aujourd'hui, +15 jours]")
     s.add_argument("--le", dest="jour", type=_date, help="jour courant AAAA-MM-JJ (defaut : aujourd'hui)")
     s = sous.add_parser("arbitrer", parents=[commun, humain, piece],
-                        help="classe sans suite une piece ESCALADEE")
+                        help="classe sans suite une piece ESCALADEE (responsable)")
     s.add_argument("--motif", required=True)
+    s.add_argument("--mode-test", action="store_true",
+                   help="mode test : repli sur validateurs.txt si responsables.txt est absent")
     s = sous.add_parser("bloquer", parents=[commun, humain, piece], help="bloque une piece")
     s.add_argument("--motif", required=True)
     s = sous.add_parser("debloquer", parents=[commun, humain, piece], help="debloque une piece")
@@ -170,11 +183,22 @@ def _parseur() -> argparse.ArgumentParser:
     s.add_argument("--etat", help="filtre : " + ", ".join(e.value for e in EtatPiece))
 
     sous.add_parser("verifier-audit", parents=[commun], help="verifie le journal d'audit")
-    sous.add_parser("reparer-audit", parents=[commun, humain],
-                    help="retire une derniere ligne tronquee du journal (coupure), jamais plus")
+    s = sous.add_parser("reparer-audit", parents=[commun, humain],
+                        help="retire une derniere ligne tronquee du journal (coupure), jamais plus (responsable)")
+    s.add_argument("--mode-test", action="store_true",
+                   help="mode test : repli sur validateurs.txt si responsables.txt est absent")
+    sous.add_parser("controler-envois", parents=[commun],
+                    help="recette de CA-06 : chaque envoi a une validation anterieure par un validateur declare")
     s = sous.add_parser("exporter", parents=[commun], help="export JSON complet du depot")
     s.add_argument("--vers", required=True)
     return p
+
+
+def _avertir_roles(inst: cycle.Instance, args: argparse.Namespace) -> None:
+    """Annonce le repli sur les validateurs quand `responsables.txt` manque EN MODE TEST."""
+    avertissement = cycle.avertissement_roles(inst, getattr(args, "mode_test", False))
+    if avertissement:
+        _afficher(f"AVERTISSEMENT : {avertissement}")
 
 
 def _executer(args: argparse.Namespace) -> int:
@@ -200,33 +224,47 @@ def _executer(args: argparse.Namespace) -> int:
         return 0
     if c == "envoyer":
         b = cycle.envoyer_relance(inst, args.id_relance, maintenant=maintenant,
-                                  mode_test=args.mode_test)
+                                  mode_test=args.mode_test, par=args.par)
         config = cycle.charger_config(inst)
         if args.mode_test or config["mode_test"]:
             _afficher(f"[MODE TEST] {b.id_relance} envoye a {config['adresse_test']} "
-                      f"(destinataire reel, NON contacte : {b.destinataire})")
+                      f"(destinataire reel, NON contacte : {b.destinataire}) par {args.par}")
+            for coupe in cycle.garde_fous_mode_test(inst, args.mode_test):
+                _afficher(f"GARDE-FOU DESACTIVE (mode test) : {coupe}")
         else:
-            _afficher(f"{b.id_relance} envoye a {b.destinataire}")
+            _afficher(f"{b.id_relance} envoye a {b.destinataire} (declenche par {args.par})")
         return 0
     if c == "trancher":
-        b = cycle.trancher_envoi(inst, args.id_relance, args.par, parti=args.parti, maintenant=maintenant)
+        _avertir_roles(inst, args)
+        b = cycle.trancher_envoi(inst, args.id_relance, args.par, parti=args.parti,
+                                 maintenant=maintenant, mode_test=args.mode_test)
         _afficher(f"{b.id_relance} -> {b.statut.value}")
         return 0
     if c == "file":
         entrees = cycle.lister_file(inst)
         for d in entrees:
             v = cycle.affichable   # Message-ID, nom de fichier, detail : choisis par l'expediteur
+            contexte = cycle.contexte_file(d)
+            origine = ""
+            if "expediteur" in contexte:
+                origine = (f" [de {v(contexte['expediteur'])} le {v(contexte.get('recu_le', ''))}"
+                           f" : {v(contexte.get('objet', ''))}]")
             _afficher(f"{d.statut.value:10s} {d.motif.value if d.motif else '-':20s} "
                       f"{v(d.dossier or '-'):14s} {v(d.reference_operation or '-'):10s} "
                       f"{v(d.message_id)} {v(d.empreinte[:12] or '-')} {v(d.nom_fichier or '-')} "
-                      f": {v(d.detail)}")
+                      f": {v(contexte['raison'])}{origine}")
         _afficher(f"{len(entrees)} entree(s) a traiter")
         return 0
     if c == "rattacher":
+        if args.motif and not args.forcer:
+            raise cycle.ErreurCycle("--motif n'a de sens qu'avec --forcer")
+        if args.forcer:
+            _avertir_roles(inst, args)
         p = cycle.rattacher_piece(
             inst, args.par, maintenant=maintenant, message_id=args.message_id,
             empreinte=args.empreinte, dossier=args.dossier, reference=args.reference,
-            id_piece=args.piece,
+            id_piece=args.piece, forcer=args.forcer, motif=args.motif,
+            mode_test=args.mode_test,
         )
         _afficher(f"{p.dossier}/{p.reference} -> {p.etat.value}")
         return 0
@@ -236,12 +274,15 @@ def _executer(args: argparse.Namespace) -> int:
         _afficher(f"{p.dossier}/{p.reference} -> {p.etat.value}")
         return 0
     if c in ("promesse", "arbitrer", "bloquer", "debloquer"):
-        if c == "promesse":
+        if c == "arbitrer":
+            _avertir_roles(inst, args)
+            p = cycle.arbitrer_piece(inst, args.dossier, args.reference, args.par, motif=args.motif,
+                                     maintenant=maintenant, mode_test=args.mode_test)
+        elif c == "promesse":
             p = cycle.saisir_promesse(inst, args.dossier, args.reference, args.par,
                                       date_promesse=args.date_promesse, maintenant=maintenant)
         else:
-            fonction = {"arbitrer": cycle.arbitrer_piece, "bloquer": cycle.bloquer_piece,
-                        "debloquer": cycle.debloquer_piece}[c]
+            fonction = {"bloquer": cycle.bloquer_piece, "debloquer": cycle.debloquer_piece}[c]
             p = fonction(inst, args.dossier, args.reference, args.par, motif=args.motif,
                          maintenant=maintenant)
         drapeau = " (bloquee)" if p.bloquee else ""
@@ -256,12 +297,17 @@ def _executer(args: argparse.Namespace) -> int:
         _afficher(f"{'OK' if r.ok else 'ALTERE'} : {r.nb_entrees} entree(s) saine(s) ; {r.raison}")
         return 0 if r.ok else 1
     if c == "reparer-audit":
-        r = cycle.reparer_audit(inst, args.par, maintenant=maintenant)
+        _avertir_roles(inst, args)
+        r = cycle.reparer_audit(inst, args.par, maintenant=maintenant, mode_test=args.mode_test)
         if r.octets_retires:
             _afficher(f"journal repare : {r.octets_retires} octet(s) retire(s), sauvegardes dans {r.fragment}")
         else:
             _afficher("journal sain : rien a reparer")
         return 0
+    if c == "controler-envois":
+        controle = cycle.controler_envois(inst)
+        _afficher(controle.texte(), end="")
+        return 0 if controle.ok else 1
     if c == "exporter":
         _afficher(cycle.exporter(inst, args.vers))
         return 0

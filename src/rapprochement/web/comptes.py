@@ -4,13 +4,14 @@
   `ITERATIONS` (>= 600 000) ; les parametres sont stockes avec le hachage.
 - Ecriture atomique (fichier temporaire + fsync + `os.replace`) : le serveur peut
   relire le fichier pendant qu'une commande le modifie.
-- `validateurs.txt` reste la barriere du cycle (source unique) : creer un compte y
-  AJOUTE le nom affiche, le supprimer l'en RETIRE. L'application web ne la contourne
+- `validateurs.txt` et `responsables.txt` restent la barriere du cycle (source unique) :
+  creer un compte AJOUTE le nom affiche a validateurs.txt, et aussi a responsables.txt
+  pour le role responsable ; supprimer le compte ou changer son role l'en RETIRE. L'application web ne la contourne
   jamais : chaque decision passe `par` = nom affiche a une fonction de `cycle`, qui
   verifie ce nom dans `validateurs.txt`.
 
 Ordre des ecritures (en cas d'echec au milieu, on perd un droit, jamais l'inverse) :
-creation = compte puis validateur ; suppression = validateur puis compte.
+creation = compte puis listes ; suppression et retrogradation = listes puis compte.
 """
 
 from __future__ import annotations
@@ -206,37 +207,59 @@ def ecrire_utilisateurs(instance: Instance | Path | str, utilisateurs: Mapping[s
     ecrire_atomique(chemin_utilisateurs(instance), texte.encode("utf-8"))
 
 
-def _lignes_validateurs(instance: Instance) -> list[str]:
-    if not instance.validateurs.exists():
+def _lignes(chemin: Path) -> list[str]:
+    if not chemin.exists():
         return []
     try:
-        return instance.validateurs.read_text(encoding="utf-8-sig").splitlines()
+        return chemin.read_text(encoding="utf-8-sig").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
-        raise ErreurCompte(f"{instance.validateurs.name} illisible ({type(exc).__name__})") from None
+        raise ErreurCompte(f"{chemin.name} illisible ({type(exc).__name__})") from None
 
 
-def ajouter_validateur(instance: Instance | Path | str, nom: str) -> bool:
-    """Ajoute `nom` a validateurs.txt s'il n'y est pas (insensible a la casse). True si ajoute."""
-    inst = Instance.de(instance)
-    lignes = _lignes_validateurs(inst)
+def _ajouter_nom(chemin: Path, nom: str) -> bool:
+    """Ajoute `nom` a une liste de noms s'il n'y est pas (insensible a la casse). True si ajoute."""
+    lignes = _lignes(chemin)
     cherche = nom.strip().casefold()
     if any(l.strip().casefold() == cherche for l in lignes if not l.strip().startswith("#")):
         return False
     lignes.append(nom.strip())
-    ecrire_atomique(inst.validateurs, ("\n".join(lignes) + "\n").encode("utf-8"))
+    ecrire_atomique(chemin, ("\n".join(lignes) + "\n").encode("utf-8"))
     return True
 
 
-def retirer_validateur(instance: Instance | Path | str, nom: str) -> bool:
-    """Retire toute ligne egale a `nom` (insensible a la casse). True si retire."""
-    inst = Instance.de(instance)
-    lignes = _lignes_validateurs(inst)
+def _retirer_nom(chemin: Path, nom: str) -> bool:
+    """Retire toute ligne egale a `nom` (insensible a la casse ; commentaires gardes). True si retire."""
+    lignes = _lignes(chemin)
     cherche = nom.strip().casefold()
     gardees = [l for l in lignes if l.strip().startswith("#") or l.strip().casefold() != cherche]
     if len(gardees) == len(lignes):
         return False
-    ecrire_atomique(inst.validateurs, ("\n".join(gardees) + "\n" if gardees else "").encode("utf-8"))
+    ecrire_atomique(chemin, ("\n".join(gardees) + "\n" if gardees else "").encode("utf-8"))
     return True
+
+
+def ajouter_validateur(instance: Instance | Path | str, nom: str) -> bool:
+    return _ajouter_nom(Instance.de(instance).validateurs, nom)
+
+
+def retirer_validateur(instance: Instance | Path | str, nom: str) -> bool:
+    return _retirer_nom(Instance.de(instance).validateurs, nom)
+
+
+def ajouter_responsable(instance: Instance | Path | str, nom: str) -> bool:
+    return _ajouter_nom(Instance.de(instance).responsables, nom)
+
+
+def retirer_responsable(instance: Instance | Path | str, nom: str) -> bool:
+    return _retirer_nom(Instance.de(instance).responsables, nom)
+
+
+def _declarer(instance: Instance | Path | str, u: Utilisateur) -> None:
+    """Inscrit le nom affiche dans les listes du cycle selon le role : tout compte dans
+    validateurs.txt, un responsable AUSSI dans responsables.txt (operations reservees)."""
+    ajouter_validateur(instance, u.nom)
+    if u.role == RESPONSABLE:
+        ajouter_responsable(instance, u.nom)
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +281,7 @@ def creer_utilisateur(instance: Instance | Path | str, identifiant: str, nom: st
     u = Utilisateur(ident, nom, role, hacher(mot_de_passe))
     utilisateurs[ident] = u
     ecrire_utilisateurs(instance, utilisateurs)
-    ajouter_validateur(instance, nom)
+    _declarer(instance, u)
     return u
 
 
@@ -275,12 +298,31 @@ def changer_mot_de_passe(instance: Instance | Path | str, identifiant: str, mot_
     return u
 
 
+def changer_role(instance: Instance | Path | str, identifiant: str, role: str) -> Utilisateur:
+    """Change le role d'un compte et met responsables.txt en accord. Une retrogradation
+    retire d'abord le nom de responsables.txt (on perd un droit avant d'ecrire le compte)."""
+    ident = normaliser_identifiant(identifiant)
+    role = exiger_role(role)
+    utilisateurs = lire_utilisateurs(instance)
+    if ident not in utilisateurs:
+        raise ErreurCompte(f"identifiant inconnu : {ident!r}")
+    ancien = utilisateurs[ident]
+    u = Utilisateur(ancien.identifiant, ancien.nom, role, ancien.hachage)
+    if role != RESPONSABLE:
+        retirer_responsable(instance, u.nom)
+    utilisateurs[ident] = u
+    ecrire_utilisateurs(instance, utilisateurs)
+    _declarer(instance, u)
+    return u
+
+
 def supprimer_utilisateur(instance: Instance | Path | str, identifiant: str) -> Utilisateur:
     ident = normaliser_identifiant(identifiant)
     utilisateurs = lire_utilisateurs(instance)
     if ident not in utilisateurs:
         raise ErreurCompte(f"identifiant inconnu : {ident!r}")
     u = utilisateurs.pop(ident)
+    retirer_responsable(instance, u.nom)
     retirer_validateur(instance, u.nom)
     ecrire_utilisateurs(instance, utilisateurs)
     return u
@@ -288,7 +330,8 @@ def supprimer_utilisateur(instance: Instance | Path | str, identifiant: str) -> 
 
 __all__ = [
     "COMPTABLE", "ErreurCompte", "ITERATIONS", "RESPONSABLE", "ROLES", "Utilisateur",
-    "ajouter_validateur", "changer_mot_de_passe", "creer_utilisateur", "hacher",
+    "ajouter_responsable", "ajouter_validateur", "changer_mot_de_passe", "changer_role",
+    "creer_utilisateur", "hacher", "retirer_responsable",
     "hachage_factice", "lire_utilisateurs", "retirer_validateur", "supprimer_utilisateur",
     "verifier_mot_de_passe",
 ]

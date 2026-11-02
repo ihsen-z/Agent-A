@@ -78,6 +78,28 @@ Strategies de lecture des .eml : `fork` (Linux, macOS : memoire + CPU + delai),
 `--sans-isolation`, mode test uniquement). Hors mode test, une plateforme sans
 `fork` + `resource` est refusee.
 
+Regles issues de l'audit de conformite (docs/conformite_mvp.md, section 4) :
+
+- A7 / CA-03 : `rattacher_piece` refuse un dossier different de celui de la decision de
+  routage, sauf `forcer=True` avec un `motif` (journal `rattachement_force`) ; le refus est
+  journalise (`rattachement_refuse`).
+- A1 / D6 : hors mode test, un dossier sans circuit explicite est refuse a la lecture ; en
+  mode test, C-DIRECT par defaut avec un avertissement (resume, `resume.txt`, journal
+  `circuit_par_defaut`).
+- A14 : `arbitrer`, `trancher` et `reparer-audit` exigent un nom de `responsables.txt` (absent :
+  refus, sauf repli annonce et journalise sur `validateurs.txt` en mode test). Un responsable est
+  aussi un validateur.
+- A15 : `alias_fournisseurs.csv` (optionnel, lu par `parseurs.lire_alias`) est passe au moteur.
+- A17 : `controler_envois` (lecture seule) verifie, pour chaque envoi du journal, la validation
+  anterieure du meme brouillon par un nom declare, avec le meme destinataire.
+- A10 : `piece_creee` journalise `regle` et `motif` du rapprochement.
+- A8 : la file humaine conserve expediteur, date et objet du message en JSON dans `detail`
+  (`contexte_file` le relit, tolerante aux anciens textes simples).
+- Envoi nominatif : `envoyer_relance(par=...)` journalise `envoye_par` sur les entrees de la
+  tentative d'envoi (journal enveloppe : `envoi.py` n'est pas modifie).
+- Mode test : `creneau_envoi_libre` et `limite_hebdomadaire` de `config.json` (sans effet hors
+  mode test) ; les garde-fous coupes sont journalises (`garde_fous_coupes`) et affiches.
+
 Le cycle ne valide JAMAIS rien lui-meme.
 """
 
@@ -139,7 +161,8 @@ from .modeles import (
     identifiant_relance,
 )
 from .moteur import Moteur
-from .parseurs import ErreurFormat, lire_dossiers, lire_pieces, lire_releve
+from .normalisation import normaliser
+from .parseurs import ErreurFormat, lire_alias, lire_dossiers, lire_pieces, lire_releve
 from .rapport import ecrire_suivi, ligne_sure
 from .relances import construire_brouillon
 
@@ -248,6 +271,10 @@ class Instance:
         return self.racine / "validateurs.txt"
 
     @property
+    def responsables(self) -> Path:
+        return self.racine / "responsables.txt"
+
+    @property
     def config(self) -> Path:
         return self.racine / NOM_CONFIG
 
@@ -272,8 +299,10 @@ def charger_config(instance: Instance | Path | str) -> dict[str, Any]:
     """Configuration de l'instance (`<instance>/config.json`), valeurs par defaut comprises.
 
     Cles connues : `mode_test` (booleen STRICT, defaut False : "false" ou 0 sont refuses
-    plutot que lus comme vrais) et `adresse_test` (une adresse simple, defaut
-    `test@exemple.invalid`). Les autres cles sont conservees telles quelles (d'autres
+    plutot que lus comme vrais), `adresse_test` (une adresse simple, defaut
+    `test@exemple.invalid`), et deux garde-fous d'envoi qui ne jouent qu'EN mode test,
+    `creneau_envoi_libre` et `limite_hebdomadaire` (booleens stricts ; leurs defauts, vrai
+    et vrai, ne sont pas ajoutes au dictionnaire : voir `reglages_envoi`). Les autres cles sont conservees telles quelles (d'autres
     composants peuvent y ranger les leurs). Fichier absent : mode normal. JSON invalide,
     non UTF-8, ou valeur de mauvais type : `ConfigInvalide` (message lisible, sans trace).
     Lecture seule : ne cree jamais rien. Un BOM UTF-8 (Bloc-notes) est accepte.
@@ -301,6 +330,12 @@ def charger_config(instance: Instance | Path | str) -> dict[str, Any]:
             f"{NOM_CONFIG} : `mode_test` doit etre true ou false (booleen JSON), "
             f"pas {affichable(repr(config['mode_test']))}"
         )
+    for cle in _GARDE_FOUS_REGLABLES:
+        if cle in config and not isinstance(config[cle], bool):
+            raise ConfigInvalide(
+                f"{NOM_CONFIG} : `{cle}` doit etre true ou false (booleen JSON), "
+                f"pas {affichable(repr(config[cle]))}"
+            )
     adresse = config["adresse_test"]
     if not isinstance(adresse, str) or not _ADRESSE_TEST.fullmatch(adresse):
         raise ConfigInvalide(
@@ -308,6 +343,32 @@ def charger_config(instance: Instance | Path | str) -> dict[str, Any]:
             f"(exemple : {ADRESSE_TEST_DEFAUT}), pas {affichable(repr(adresse))}"
         )
     return config
+
+
+_GARDE_FOUS_REGLABLES = ("creneau_envoi_libre", "limite_hebdomadaire")
+
+
+def reglages_envoi(config: Mapping[str, Any], en_mode_test: bool) -> tuple[bool, bool]:
+    """(creneau_libre, limite_hebdomadaire) effectifs. HORS mode test : (False, True), quoi
+    que dise `config.json`. En mode test : `creneau_envoi_libre` (defaut VRAI : l'application
+    web ne peut pas simuler l'heure) et `limite_hebdomadaire` (defaut VRAI) du fichier."""
+    if not en_mode_test:
+        return False, True
+    return bool(config.get("creneau_envoi_libre", True)), bool(config.get("limite_hebdomadaire", True))
+
+
+def garde_fous_mode_test(instance: Instance | Path | str, mode_test: bool = False) -> tuple[str, ...]:
+    """Garde-fous d'ENVOI coupes par le mode test (pour le bandeau de l'application) ; () hors
+    mode test. Memes regles que `envoyer_relance`."""
+    config = charger_config(instance)
+    en_mode_test = bool(mode_test) or config["mode_test"]
+    libre, limite = reglages_envoi(config, en_mode_test)
+    coupes = []
+    if libre:
+        coupes.append("creneau d'envoi libre (heures et jours ouvres ignores)")
+    if not limite:
+        coupes.append("limite hebdomadaire ignoree (plusieurs e-mails par semaine au meme destinataire)")
+    return tuple(coupes)
 
 
 # ---------------------------------------------------------------------------
@@ -407,9 +468,8 @@ def affichable(valeur: object) -> str:
     return "".join(sortie)
 
 
-def lire_validateurs(instance: Instance | Path | str) -> tuple[str, ...]:
-    """Noms declares (lignes non vides, `#` = commentaire). Fichier absent : ()."""
-    chemin = Instance.de(instance).validateurs
+def _lire_liste_de_noms(chemin: Path) -> tuple[str, ...]:
+    """Lignes non vides, `#` = commentaire ; BOM et CRLF toleres. Fichier absent : ()."""
     if not chemin.exists():
         return ()
     try:
@@ -427,15 +487,17 @@ def lire_validateurs(instance: Instance | Path | str) -> tuple[str, ...]:
     return tuple(noms)
 
 
-def exiger_validateur(instance: Instance | Path | str, nom: str | None) -> str:
-    """Renvoie le nom tel que declare, ou leve `ValidateurRefuse`. Jamais d'acceptation par defaut."""
-    inst = Instance.de(instance)
-    declares = lire_validateurs(inst)
-    if not declares:
-        raise ValidateurRefuse(
-            f"aucun validateur declare ({inst.validateurs} absent ou vide) : "
-            "toute decision humaine est refusee tant que la liste n'est pas renseignee"
-        )
+def lire_validateurs(instance: Instance | Path | str) -> tuple[str, ...]:
+    """Noms declares dans `validateurs.txt` (lignes non vides, `#` = commentaire). Absent : ()."""
+    return _lire_liste_de_noms(Instance.de(instance).validateurs)
+
+
+def lire_responsables(instance: Instance | Path | str) -> tuple[str, ...]:
+    """Noms declares dans `responsables.txt` (meme format que `validateurs.txt`). Absent : ()."""
+    return _lire_liste_de_noms(Instance.de(instance).responsables)
+
+
+def _chercher_nom(declares: Sequence[str], nom: str | None, *, source: str) -> str:
     if not isinstance(nom, str) or not nom.strip():
         raise ValidateurRefuse("--par NOM est obligatoire")
     cherche = nom.strip().casefold()
@@ -444,7 +506,64 @@ def exiger_validateur(instance: Instance | Path | str, nom: str | None) -> str:
             if not etats.est_acteur_humain(declare):
                 raise ValidateurRefuse(f"{declare!r} est un acteur automatique, pas un validateur")
             return declare
-    raise ValidateurRefuse(f"{nom.strip()!r} n'est pas dans {inst.validateurs.name}")
+    raise ValidateurRefuse(f"{nom.strip()!r} n'est pas dans {source}")
+
+
+def exiger_validateur(instance: Instance | Path | str, nom: str | None) -> str:
+    """Renvoie le nom tel que declare, ou leve `ValidateurRefuse`. Jamais d'acceptation par defaut.
+
+    Un validateur est un nom de `validateurs.txt` OU de `responsables.txt` : un responsable
+    peut faire tout ce que fait un validateur (cahier des charges, section 4)."""
+    inst = Instance.de(instance)
+    declares = (*lire_validateurs(inst), *lire_responsables(inst))
+    if not declares:
+        raise ValidateurRefuse(
+            f"aucun validateur declare ({inst.validateurs} absent ou vide) : "
+            "toute decision humaine est refusee tant que la liste n'est pas renseignee"
+        )
+    return _chercher_nom(declares, nom, source=f"{inst.validateurs.name} ni {inst.responsables.name}")
+
+
+def _nom_responsable(inst: Instance, nom: str | None, mode_test: bool) -> tuple[str, bool]:
+    """(nom declare, repli) pour une operation reservee aux responsables (A14).
+
+    `responsables.txt` PRESENT : seuls ses noms sont acceptes (vide : refus, jamais d'acceptation
+    par defaut). ABSENT : refus, SAUF en mode test ou l'on se rabat sur les validateurs
+    (`repli=True`, a annoncer et a journaliser par l'appelant)."""
+    en_test = bool(mode_test) or charger_config(inst)["mode_test"]
+    if not inst.responsables.exists():
+        if not en_test:
+            raise ValidateurRefuse(
+                f"arbitrer, trancher un envoi et reparer le journal sont reserves aux responsables : "
+                f"{inst.responsables} est absent. Le creer (un nom par ligne), ou utiliser "
+                "--mode-test pour un essai local (repli sur validateurs.txt)"
+            )
+        return exiger_validateur(inst, nom), True
+    responsables = lire_responsables(inst)
+    if not responsables:
+        raise ValidateurRefuse(f"aucun responsable declare ({inst.responsables} vide) : operation refusee")
+    return _chercher_nom(responsables, nom, source=f"{inst.responsables.name} (operation reservee aux responsables)"), False
+
+
+def exiger_responsable(instance: Instance | Path | str, nom: str | None, *, mode_test: bool = False) -> str:
+    """Nom d'un responsable declare dans `responsables.txt` ; voir `_nom_responsable`."""
+    return _nom_responsable(Instance.de(instance), nom, mode_test)[0]
+
+
+def avertissement_roles(instance: Instance | Path | str, mode_test: bool = False) -> str | None:
+    """Avertissement a afficher quand `responsables.txt` est absent EN MODE TEST (les
+    operations de responsable sont alors ouvertes aux validateurs), sinon None."""
+    inst = Instance.de(instance)
+    if inst.responsables.exists() or not (bool(mode_test) or charger_config(inst)["mode_test"]):
+        return None
+    return (f"{inst.responsables.name} absent : en mode test, arbitrer, trancher un envoi et "
+            "reparer le journal sont ouverts aux validateurs (en production : refus)")
+
+
+def _noter_repli_roles(journal: JournalAudit, nom: str, operation: str, maintenant: dt.datetime) -> None:
+    journal.ecrire(nom, "repli_roles_mode_test", operation, {
+        "avertissement": "responsables.txt absent : validateurs.txt utilise (mode test)",
+    }, horodatage=maintenant)
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +577,39 @@ class Entrees:
     pieces: list[Piece]
     dossiers: dict[str, Dossier]
     referentiel: Referentiel
+    alias: dict[str, str] = field(default_factory=dict)
+
+
+LONGUEUR_MIN_ALIAS = 3
+
+
+def _alias_surs(chemin: Path) -> dict[str, str]:
+    """`parseurs.lire_alias` + une garde de securite que ce lecteur n'a pas : un alias trop
+    court, ou vide une fois normalise (« -- -- »), correspondrait a presque TOUS les libelles du
+    fournisseur et ferait declarer justifiee une operation qui ne l'est pas, c'est-a-dire une
+    piece manquante ratee (CA-02). Refus lisible plutot que correction silencieuse."""
+    alias = lire_alias(chemin)
+    for nom in alias:
+        if len(normaliser(nom)) < LONGUEUR_MIN_ALIAS:
+            raise ErreurFormat(
+                f"{chemin.name} : alias {nom!r} trop court "
+                f"(au moins {LONGUEUR_MIN_ALIAS} caracteres utiles) : il correspondrait a presque tout"
+            )
+    return alias
+
+
+def dossiers_sans_circuit(chemin: Path | str) -> list[str]:
+    """Codes des dossiers de `dossiers.csv` dont la colonne `circuit` est absente ou vide
+    (ils recoivent C-DIRECT par defaut hors circuit obligatoire). Fichier illisible : []."""
+    try:
+        with open(chemin, newline="", encoding="utf-8-sig") as f:
+            lecteur = csv.DictReader(f)
+            return sorted(
+                unicodedata.normalize("NFC", (ligne.get("dossier") or "").strip())
+                for ligne in lecteur if not (ligne.get("circuit") or "").strip()
+            )
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return []
 
 
 def _lire(lecteur: Callable[[Path], Any], chemin: Path) -> Any:
@@ -475,8 +627,12 @@ def _lire(lecteur: Callable[[Path], Any], chemin: Path) -> Any:
         raise ErreurFormat(f"{chemin.name} : {type(exc).__name__} : {exc}") from None
 
 
-def lire_entrees(entree: Path | str) -> Entrees:
-    """Memes fichiers que `scripts/lancer.py` ; `exclusions_dossier.csv` optionnel.
+def lire_entrees(entree: Path | str, *, circuit_obligatoire: bool = False) -> Entrees:
+    """Memes fichiers que `scripts/lancer.py` ; `exclusions_dossier.csv` et
+    `alias_fournisseurs.csv` optionnels.
+
+    `circuit_obligatoire=True` (decision D6, defaut du cycle HORS mode test) : un dossier
+    sans circuit explicite est refuse au lieu de recevoir C-DIRECT en silence.
 
     Leve `parseurs.ErreurFormat` pour toute entree illisible ou malformee, AVANT que
     le cycle n'ouvre la base ou le journal."""
@@ -484,8 +640,10 @@ def lire_entrees(entree: Path | str) -> Entrees:
     return Entrees(
         operations=_lire(lire_releve, racine / "releve_bancaire.csv"),
         pieces=_lire(lire_pieces, racine / "pieces_recues.csv"),
-        dossiers=_lire(lire_dossiers, racine / "dossiers.csv"),
+        dossiers=_lire(lambda c: lire_dossiers(c, circuit_obligatoire=circuit_obligatoire),
+                       racine / "dossiers.csv"),
         referentiel=_lire(Referentiel.depuis_csv, racine / "exclusions_dossier.csv"),
+        alias=_lire(_alias_surs, racine / "alias_fournisseurs.csv"),
     )
 
 
@@ -633,6 +791,13 @@ class ResumeCycle:
     adresse_test: str = ""
     strategie_isolation: str = ""
     avertissements: list[str] = field(default_factory=list)
+    # Alertes de donnees / configuration du mode test (circuit absent, garde-fous coupes) :
+    # separees des avertissements d'isolation pour ne pas melanger deux familles de risques.
+    alertes: list[str] = field(default_factory=list)
+    garde_fous_coupes: list[str] = field(default_factory=list)
+    # Regles d'exclusion PROPOSEES (statut `proposee`) : jamais appliquees, en attente du
+    # responsable. Noms (ou, a defaut, dossier et expression) affiches dans une ligne du resume.
+    regles_provisoires: list[str] = field(default_factory=list)
 
     def en_dict(self) -> dict[str, Any]:
         return {
@@ -649,6 +814,7 @@ class ResumeCycle:
             "reportees": dict(sorted(self.reportees.items())), "bloquees": self.bloquees,
             "anomalies": list(self.anomalies), "quarantaine": self.quarantaine,
             "mode_test": self.mode_test, "strategie_isolation": self.strategie_isolation,
+            "regles_provisoires": len(self.regles_provisoires),
         }
 
     def texte(self) -> str:
@@ -659,14 +825,19 @@ class ResumeCycle:
                 f"*** MODE TEST ACTIF : tout e-mail part vers {affichable(self.adresse_test)}, "
                 "jamais vers un client. Donnees fictives uniquement. ***")
         lignes += [f"AVERTISSEMENT : {affichable(a)}" for a in self.avertissements]
+        lignes += [f"AVERTISSEMENT : {affichable(a)}" for a in self.alertes]
+        lignes += [f"GARDE-FOU DESACTIVE (mode test) : {affichable(g)}" for g in self.garde_fous_coupes]
         lignes.append(f"Cycle du {self.aujourdhui.isoformat()}")
         for cle, valeur in d.items():
             if cle in ("aujourdhui", "anomalies", "brouillons_du_jour", "reportees",
-                       "mode_test", "strategie_isolation"):
+                       "mode_test", "strategie_isolation", "regles_provisoires"):
                 continue
             lignes.append(f"  {cle:28s}: {valeur}")
         for raison, n in d["reportees"].items():
             lignes.append(f"  reportees {raison:18s}: {n}")
+        if self.regles_provisoires:
+            lignes.append(f"  regles provisoires          : {len(self.regles_provisoires)} en attente de "
+                          f"validation ({', '.join(affichable(n) for n in self.regles_provisoires)})")
         lignes.append(f"  brouillons du jour          : {len(self.brouillons_du_jour)}")
         lignes += [f"    {i}" for i in self.brouillons_du_jour]
         lignes.append(f"  anomalies                   : {len(self.anomalies)}")
@@ -772,14 +943,17 @@ def executer_cycle(
     config = charger_config(inst)
     en_mode_test = bool(mode_test) or config["mode_test"]
     strategie = choisir_strategie_isolation(en_mode_test, strategie_isolation)
-    entrees = lire_entrees(entree)
+    # D6 : hors mode test, un dossier sans circuit explicite est refuse (avant toute ecriture).
+    entrees = lire_entrees(entree, circuit_obligatoire=not en_mode_test)
+    sans_circuit = dossiers_sans_circuit(Path(entree) / "dossiers.csv") if en_mode_test else []
 
     # 2. Collisions dans le releve : refus AVANT toute ecriture.
     collisions = collisions_de_reference(entrees.operations)
     if collisions:
         raise CollisionReferences(collisions)
 
-    rapprochements = Moteur(entrees.referentiel).rapprocher(entrees.operations, entrees.pieces)
+    rapprochements = Moteur(entrees.referentiel, entrees.alias).rapprocher(
+        entrees.operations, entrees.pieces)
     resume = ResumeCycle(aujourdhui=aujourdhui, operations=len(rapprochements),
                          mode_test=en_mode_test, adresse_test=config["adresse_test"] if en_mode_test else "",
                          strategie_isolation=strategie)
@@ -787,6 +961,15 @@ def executer_cycle(
         resume.avertissements.append(AVERTISSEMENT_SPAWN)
     elif strategie == "directe":
         resume.avertissements.append(AVERTISSEMENT_DIRECTE)
+    if sans_circuit:
+        resume.alertes.append(
+            f"circuit absent pour {len(sans_circuit)} dossier(s), C-DIRECT par defaut : "
+            f"{', '.join(sans_circuit)} (hors mode test : refus, decision D6)")
+    resume.garde_fous_coupes = list(garde_fous_mode_test(inst, mode_test)) if en_mode_test else []
+    resume.regles_provisoires = [
+        r.get("nom") or f"{r.get('dossier', '')}/{r.get('motif_regex', '')}"
+        for r in getattr(entrees.referentiel, "provisoires", [])
+    ]
 
     # Journal d'audit sain AVANT toute ecriture en base (sinon : effets sans trace).
     with _ouvrir(inst, ecriture=True) as (depot, journal):
@@ -801,6 +984,11 @@ def executer_cycle(
                 "adresse_test": config["adresse_test"],
                 "source": ("config.json et --mode-test" if mode_test and config["mode_test"]
                            else "--mode-test" if mode_test else "config.json"),
+            }, horodatage=maintenant)
+        if sans_circuit:
+            journal.ecrire(ACTEUR_SYSTEME, "circuit_par_defaut", aujourdhui.isoformat(), {
+                "dossiers": sans_circuit, "circuit": "C-DIRECT",
+                "avertissement": "circuit absent : en production ce cycle serait refuse (D6)",
             }, horodatage=maintenant)
         if strategie != "fork":
             journal.ecrire(ACTEUR_SYSTEME, "isolation_degradee", aujourdhui.isoformat(), {
@@ -835,7 +1023,8 @@ def executer_cycle(
         _etape_brouillons(depot, notes, plan, pieces_avant, entrees.dossiers, aujourdhui, resume, panne)
         _panne(panne, "avant_sorties")
 
-        ecrire_sorties(inst, depot, rapprochements, a_verifier, resume, quarantaine=quarantaine)
+        ecrire_sorties(inst, depot, rapprochements, a_verifier, resume, quarantaine=quarantaine,
+                       regles_provisoires=getattr(entrees.referentiel, "provisoires", []))
         journal.ecrire(ACTEUR_SYSTEME, "cycle_termine", aujourdhui.isoformat(),
                        resume.en_dict(), horodatage=maintenant)
     return resume
@@ -869,6 +1058,8 @@ def _etape_pieces(depot: Depot, notes: _Notes, rapprochements: list[Rapprochemen
                     notes.noter("piece_creee", _objet(nouvelle), {
                         "periode": nouvelle.periode, "montant": nouvelle.montant,
                         "devise": nouvelle.devise, "date_operation": nouvelle.date_operation,
+                        # Explicable apres coup sans rejouer le moteur (A10).
+                        "regle": r.regle, "motif": r.motif,
                     })
                 elif (piece.bloquee and piece.motif_blocage.startswith(PREFIXE_MOTIF_CYCLE)
                       and piece.etat not in ETATS_TERMINAUX):
@@ -918,6 +1109,41 @@ def _cles_message(message: Any) -> list[str]:
         routage.cle_idempotence(message.message_id, routage.empreinte_contenu(f.contenu))
         for f in message.fichiers
     ]
+
+
+CLES_CONTEXTE_FILE = ("raison", "expediteur", "recu_le", "objet")
+LONGUEUR_MAX_OBJET = 500
+
+
+def contexte_file(decision: DecisionRoutage) -> dict[str, str]:
+    """Contexte d'une decision de la file humaine : `raison` (detail d'origine du routage),
+    et, si le cycle l'a conserve, `expediteur`, `recu_le`, `objet` du message.
+
+    Tolerante : un `detail` ancien (texte simple, ou JSON qui n'est pas un objet) donne
+    `{"raison": detail}`. Toutes les valeurs sont des chaines. Les valeurs viennent de
+    l'exterieur : les passer par `affichable` avant tout affichage."""
+    brut = decision.detail if isinstance(decision.detail, str) else ""
+    try:
+        lu = json.loads(brut)
+    except ValueError:
+        return {"raison": brut}
+    if not isinstance(lu, dict) or not isinstance(lu.get("raison", ""), str):
+        return {"raison": brut}
+    contexte = {cle: str(valeur) for cle, valeur in lu.items() if isinstance(valeur, (str, int, float))}
+    contexte.setdefault("raison", "")
+    return contexte
+
+
+def _avec_contexte(d: DecisionRoutage, message: MessageEntrant) -> DecisionRoutage:
+    """Copie de `d` dont `detail` porte, en JSON, la raison du routage ET l'origine du message
+    (A8). Meme schema de base : rien ne change pour le depot."""
+    contexte = {
+        "raison": d.detail,
+        "expediteur": message.expediteur[:320],
+        "recu_le": message.recu_le.isoformat(),
+        "objet": " ".join(message.objet.split())[:LONGUEUR_MAX_OBJET],
+    }
+    return dataclasses.replace(d, detail=json.dumps(contexte, ensure_ascii=False, sort_keys=True))
 
 
 @dataclass(frozen=True)
@@ -1219,7 +1445,7 @@ def _etape_routage(depot: Depot, notes: _Notes, inst: Instance, dossiers: Mappin
                 if not depot.marquer_vu(routage.cle_idempotence(d.message_id, d.empreinte)):
                     resume.doublons += 1
                     continue
-                depot.mettre_en_file(d)
+                depot.mettre_en_file(_avec_contexte(d, message))
                 details = {
                     "message_id": d.message_id, "fichier": d.nom_fichier, "empreinte": d.empreinte,
                     "dossier": d.dossier or "", "detail": d.detail,
@@ -1332,7 +1558,8 @@ def texte_brouillon(b: Brouillon) -> str:
 
 def ecrire_sorties(inst: Instance, depot: Depot, rapprochements: list[Rapprochement],
                    a_verifier: list[LigneAVerifier], resume: ResumeCycle, *,
-                   quarantaine: Sequence[FichierEnQuarantaine] = ()) -> None:
+                   quarantaine: Sequence[FichierEnQuarantaine] = (),
+                   regles_provisoires: Sequence[Mapping[str, str]] = ()) -> None:
     """Toutes les sorties. Chaque CSV passe par `rapport.ligne_sure` (formules de
     tableur neutralisees : libelles, noms de pieces jointes et Message-ID viennent
     de l'exterieur)."""
@@ -1368,11 +1595,12 @@ def ecrire_sorties(inst: Instance, depot: Depot, rapprochements: list[Rapprochem
 
     _ecrire_csv(sortie / "file_humaine.csv", (
         "message_id", "empreinte", "nom_fichier", "statut", "dossier", "periode",
-        "reference_operation", "motif", "detail",
+        "reference_operation", "motif", "detail", "expediteur", "recu_le", "objet",
     ), ([
         d.message_id, d.empreinte, d.nom_fichier, d.statut.value, d.dossier, d.periode,
-        d.reference_operation, d.motif.value if d.motif else "", d.detail,
-    ] for d in depot.file_humaine(resolue=False)))
+        d.reference_operation, d.motif.value if d.motif else "", c["raison"],
+        c.get("expediteur", ""), c.get("recu_le", ""), c.get("objet", ""),
+    ] for d, c in ((d, contexte_file(d)) for d in depot.file_humaine(resolue=False))))
 
     _ecrire_csv(sortie / "escalades.csv", (
         "dossier", "reference", "periode", "date_operation", "montant", "devise", "libelle",
@@ -1382,6 +1610,13 @@ def ecrire_sorties(inst: Instance, depot: Depot, rapprochements: list[Rapprochem
         p.libelle, p.nb_relances, _iso(p.date_premiere_demande), _iso(p.date_derniere_relance),
         int(p.bloquee), p.motif_blocage,
     ] for p in pieces if p.etat is EtatPiece.ESCALADEE))
+
+    _ecrire_csv(sortie / "regles_provisoires.csv", (
+        "dossier", "nom", "motif_regex", "motif", "auteur", "date_activation",
+    ), ([r.get("dossier", ""), r.get("nom", ""), r.get("motif_regex", ""), r.get("motif", ""),
+         r.get("auteur", ""), r.get("date_activation", "")]
+        for r in sorted(regles_provisoires, key=lambda r: (r.get("dossier", ""), r.get("nom", ""),
+                                                           r.get("motif_regex", "")))))
 
     _ecrire_csv(sortie / "quarantaine.csv", ("nom_fichier", "empreinte", "raison"), (
         [q.nom, q.empreinte, q.raison] for q in sorted(quarantaine, key=lambda q: q.nom)
@@ -1416,12 +1651,38 @@ def rejeter_relance(instance: Instance | Path | str, id_relance: str, par: str, 
         return envoi_mod.rejeter(depot, journal, id_relance, nom, motif, maintenant=maintenant)
 
 
+ACTIONS_D_ENVOI_NOMINATIVES = frozenset({
+    "envoi_demarre", "envoi_effectue", "envoi_incertain", "envoi_echec_certain",
+})
+
+
+class _JournalEnvoyePar:
+    """Journal passe a `envoi.envoyer` : il ajoute `envoye_par` (qui a DECLENCHE l'envoi, et pas
+    seulement qui l'a valide) aux entrees de la tentative d'envoi. `envoi.py` ecrit ces entrees
+    lui-meme avec des details figes ; cette enveloppe evite de le modifier. Tout le reste est
+    delegue tel quel au vrai journal."""
+
+    def __init__(self, journal: JournalAudit, envoye_par: str | None) -> None:
+        self._journal = journal
+        self._envoye_par = envoye_par
+
+    def ecrire(self, acteur: str, action: str, objet: str, details: Mapping[str, Any] | None = None,
+               **kw: Any) -> Any:
+        if action in ACTIONS_D_ENVOI_NOMINATIVES:
+            details = {**(details or {}), "envoye_par": self._envoye_par}
+        return self._journal.ecrire(acteur, action, objet, details, **kw)
+
+    def __getattr__(self, nom: str) -> Any:
+        return getattr(self._journal, nom)
+
+
 def _controler_avant_envoi(depot: Depot, journal: JournalAudit, b: Brouillon,
-                           maintenant: dt.datetime) -> None:
-    """Garde-fous que `envoi.envoyer` ne connait pas (leve `EnvoiRefuse`, journalise)."""
+                           maintenant: dt.datetime, *, limite_hebdomadaire: bool = True) -> None:
+    """Garde-fous que `envoi.envoyer` ne connait pas (leve `EnvoiRefuse`, journalise).
+    `limite_hebdomadaire=False` : mode test explicite, saute UNIQUEMENT la limite par destinataire."""
     jour = _jour_local(maintenant)
     raisons = []
-    recents = [
+    recents = [] if not limite_hebdomadaire else [
         e for e in depot.historique_envois(destinataire=b.destinataire)
         if e.id_relance != b.id_relance and 0 <= (jour - e.date_envoi).days < FENETRE_HEBDO_JOURS
     ]
@@ -1483,10 +1744,21 @@ def envoyer_relance(
     creneau_ok: Callable[[dt.datetime], bool] | None = None,
     panne: Panne | None = None,
     mode_test: bool = False,
+    par: str | None = None,
 ) -> Brouillon:
     """Emet un brouillon VALIDEE (via `envoi.envoyer`, unique chemin d'emission),
     puis applique `RELANCE_ENVOYEE` aux pieces par le mecanisme idempotent de
     l'etape 4. Un crash entre les deux est rattrape par le cycle suivant.
+
+    `par` (optionnel) : la personne qui DECLENCHE l'envoi, distincte de celle qui a valide.
+    Elle doit figurer dans `validateurs.txt` ou `responsables.txt` (`ValidateurRefuse`
+    sinon, avant tout effet) et est journalisee dans `envoye_par` sur les entrees de la
+    tentative d'envoi (`envoi_demarre`, `envoi_effectue`...). Sans `par`, comportement
+    inchange et `envoye_par: null`.
+
+    Mode test : `config.json` peut y couper deux garde-fous, journalises (`garde_fous_coupes`)
+    et affiches par `garde_fous_mode_test` : `creneau_envoi_libre` (defaut vrai) et
+    `limite_hebdomadaire` (defaut vrai ; faux la desactive). Hors mode test ils ne jouent jamais.
 
     En mode test (`mode_test=True` ou `config.json`), l'expediteur, y compris un
     expediteur passe en argument, est enveloppe dans `ExpediteurTest` : rien n'est
@@ -1495,14 +1767,25 @@ def envoyer_relance(
     inst = Instance.de(instance)
     config = charger_config(inst)
     en_mode_test = bool(mode_test) or config["mode_test"]
+    envoyeur = exiger_validateur(inst, par) if par is not None else None
+    creneau_libre, limite_hebdomadaire = reglages_envoi(config, en_mode_test)
     with _ouvrir(inst, ecriture=True) as (depot, journal):
         b = depot.charger_brouillon(id_relance)
         if b is not None and b.statut is StatutBrouillon.VALIDEE:
-            _controler_avant_envoi(depot, journal, b, maintenant)
+            _controler_avant_envoi(depot, journal, b, maintenant, limite_hebdomadaire=limite_hebdomadaire)
         exp = expediteur if expediteur is not None else envoi_mod.ExpediteurDossier(inst.outbox)
         if en_mode_test:
             exp = ExpediteurTest(exp, config["adresse_test"])
-        envoi_mod.envoyer(depot, journal, exp, id_relance, maintenant=maintenant, creneau_ok=creneau_ok)
+        if creneau_libre and creneau_ok is None:
+            creneau_ok = lambda _instant: True   # noqa: E731 - mode test : creneau libre, annonce
+        coupes = garde_fous_mode_test(inst, mode_test) if en_mode_test else ()
+        if coupes:
+            journal.ecrire(ACTEUR_SYSTEME, "garde_fous_coupes", id_relance, {
+                "garde_fous": list(coupes), "envoye_par": envoyeur,
+            }, horodatage=maintenant)
+        kw_limite = {} if limite_hebdomadaire else {"limite_hebdomadaire": False}
+        envoi_mod.envoyer(depot, _JournalEnvoyePar(journal, envoyeur), exp, id_relance,
+                          maintenant=maintenant, creneau_ok=creneau_ok, **kw_limite)
         if en_mode_test and b is not None:
             journal.ecrire(ACTEUR_SYSTEME, "envoi_mode_test", id_relance, {
                 "destinataire_reel": b.destinataire, "adresse_test": config["adresse_test"],
@@ -1517,10 +1800,14 @@ def envoyer_relance(
 
 
 def trancher_envoi(instance: Instance | Path | str, id_relance: str, par: str, *, parti: bool,
-                   maintenant: dt.datetime) -> Brouillon:
+                   maintenant: dt.datetime, mode_test: bool = False) -> Brouillon:
+    """Tranche un envoi incertain. Operation de RESPONSABLE (`responsables.txt`, A14) ; en mode
+    test sans `responsables.txt`, repli sur les validateurs (journal `repli_roles_mode_test`)."""
     inst = Instance.de(instance)
-    nom = exiger_validateur(inst, par)
+    nom, repli = _nom_responsable(inst, par, mode_test)
     with _ouvrir(inst, ecriture=True) as (depot, journal):
+        if repli:
+            _noter_repli_roles(journal, nom, "trancher", maintenant)
         tranche = envoi_mod.trancher_envoi_incertain(
             depot, journal, id_relance, nom, parti=parti, maintenant=maintenant,
         )
@@ -1551,6 +1838,9 @@ def rattacher_piece(
     dossier: str | None = None,
     reference: str | None = None,
     id_piece: str | None = None,
+    forcer: bool = False,
+    motif: str = "",
+    mode_test: bool = False,
 ) -> PieceAttendue:
     """Confirme un rattachement (`PIECE_RATTACHEE` avec `confirme_par`).
 
@@ -1558,13 +1848,37 @@ def rattacher_piece(
     une entree de la file humaine (proposition PROPOSEE, ou NON_ROUTEE si
     `dossier` et `reference` sont donnes) et la marque resolue. Sans : rattache
     directement `id_piece` a `dossier`/`reference` (piece justifiee par le moteur).
+
+    CA-03 (jamais de rattachement inter-dossiers) : si la decision de routage nomme un
+    dossier et que `dossier` en designe un AUTRE, le rattachement est REFUSE (une faute de
+    frappe donnerait la piece d'un client au dossier d'un autre). Seul `forcer=True` AVEC un
+    `motif` non vide le permet ; il est alors journalise (`rattachement_force` : acteur,
+    dossier d'origine, dossier cible, motif). Le refus est journalise lui aussi
+    (`rattachement_refuse`). Sans decision de routage (`message_id` absent), il n'y a pas
+    de dossier d'origine a comparer.
+
+    `forcer=True` est reserve au RESPONSABLE (`responsables.txt`, cahier v1.1 section 7, regle 7) :
+    le cycle l'exige lui-meme, pas seulement l'ecran. Verifie AVANT toute ecriture et AVANT le
+    motif : un simple validateur est refuse (`ValidateurRefuse`), sans effet ni entree
+    `rattachement_force`. Memes regles que `arbitrer_piece` : `responsables.txt` absent = refus,
+    sauf en mode test (`mode_test` ou `config.json`) ou l'on se rabat, avec avertissement et
+    journal `repli_roles_mode_test`, sur les validateurs. Un rattachement normal reste ouvert
+    aux validateurs.
     """
     inst = Instance.de(instance)
-    nom = exiger_validateur(inst, par)
+    repli = False
+    if forcer:
+        nom, repli = _nom_responsable(inst, par, mode_test)
+    else:
+        nom = exiger_validateur(inst, par)
     aujourdhui = _jour_local(maintenant)
     with _ouvrir(inst, ecriture=True) as (depot, journal):
         notes = _Notes(journal, maintenant)
         entree: DecisionRoutage | None = None
+        force_depuis: str | None = None
+        details_garde: dict[str, Any] = {}
+        if repli:
+            _noter_repli_roles(journal, nom, "rattacher --forcer", maintenant)
         if message_id is not None:
             candidates = [
                 d for d in depot.file_humaine(resolue=False)
@@ -1577,6 +1891,24 @@ def rattacher_piece(
             entree = candidates[0]
             if entree.statut is not StatutRoutage.PROPOSEE and not (dossier and reference):
                 raise ErreurCycle("entree NON_ROUTEE : --dossier et --reference sont obligatoires")
+            if entree.dossier and dossier and dossier != entree.dossier:
+                details_garde = {"message_id": entree.message_id, "dossier_origine": entree.dossier,
+                                 "dossier_cible": dossier, "reference": reference or "",
+                                 "fichier": entree.nom_fichier}
+                if not forcer:
+                    journal.ecrire(nom, "rattachement_refuse", entree.message_id, {
+                        **details_garde, "raison": "dossier different de la decision de routage"},
+                        horodatage=maintenant)
+                    raise ErreurCycle(
+                        f"rattachement refuse : la decision de routage designe le dossier "
+                        f"{affichable(entree.dossier)}, pas {affichable(dossier)} (une piece ne passe "
+                        "jamais d'un client a un autre par megarde). Corriger --dossier, ou, si c'est "
+                        "voulu, utiliser --forcer avec --motif"
+                    )
+                if not isinstance(motif, str) or not motif.strip():
+                    raise ErreurCycle("--forcer exige un --motif non vide (il est journalise)")
+                force_depuis = entree.dossier
+                details_garde["motif"] = motif.strip()
             dossier = dossier or entree.dossier
             reference = reference or entree.reference_operation
             id_piece = id_piece or f"{entree.nom_fichier}#{entree.empreinte[:12]}"
@@ -1592,6 +1924,9 @@ def rattacher_piece(
             if entree is not None:
                 depot.resoudre_file(entree.message_id, entree.empreinte, nom,
                                     f"rattache a {dossier}/{reference}", maintenant=maintenant)
+            if force_depuis is not None:
+                notes.noter("rattachement_force", _objet(nouvelle), {
+                    **details_garde, "par": nom, "id_piece": id_piece}, acteur=nom)
             notes.noter("rattachement_confirme", _objet(nouvelle), {
                 "par": nom, "id_piece": id_piece,
                 "message_id": entree.message_id if entree else "",
@@ -1677,11 +2012,18 @@ def saisir_promesse(instance: Instance | Path | str, dossier: str, reference: st
 
 
 def arbitrer_piece(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
-                   motif: str, maintenant: dt.datetime) -> PieceAttendue:
-    """`ARBITRAGE_CLASSEMENT` : ESCALADEE -> CLOSE_SANS_SUITE, motif obligatoire."""
+                   motif: str, maintenant: dt.datetime, mode_test: bool = False) -> PieceAttendue:
+    """`ARBITRAGE_CLASSEMENT` : ESCALADEE -> CLOSE_SANS_SUITE, motif obligatoire.
+
+    Operation de RESPONSABLE (`responsables.txt`, A14) : classer sans suite ce que le cahier
+    reserve au responsable de portefeuille. En mode test sans `responsables.txt`, repli sur les
+    validateurs (journal `repli_roles_mode_test`)."""
     if not isinstance(motif, str) or not motif.strip():
         raise ErreurCycle("arbitrer : --motif obligatoire et non vide")
-    nom = exiger_validateur(instance, par)
+    nom, repli = _nom_responsable(Instance.de(instance), par, mode_test)
+    if repli:
+        with _ouvrir(Instance.de(instance), ecriture=True) as (_, journal):
+            _noter_repli_roles(journal, nom, "arbitrer", maintenant)
     return _decision_sur_piece(
         instance, par, dossier, reference, maintenant, Evenement.ARBITRAGE_CLASSEMENT,
         lambda p: p.etat is EtatPiece.CLOSE_SANS_SUITE,
@@ -1850,13 +2192,108 @@ def verifier_audit(instance: Instance | Path | str) -> ResultatVerification:
 
 
 @dataclass(frozen=True)
+class LigneControleEnvoi:
+    id_relance: str
+    destinataire: str
+    valide_par: str
+    envoye_le: str
+    envoye_par: str
+    nature: str            # "effectue" (envoi_effectue) ou "confirme" (envoi_confirme_par_humain)
+    anomalies: tuple[str, ...]
+
+    @property
+    def verdict(self) -> str:
+        return "OK" if not self.anomalies else "ANOMALIE : " + " ; ".join(self.anomalies)
+
+
+@dataclass(frozen=True)
+class ControleEnvois:
+    chaine_ok: bool
+    raison_chaine: str
+    nb_entrees: int
+    lignes: tuple[LigneControleEnvoi, ...]
+
+    @property
+    def nb_anomalies(self) -> int:
+        return sum(1 for l in self.lignes if l.anomalies) + (0 if self.chaine_ok else 1)
+
+    @property
+    def ok(self) -> bool:
+        return self.nb_anomalies == 0
+
+    def texte(self) -> str:
+        sortie = [f"{'brouillon':18s} {'valide par':16s} {'envoye le':26s} {'envoye par':14s} {'nature':9s} verdict"]
+        for l in self.lignes:
+            sortie.append(f"{l.id_relance:18s} {l.valide_par or '-':16s} {l.envoye_le:26s} "
+                          f"{l.envoye_par or '-':14s} {l.nature:9s} {l.verdict}")
+        sortie.append(f"chaine du journal : {'saine' if self.chaine_ok else 'NON SAINE'} "
+                      f"({self.nb_entrees} entree(s)) ; {self.raison_chaine}")
+        sortie.append(f"{len(self.lignes)} envoi(s) controle(s), {self.nb_anomalies} anomalie(s)")
+        return "\n".join(sortie) + "\n"
+
+
+def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
+    """Recette de CA-06, LECTURE SEULE : pour CHAQUE envoi du journal (`envoi_effectue`, et
+    `envoi_confirme_par_humain` quand un humain a tranche un envoi incertain) il doit exister
+    une entree `valide` ANTERIEURE du MEME brouillon, par un nom de `validateurs.txt` ou
+    `responsables.txt`, avec le MEME destinataire. Verifie aussi que `valide_par` de l'envoi
+    est celui de la validation, qu'aucun brouillon n'est parti deux fois, et que `envoye_par`,
+    s'il est nominatif, est un nom declare. La chaine de hachage est verifiee d'abord : un
+    journal non sain est une anomalie a part entiere (les lignes sont alors analysees
+    quand meme, au mieux). Ne cree ni n'ecrit rien."""
+    inst = Instance.de(instance)
+    if not inst.audit.exists():
+        return ControleEnvois(False, "fichier du journal absent", 0, ())
+    journal = JournalAudit(inst.audit)
+    verification = journal.verifier()
+    try:
+        entrees = journal.lire()
+    except JournalCorrompu as exc:
+        return ControleEnvois(False, f"{verification.raison} ; lecture impossible : {exc}", 0, ())
+    autorises = {n.casefold() for n in (*lire_validateurs(inst), *lire_responsables(inst))}
+    types_d_envoi = {"envoi_effectue": "effectue", "envoi_confirme_par_humain": "confirme"}
+    envois = [e for e in entrees if e.action in types_d_envoi]
+    nombre = Counter(e.objet for e in envois)
+    lignes = []
+    for e in envois:
+        anomalies: list[str] = []
+        valides = [v for v in entrees if v.action == "valide" and v.objet == e.objet and v.seq < e.seq]
+        valide_par = ""
+        if not valides:
+            anomalies.append("aucune entree `valide` anterieure pour ce brouillon")
+        else:
+            v = valides[-1]
+            valide_par = str(v.details.get("par") or v.acteur)
+            if valide_par.casefold() not in autorises:
+                anomalies.append(f"valide par {valide_par!r}, absent de validateurs.txt et responsables.txt")
+            if v.acteur.casefold() != valide_par.casefold():
+                anomalies.append(f"acteur de la validation ({v.acteur!r}) different de `par` ({valide_par!r})")
+            if v.details.get("destinataire") != e.details.get("destinataire"):
+                anomalies.append(f"destinataire valide {v.details.get('destinataire')!r}, "
+                                 f"envoye a {e.details.get('destinataire')!r}")
+            if str(e.details.get("valide_par", "")).casefold() != valide_par.casefold():
+                anomalies.append(f"`valide_par` de l'envoi ({e.details.get('valide_par')!r}) "
+                                 f"different de la validation ({valide_par!r})")
+        if nombre[e.objet] > 1:
+            anomalies.append(f"brouillon envoye {nombre[e.objet]} fois")
+        envoye_par = e.details.get("envoye_par")
+        if envoye_par is not None and str(envoye_par).casefold() not in autorises:
+            anomalies.append(f"envoye par {envoye_par!r}, absent de validateurs.txt et responsables.txt")
+        lignes.append(LigneControleEnvoi(
+            id_relance=e.objet, destinataire=str(e.details.get("destinataire", "")), valide_par=valide_par,
+            envoye_le=e.horodatage, envoye_par=str(envoye_par) if envoye_par is not None else "",
+            nature=types_d_envoi[e.action], anomalies=tuple(anomalies)))
+    return ControleEnvois(verification.ok, verification.raison, len(entrees), tuple(lignes))
+
+
+@dataclass(frozen=True)
 class ReparationAudit:
     octets_retires: int
     fragment: str         # nom du fichier ou le fragment retire a ete sauvegarde, "" si rien
 
 
 def reparer_audit(instance: Instance | Path | str, par: str, *,
-                  maintenant: dt.datetime) -> ReparationAudit:
+                  maintenant: dt.datetime, mode_test: bool = False) -> ReparationAudit:
     """Retire une derniere ligne tronquee du journal (`JournalAudit.reparer_fin_tronquee`),
     puis journalise `journal_repare` (octets retires, fragment sauvegarde) au nom de `par`.
 
@@ -1864,7 +2301,7 @@ def reparer_audit(instance: Instance | Path | str, par: str, *,
     (idempotent). Journal altere AILLEURS qu'en fin : `audit.JournalCorrompu` remonte
     tel quel, sans rien modifier (reparer effacerait la preuve d'une falsification)."""
     inst = Instance.de(instance)
-    nom = exiger_validateur(inst, par)
+    nom, repli = _nom_responsable(inst, par, mode_test)     # operation de RESPONSABLE (A14)
     if not isinstance(maintenant, dt.datetime) or maintenant.utcoffset() is None:
         raise ValueError("maintenant doit etre un datetime avec fuseau")
     journal = JournalAudit(inst.audit)
@@ -1873,6 +2310,8 @@ def reparer_audit(instance: Instance | Path | str, par: str, *,
     octets = journal.reparer_fin_tronquee()
     if octets == 0:
         return ReparationAudit(0, "")
+    if repli:
+        _noter_repli_roles(journal, nom, "reparer-audit", maintenant)
     nouveaux = sorted(p.name for p in inst.racine.glob(motif) if p.name not in avant)
     fragment = nouveaux[-1] if nouveaux else ""
     journal.ecrire(nom, "journal_repare", inst.audit.name,
@@ -1898,15 +2337,58 @@ def brouillons(instance: Instance | Path | str,
 
 
 __all__ = [
-    "CollisionReferences", "EnvoiRefuse", "ErreurCycle", "FichierEnQuarantaine", "Instance",
-    "ConfigInvalide", "ExpediteurTest", "IsolationIndisponible", "JournalNonSain",
-    "STRATEGIES_ISOLATION", "charger_config", "choisir_strategie_isolation", "exiger_isolation",
-    "garantir_fuseaux", "LigneSuivi", "ReparationAudit", "affichable", "exiger_journal_sain",
+    "CollisionReferences",
+    "ConfigInvalide",
+    "ControleEnvois",
+    "EnvoiRefuse",
+    "ErreurCycle",
+    "ExpediteurTest",
+    "FichierEnQuarantaine",
+    "Instance",
+    "IsolationIndisponible",
+    "JournalNonSain",
+    "LigneControleEnvoi",
+    "LigneSuivi",
+    "ReparationAudit",
+    "ResumeCycle",
+    "STRATEGIES_ISOLATION",
+    "SuiviPieces",
+    "ValidateurRefuse",
+    "affichable",
+    "arbitrer_piece",
+    "avertissement_roles",
+    "bloquer_piece",
+    "brouillons",
+    "charger_config",
+    "choisir_strategie_isolation",
+    "collisions_de_reference",
+    "contexte_file",
+    "controler_envois",
+    "controler_piece",
+    "debloquer_piece",
+    "dossiers_sans_circuit",
+    "envoyer_relance",
+    "executer_cycle",
+    "exiger_isolation",
+    "exiger_journal_sain",
+    "exiger_responsable",
+    "exiger_validateur",
+    "exporter",
+    "garantir_fuseaux",
+    "garde_fous_mode_test",
+    "lire_entrees",
+    "lire_responsables",
+    "lire_validateurs",
+    "lister_file",
+    "pieces",
+    "rattacher_piece",
+    "reglages_envoi",
+    "rejeter_relance",
     "reparer_audit",
-    "ResumeCycle", "SuiviPieces", "ValidateurRefuse", "arbitrer_piece", "bloquer_piece",
-    "brouillons", "collisions_de_reference", "controler_piece", "debloquer_piece",
-    "saisir_promesse", "suivi_pieces",
-    "envoyer_relance", "executer_cycle", "exiger_validateur", "exporter", "lire_entrees",
-    "lire_validateurs", "lister_file", "pieces", "rattacher_piece", "rejeter_relance",
-    "repercuter_envois", "trancher_envoi", "valider_relance", "verifier_audit",
+    "repercuter_envois",
+    "saisir_promesse",
+    "suivi_pieces",
+    "trancher_envoi",
+    "valider_relance",
+    "verifier_audit",
 ]

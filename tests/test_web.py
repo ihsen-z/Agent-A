@@ -69,9 +69,15 @@ DEST_ALPHA = "compta@alpha-sarl.fr"
 ID_BROUILLON = identifiant_relance(DEST_ALPHA, ("A-001",), 1, J0)
 EMPREINTE_NR = "ab" * 32
 EMPREINTE_PR = "cd" * 32
+EMPREINTE_CTX = "ef" * 32
+MESSAGE_ID_CTX = "<m3@alpha-sarl.fr>"
+EXPEDITEUR_XSS = "<script>alert(2)</script>@evil.example"
+OBJET_XSS = f"<script>alert(3)</script> facture {MOTIF_GABARIT}"
 
 FRAGMENTS_INTERDITS = (
     LIBELLE_XSS,
+    "<script>alert(2)",
+    "<script>alert(3)",
     "<img src=x onerror",
     '"x" onmouseover',
     "<b>inconnu</b>",
@@ -228,6 +234,11 @@ def semer(inst: cycle.Instance) -> None:
                         motif=MotifNonRoute.DOSSIER_INCONNU, detail=f"expediteur {MOTIF_GABARIT} <b>inconnu</b>"),
         DecisionRoutage("<m2@gamma-eurl.fr>", "facture-2026-09.pdf", EMPREINTE_PR, StatutRoutage.PROPOSEE,
                         dossier="GAMMA", periode="2026-09", reference_operation="G-001", detail="montant 145,00"),
+        # Nouveau format : `detail` porte en JSON la raison ET l'origine du message (cycle.contexte_file).
+        DecisionRoutage(MESSAGE_ID_CTX, "scan.pdf", EMPREINTE_CTX, StatutRoutage.NON_ROUTEE, dossier="ALPHA",
+                        motif=MotifNonRoute.AUCUN_CANDIDAT, detail=json.dumps({
+                            "raison": "aucune operation a 99,00 <b>inconnu</b>", "expediteur": EXPEDITEUR_XSS,
+                            "recu_le": "2026-10-05T09:00:00+02:00", "objet": OBJET_XSS})),
     ]
     with Depot(inst.depot) as d:
         d.sauver_pieces(pieces)
@@ -242,8 +253,8 @@ def semer(inst: cycle.Instance) -> None:
 def inst(tmp_path: Path, modele_comptes: Path) -> cycle.Instance:
     instance = cycle.Instance(tmp_path / "instance")
     semer(instance)
-    shutil.copy(modele_comptes / "utilisateurs.json", instance.racine / "utilisateurs.json")
-    shutil.copy(modele_comptes / "validateurs.txt", instance.validateurs)
+    for nom in ("utilisateurs.json", "validateurs.txt", "responsables.txt"):
+        shutil.copy(modele_comptes / nom, instance.racine / nom)
     return instance
 
 
@@ -468,7 +479,7 @@ def test_rattachement_d_une_proposition_et_d_un_message_non_route(app, inst):
     p = piece(inst, "ALPHA", "A-001")
     assert p.etat is EtatPiece.RECUE and p.pieces_rattachees
     with Depot(inst.depot) as d:
-        assert d.file_humaine(resolue=False) == []
+        assert [x.message_id for x in d.file_humaine(resolue=False)] == [MESSAGE_ID_CTX]
     assert any(e.acteur == NOM_BOB and e.action == "rattachement_confirme" for e in JournalAudit(inst.audit).lire())
 
 
@@ -861,8 +872,8 @@ def test_get_sans_effet_de_bord(app, inst):
 def test_get_sans_depot_ne_cree_rien(tmp_path, modele_comptes, horloge):
     inst = cycle.Instance(tmp_path / "vide")
     inst.racine.mkdir()
-    shutil.copy(modele_comptes / "utilisateurs.json", inst.racine / "utilisateurs.json")
-    shutil.copy(modele_comptes / "validateurs.txt", inst.validateurs)
+    for nom in ("utilisateurs.json", "validateurs.txt", "responsables.txt"):
+        shutil.copy(modele_comptes / nom, inst.racine / nom)
     app = Application(inst, horloge=horloge)
     try:
         alice = connecte(app, ALICE)
@@ -1172,3 +1183,176 @@ def test_regression_audit_sans_fcntl_deux_journaux_concurrents(tmp_path, monkeyp
     for t in fils:
         t.join(10)
     assert JournalAudit(chemin).verifier().ok
+
+
+# ---------------------------------------------------------------------------
+# Conformite : roles, envoi nominatif, rattachement inter-dossiers, contexte, controle
+# ---------------------------------------------------------------------------
+
+
+def test_envoi_nominatif_visible_dans_l_audit_et_la_fiche(app, inst):
+    alice = connecte(app, ALICE)
+    assert alice.action(f"/brouillons/{ID_BROUILLON}/valider").statut == 303
+    bob = connecte(app, BOB)
+    assert bob.action(f"/brouillons/{ID_BROUILLON}/envoyer", {"confirmation": "oui"}).statut == 303
+    effectue = [e for e in JournalAudit(inst.audit).lire() if e.action == "envoi_effectue"]
+    assert len(effectue) == 1
+    assert effectue[0].details["envoye_par"] == NOM_BOB and effectue[0].details["valide_par"] == NOM_ALICE
+    fiche = bob.get(f"/brouillons/{ID_BROUILLON}").texte
+    assert "<dt>Envoyé par</dt><dd>Bob Martin</dd>" in fiche
+    assert "<dt>Validé par</dt><dd>Alice Durand le" in fiche
+
+
+def test_controle_des_envois_affiche_sur_l_audit(app, inst):
+    bob = connecte(app, BOB)
+    bob.action(f"/brouillons/{ID_BROUILLON}/valider")
+    bob.action(f"/brouillons/{ID_BROUILLON}/envoyer", {"confirmation": "oui"})
+    alice = connecte(app, ALICE)
+    page = alice.get("/audit").texte
+    assert "Contrôle des envois" in page and "Conforme" in page and ID_BROUILLON in page
+    assert page.count("Bob Martin") >= 2                           # valide par ET envoye par
+    inst.validateurs.write_text(f"{NOM_ALICE}\n", encoding="utf-8")  # Bob n'est plus declare
+    page = alice.get("/audit").texte
+    assert "Anomalie" in page and "absent de validateurs.txt et responsables.txt" in page
+
+
+def test_rattachement_inter_dossiers_refuse_et_explique(app, inst):
+    bob = connecte(app, BOB)
+    page = bob.get("/non-rattaches").texte
+    assert 'name="forcer"' not in page                             # pas de forcage pour un comptable
+    cle = cle_entree("<m2@gamma-eurl.fr>", EMPREINTE_PR)
+    r = bob.action("/non-rattaches/confirmer", {"cle": cle, "dossier": "ALPHA", "reference": "A-001"})
+    assert r.statut == 409 and "Rattachement refusé" in r.texte
+    assert "« GAMMA »" in r.texte and "« ALPHA »" in r.texte and "Seul un responsable" in r.texte
+    assert piece(inst, "ALPHA", "A-001").etat is EtatPiece.ATTENDUE
+    assert any(e.action == "rattachement_refuse" and e.acteur == NOM_BOB for e in JournalAudit(inst.audit).lire())
+    # Meme dossier, autre operation : accepte.
+    r = bob.action("/non-rattaches/confirmer", {"cle": cle, "dossier": "GAMMA", "reference": "G-001"})
+    assert r.statut == 303 and piece(inst, "GAMMA", "G-001").etat is EtatPiece.RECUE
+
+
+def test_forcage_reserve_au_responsable_avec_motif(app, inst):
+    cle = cle_entree("<m2@gamma-eurl.fr>", EMPREINTE_PR)
+    cible = {"cle": cle, "dossier": "ALPHA", "reference": "A-001", "forcer": "oui"}
+    bob = connecte(app, BOB)
+    assert bob.action("/non-rattaches/confirmer", {**cible, "motif": "erreur client"}).statut == 403
+    alice = connecte(app, ALICE)
+    page = alice.get("/non-rattaches").texte
+    assert 'name="forcer" value="oui"' in page
+    assert alice.action("/non-rattaches/confirmer", {**cible, "motif": "  "}).statut == 400
+    refus = alice.action("/non-rattaches/confirmer", {"cle": cle, "dossier": "ALPHA", "reference": "A-001"})
+    assert refus.statut == 409 and "cochez « Forcer »" in refus.texte
+    assert piece(inst, "ALPHA", "A-001").etat is EtatPiece.ATTENDUE
+    r = alice.action("/non-rattaches/confirmer", {**cible, "motif": "le client a envoye au mauvais dossier"})
+    assert r.statut == 303 and r.entete("Location") == "/non-rattaches?fait=rattache_force"
+    assert piece(inst, "ALPHA", "A-001").etat is EtatPiece.RECUE
+    force = [e for e in JournalAudit(inst.audit).lire() if e.action == "rattachement_force"]
+    assert len(force) == 1 and force[0].acteur == NOM_ALICE
+    assert force[0].details["motif"] == "le client a envoye au mauvais dossier"
+    assert force[0].details["dossier_origine"] == "GAMMA" and force[0].details["dossier_cible"] == "ALPHA"
+
+
+def test_contexte_de_la_file_affiche_et_echappe(app):
+    for qui in (ALICE, BOB):
+        c = connecte(app, qui)
+        page = c.get("/non-rattaches")
+        _verifier_echappe(page, qui)
+        assert "&lt;script&gt;alert(2)&lt;/script&gt;@evil.example" in page.texte
+        assert "&lt;script&gt;alert(3)&lt;/script&gt; facture {{7*7}}" in page.texte
+        assert "<dt>Reçu le</dt><dd>2026-10-05T09:00:00+02:00</dd>" in page.texte
+        assert "aucune operation a 99,00 &lt;b&gt;inconnu&lt;/b&gt;" in page.texte
+        assert f"expediteur {MOTIF_GABARIT} &lt;b&gt;inconnu&lt;/b&gt;" in page.texte   # ancien format
+
+
+def test_bandeau_indique_les_garde_fous_coupes(app, inst, horloge):
+    config = inst.racine / "config.json"
+    config.write_text(json.dumps({"mode_test": True, "limite_hebdomadaire": False}), encoding="utf-8")
+    anonyme = Client(app)
+    alice = connecte(app, ALICE)
+    for r in (anonyme.get("/connexion"), alice.get("/"), alice.get("/inexistant"), alice.get("/pieces")):
+        assert "MODE TEST : DONNEES FICTIVES" in r.texte
+        assert "Garde-fous coupés" in r.texte
+        assert "creneau d&#x27;envoi libre" in r.texte and "limite hebdomadaire ignoree" in r.texte
+    config.write_text(json.dumps({"mode_test": True, "creneau_envoi_libre": False}), encoding="utf-8")
+    texte = alice.get("/").texte
+    assert "Aucun garde-fou d’envoi coupé" in texte and "Garde-fous coupés" not in texte
+    config.write_text(json.dumps({"mode_test": False, "limite_hebdomadaire": False}), encoding="utf-8")
+    assert "Garde-fous" not in alice.get("/").texte and "MODE TEST" not in alice.get("/").texte
+
+
+def test_mode_test_creneau_libre_et_envoi_vers_l_adresse_de_test(app, inst, horloge):
+    (inst.racine / "config.json").write_text(json.dumps({"mode_test": True}), encoding="utf-8")
+    horloge.t = dt.datetime(2026, 10, 5, 17, 50, tzinfo=PARIS)
+    bob = connecte(app, BOB)
+    bob.action(f"/brouillons/{ID_BROUILLON}/valider")
+    horloge.avancer(minutes=15)                                    # 18 h 05 : creneau libre en mode test
+    assert bob.action(f"/brouillons/{ID_BROUILLON}/envoyer", {"confirmation": "oui"}).statut == 303
+    eml = (inst.outbox / f"{ID_BROUILLON}.eml").read_text(encoding="utf-8")
+    assert "[TEST]" in eml and DEST_ALPHA not in eml.split("\n\n")[0].split("To:")[1].split("\n")[0]
+
+
+def test_config_invalide_signalee_sur_chaque_page(app, inst):
+    (inst.racine / "config.json").write_text(json.dumps({"mode_test": "oui"}), encoding="utf-8")
+    alice = connecte(app, ALICE)
+    for chemin in ("/", "/pieces", "/inexistant"):
+        texte = alice.get(chemin).texte
+        assert 'class="bandeau-alerte"' in texte and "config.json" in texte and "MODE TEST" not in texte
+    r = alice.action(f"/brouillons/{ID_BROUILLON}/valider")
+    assert r.statut == 303                                         # valider ne lit pas la configuration
+    r = alice.action(f"/brouillons/{ID_BROUILLON}/envoyer", {"confirmation": "oui"})
+    assert r.statut == 409 and "config.json" in r.texte and emls(inst) == []
+
+
+def test_roles_alignes_web_et_cycle_defense_en_profondeur(app, inst):
+    # Le cycle refuse aussi, de lui-meme, un comptable sur une operation de responsable.
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.arbitrer_piece(inst, "BETA", "B-001", NOM_BOB, motif="x", maintenant=LUNDI_10H)
+    # Un responsable cote web dont le nom a ete retire de responsables.txt : le cycle refuse.
+    inst.responsables.write_text("# aucun responsable\nPersonne Autre\n", encoding="utf-8")
+    alice = connecte(app, ALICE)
+    r = alice.action("/pieces/arbitrer", {"dossier": "BETA", "reference": "B-001", "motif": "classement"})
+    assert r.statut == 409 and "responsables.txt" in r.texte
+    assert piece(inst, "BETA", "B-001").etat is EtatPiece.ESCALADEE
+
+
+def test_responsables_txt_absent_refus_hors_mode_test_repli_en_mode_test(app, inst):
+    inst.responsables.unlink()
+    alice = connecte(app, ALICE)
+    r = alice.action("/pieces/arbitrer", {"dossier": "BETA", "reference": "B-001", "motif": "classement"})
+    assert r.statut == 409 and "responsables" in r.texte
+    (inst.racine / "config.json").write_text(json.dumps({"mode_test": True}), encoding="utf-8")
+    texte = alice.get("/").texte
+    assert 'class="bandeau-alerte"' in texte and "responsables.txt absent" in texte
+    r = alice.action("/pieces/arbitrer", {"dossier": "BETA", "reference": "B-001", "motif": "classement"})
+    assert r.statut == 303 and piece(inst, "BETA", "B-001").etat is EtatPiece.CLOSE_SANS_SUITE
+    assert any(e.action == "repli_roles_mode_test" for e in JournalAudit(inst.audit).lire())
+    bob = connecte(app, BOB)
+    assert bob.action("/pieces/arbitrer", {"dossier": "BETA", "reference": "B-001", "motif": "x"}).statut == 403
+
+
+def test_roles_et_listes_du_cycle(tmp_path, monkeypatch, capsys):
+    cli = _charger_cli()
+    inst = cycle.Instance(tmp_path / "inst")
+    inst.preparer()
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _invite="": "un-long-mot-de-passe")
+    base = ["--instance", str(inst.racine)]
+    assert cli.main(["creer-utilisateur", *base, "--identifiant", "rita", "--nom", "Rita Roy",
+                     "--role", "responsable"]) == 0
+    assert cli.main(["creer-utilisateur", *base, "--identifiant", "carl", "--nom", "Carl Cox",
+                     "--role", "comptable"]) == 0
+    assert cycle.lire_validateurs(inst) == ("Rita Roy", "Carl Cox")
+    assert cycle.lire_responsables(inst) == ("Rita Roy",)
+    assert cycle.exiger_responsable(inst, "rita roy") == "Rita Roy"
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.exiger_responsable(inst, "Carl Cox")
+
+    assert cli.main(["changer-role", *base, "--identifiant", "rita", "--role", "comptable"]) == 0
+    assert cycle.lire_responsables(inst) == () and "Rita Roy" in cycle.lire_validateurs(inst)
+    assert comptes.lire_utilisateurs(inst)["rita"].role == comptes.COMPTABLE
+    assert cli.main(["changer-role", *base, "--identifiant", "carl", "--role", "responsable"]) == 0
+    assert cycle.lire_responsables(inst) == ("Carl Cox",)
+
+    assert cli.main(["supprimer-utilisateur", *base, "--identifiant", "carl"]) == 0
+    assert cycle.lire_responsables(inst) == () and cycle.lire_validateurs(inst) == ("Rita Roy",)
+    assert cli.main(["changer-role", *base, "--identifiant", "personne", "--role", "comptable"]) == 1
+    capsys.readouterr()

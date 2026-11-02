@@ -4,10 +4,12 @@
 Sous-commandes :
   servir                 lance l'application (127.0.0.1:8000 par defaut)
   creer-utilisateur      cree un compte (mot de passe saisi au clavier, jamais en argument)
-                         et AJOUTE son nom affiche a <instance>/validateurs.txt
+                         et AJOUTE son nom affiche a <instance>/validateurs.txt, et aussi
+                         a <instance>/responsables.txt pour le role responsable
   lister-utilisateurs    liste les comptes (jamais les hachages)
   changer-mot-de-passe   change le mot de passe d'un compte
-  supprimer-utilisateur  supprime un compte et RETIRE son nom de validateurs.txt
+  changer-role           change le role d'un compte (responsables.txt mis en accord)
+  supprimer-utilisateur  supprime un compte et RETIRE son nom des deux listes
 
 Les comptes ne se gerent qu'ici : l'application web n'a pas d'ecran d'administration.
 Aucun envoi reel : un envoi depose un fichier .eml dans <instance>/outbox/.
@@ -58,6 +60,9 @@ def _parseur() -> argparse.ArgumentParser:
     sous.add_parser("lister-utilisateurs", parents=[base], help="liste les comptes")
     s = sous.add_parser("changer-mot-de-passe", parents=[base], help="change un mot de passe")
     s.add_argument("--identifiant", required=True)
+    s = sous.add_parser("changer-role", parents=[base], help="change le role d'un compte")
+    s.add_argument("--identifiant", required=True)
+    s.add_argument("--role", required=True, choices=comptes.ROLES)
     s = sous.add_parser("supprimer-utilisateur", parents=[base], help="supprime un compte")
     s.add_argument("--identifiant", required=True)
     return p
@@ -119,8 +124,9 @@ def _executer(args: argparse.Namespace) -> int:
         comptes.exiger_nom(args.nom)
         mot_de_passe = _saisir_mot_de_passe()
         u = comptes.creer_utilisateur(inst, args.identifiant, args.nom, args.role, mot_de_passe)
+        listes = inst.validateurs.name + (f" et {inst.responsables.name}" if u.est_responsable else "")
         print(f"compte {u.identifiant} cree ({u.role}) ; {cycle.affichable(u.nom)!s} ajoute a "
-              f"{inst.validateurs.name} s'il n'y figurait pas")
+              f"{listes} s'il n'y figurait pas")
         return 0
     if c == "lister-utilisateurs":
         utilisateurs = comptes.lire_utilisateurs(inst)
@@ -135,9 +141,15 @@ def _executer(args: argparse.Namespace) -> int:
         u = comptes.changer_mot_de_passe(inst, ident, _saisir_mot_de_passe())
         print(f"mot de passe de {u.identifiant} change (ses sessions ouvertes sont fermees)")
         return 0
+    if c == "changer-role":
+        u = comptes.changer_role(inst, args.identifiant, args.role)
+        etat = "ajoute a" if u.est_responsable else "retire de"
+        print(f"compte {u.identifiant} : role {u.role} ; {cycle.affichable(u.nom)} {etat} {inst.responsables.name}")
+        return 0
     if c == "supprimer-utilisateur":
         u = comptes.supprimer_utilisateur(inst, args.identifiant)
-        print(f"compte {u.identifiant} supprime ; {cycle.affichable(u.nom)} retire de {inst.validateurs.name}")
+        print(f"compte {u.identifiant} supprime ; {cycle.affichable(u.nom)} retire de "
+              f"{inst.validateurs.name} et {inst.responsables.name}")
         return 0
     raise AssertionError(c)
 

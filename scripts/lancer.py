@@ -14,6 +14,7 @@ sys.path.insert(0, str(RACINE / "src"))
 from rapprochement.exclusions import Referentiel          # noqa: E402
 from rapprochement.moteur import Moteur                    # noqa: E402
 from rapprochement.parseurs import (                       # noqa: E402
+    lire_alias,
     lire_dossiers,
     lire_pieces,
     lire_releve,
@@ -43,7 +44,10 @@ def main() -> int:
     pieces = lire_pieces(entree / "pieces_recues.csv")
     dossiers = lire_dossiers(entree / "dossiers.csv")
 
-    moteur = Moteur(Referentiel.depuis_csv(args.exclusions))
+    moteur = Moteur(
+        Referentiel.depuis_csv(args.exclusions),
+        alias=lire_alias(entree / "alias_fournisseurs.csv"),
+    )
     rapprochements = moteur.rapprocher(operations, pieces)
 
     chemin_suivi = ecrire_suivi(rapprochements, sortie / "tableau_suivi.csv")

@@ -93,6 +93,10 @@ a:hover { color: var(--accent-fonce); }
   border-bottom: 3px solid var(--test-texte);
 }
 .bandeau-test p { margin: 0; padding: .45rem 1rem; }
+.bandeau-test .bandeau-detail { padding-top: 0; font-weight: 600; letter-spacing: 0; font-size: .9rem; }
+.bandeau-alerte { background: var(--alerte-fond); color: var(--alerte-texte); border-bottom: 2px solid currentColor; }
+.bandeau-alerte p { margin: 0; padding: .45rem 1rem; text-align: center; font-weight: 600; overflow-wrap: anywhere; }
+.bandeau-alerte p::before { content: "Attention : "; }
 
 /* En-tete */
 .entete { background: var(--carte); border-bottom: 1px solid var(--bord); }
@@ -241,6 +245,10 @@ td.details { font-family: var(--police-mono); font-size: .82rem; }
 .filtres { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem 1rem; margin: 0 0 1rem; }
 .filtres .champ { margin: 0; }
 .champ { margin: 0 0 .6rem; }
+.champ-case { display: flex; gap: .4rem; align-items: flex-start; }
+.champ.champ-case label { display: inline; font-weight: 600; margin: 0; }
+.fiche-compacte { gap: .1rem; font-size: .88rem; }
+.fiche-compacte div { grid-template-columns: 6rem minmax(0, 1fr); gap: .4rem; }
 .champ label { display: block; font-size: .88rem; font-weight: 600; margin-bottom: .2rem; }
 input[type="text"], input[type="password"], input[type="date"], select {
   font: inherit;

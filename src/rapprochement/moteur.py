@@ -71,6 +71,12 @@ RATIO_ACOMPTE_MAX = 0.95
 # trouve a 40 % de pieces manquantes : Point P 848,47 contre un groupe de 3 factures).
 SCORE_MONTANT_APPROCHE = 0.60
 
+# Marge sous laquelle deux paiements « se valent » pour une meme facture : meme classe de
+# montant et scores a moins de 0.02 l'un de l'autre. 0.02 de score = environ 12 jours de
+# difference de date : deux paiements recurrents espaces d'un mois restent separables,
+# deux paiements identiques a une semaine d'ecart ne le sont pas.
+MARGE_AMBIGUITE = 0.02
+
 SEUIL_CONFIANCE = 0.55
 SEUIL_CERTITUDE = 0.80
 MAX_PIECES_GROUPEES = 4
@@ -95,15 +101,24 @@ def _score_montant(montant_operation: Decimal, total_pieces: Decimal) -> float:
     return 0.0
 
 
-def _montants_identiques(a: Decimal, b: Decimal) -> bool:
-    """Tolerance au centime seulement.
+def _classe_montant(montant_operation: Decimal, montant_piece: Decimal) -> int:
+    """0 : identique au centime ; 1 : a deux centimes ; 2 : dans la tolerance relative."""
+    ecart = abs(montant_operation - montant_piece)
+    if ecart == 0:
+        return 0
+    return 1 if ecart <= TOLERANCE_ABSOLUE else 2
 
-    Utilisee pour les paiements groupes : avec une tolerance relative, deux
+
+def _montants_identiques(a: Decimal, b: Decimal) -> bool:
+    """Egalite AU CENTIME : aucun ecart, pas meme deux centimes.
+
+    Utilisee pour les paiements groupes : avec une tolerance, deux ou trois
     factures d'un meme fournisseur finissent par totaliser par hasard le montant
-    d'un troisieme paiement, et le systeme cesse de relancer une piece
-    reellement manquante.
+    d'un autre paiement, et le systeme cesse de relancer une piece reellement
+    manquante. Les montants sont a deux decimales : un ecart de 0,01 est deja une
+    difference. Cahier des charges section 6, regle 5 : « total au centime ».
     """
-    return abs(a - b) <= TOLERANCE_ABSOLUE
+    return abs(a - b) < Decimal("0.01")
 
 
 def _similarite(libelle: str, fournisseur: str) -> float:
@@ -219,7 +234,61 @@ class Moteur:
                     regle="aucun_candidat",
                 ),
             )
+        self._ecarter_les_ambiguites(a_apparier, resultats)
         return [resultats[o.reference] for o in operations]
+
+    def _ecarter_les_ambiguites(
+        self,
+        operations: list[OperationBancaire],
+        resultats: dict[str, Rapprochement],
+    ) -> None:
+        """Une facture, deux paiements qui se valent : on ne tranche pas.
+
+        Cahier des charges section 6, regle 7 : « un cas ambigu n'est jamais tranche
+        automatiquement ; relancer un client qui a deja envoye la piece coute un
+        e-mail, ne pas le relancer coute une declaration incomplete ».
+
+        Cas vise : deux paiements identiques (meme montant, meme fournisseur) et UNE
+        seule facture. Un paiement a recu la facture, l'autre est reste sans piece, et
+        seule la date les departageait, a un point de score pres. On ne peut pas savoir
+        lequel est justifie : les deux sont signales. Defaut trouve sur un corpus a 40 %
+        de pieces manquantes (deux achats AMZN a 447,03 EUR, une facture).
+
+        Ne s'applique qu'a une facture VRAIMENT disputee par un paiement reste sans
+        piece : si chaque paiement a la sienne, rien n'est modifie.
+        """
+        sans_piece = [
+            o for o in operations
+            if resultats[o.reference].regle == "aucun_candidat"
+        ]
+        if not sans_piece:
+            return
+        for operation in sorted(operations, key=lambda o: (o.date_operation, o.reference)):
+            resultat = resultats[operation.reference]
+            if resultat.regle != "appariement_1_1" or len(resultat.pieces) != 1:
+                continue
+            piece = resultat.pieces[0]
+            score = self._score(operation, [piece])
+            classe = _classe_montant(operation.montant, piece.montant_ttc)
+            for rival in sans_piece:
+                if rival.dossier != operation.dossier or not _dans_la_fenetre(rival, piece):
+                    continue
+                if piece.devise != rival.devise or not _montants_compatibles(rival.montant, piece.montant_ttc):
+                    continue
+                if _classe_montant(rival.montant, piece.montant_ttc) != classe:
+                    continue
+                if abs(self._score(rival, [piece]) - score) > MARGE_AMBIGUITE:
+                    continue
+                resultats[operation.reference] = Rapprochement(
+                    operation=operation,
+                    statut=Statut.MANQUANT,
+                    motif=(
+                        "Ambigu : une seule facture pour deux paiements equivalents "
+                        f"({operation.reference} et {rival.reference}), non tranche"
+                    ),
+                    regle="ambiguite_non_tranchee",
+                )
+                break
 
     # -- decisions sans piece ---------------------------------------------
 
@@ -342,11 +411,13 @@ class Moteur:
     ) -> None:
         """Une operation = somme de plusieurs pieces.
 
-        Exigences deliberement strictes : total au centime pres, combinaison
-        unique, et soit 3 pieces ou plus, soit un libelle qui annonce un
-        reglement groupe. Sans cela, deux factures d'un fournisseur recurrent
-        totalisent par hasard un troisieme paiement et la piece reellement
-        manquante n'est plus relancee.
+        Les trois exigences du cahier des charges (section 6, regle 5), TOUTES
+        obligatoires : total au centime, combinaison unique, ET un indice de
+        groupement dans le libelle, quel que soit le nombre de factures. Sans
+        indice, trois factures d'un fournisseur recurrent totalisent par hasard le
+        montant d'un autre paiement et la piece reellement manquante n'est plus
+        relancee. Un groupe non reconnu coute une relance en trop, jamais une piece
+        perdue : c'est le sens de l'erreur le moins couteux.
         """
         for operation in operations:
             if operation.reference in resultats:
@@ -362,11 +433,10 @@ class Moteur:
                 candidates, key=lambda p: p.montant_ttc, reverse=True
             )[:12]
 
-            indice = _contient(operation.libelle, INDICES_GROUPEMENT)
+            if not _contient(operation.libelle, INDICES_GROUPEMENT):
+                continue
             lots: list[tuple[tuple[Piece, ...], float]] = []
             for taille in range(2, MAX_PIECES_GROUPEES + 1):
-                if taille == 2 and not indice:
-                    continue
                 for lot in combinations(candidates, taille):
                     total = sum((p.montant_ttc for p in lot), Decimal("0"))
                     if not _montants_identiques(operation.montant, total):

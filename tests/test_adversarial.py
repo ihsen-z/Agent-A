@@ -54,6 +54,7 @@ from rapprochement.parseurs import lire_dossiers  # noqa: E402
 PARIS = ZoneInfo("Europe/Paris")
 J0 = dt.date(2026, 10, 5)  # lundi
 VALIDEUSE = "Marie Durand"
+RESPONSABLE = "Claire Roux"
 CARACTERES_FORMULE = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -96,6 +97,12 @@ def nouvelle_instance(rep: Path, validateurs: str | None = f"{VALIDEUSE}\nPaul M
     inst.preparer()
     if validateurs is not None:
         inst.validateurs.write_text(validateurs, encoding="utf-8")
+    return inst
+
+
+def avec_responsable(inst: cycle.Instance, nom: str = RESPONSABLE) -> cycle.Instance:
+    """Declare un responsable (`responsables.txt`) : `trancher` et `reparer-audit` l'exigent."""
+    inst.responsables.write_text(f"# responsables\n{nom}\n", encoding="utf-8")
     return inst
 
 
@@ -292,13 +299,23 @@ def test_sain_cli_par_truque_et_envoi_sans_validation(entree, inst, capsys) -> N
     base = ["--instance", str(inst.racine), "--date", J0.isoformat()]
     for par in ("../Marie Durand", "systeme", "Marie Durand\nx", "# commentaire"):
         assert cli.main(["valider", b.id_relance, "--par", par, *base]) == 1
-    assert cli.main(["envoyer", b.id_relance, *base]) == 1
+    # Envoi nominatif : `--par` est obligatoire, et doit etre un validateur declare.
+    with pytest.raises(SystemExit):
+        cli.main(["envoyer", b.id_relance, *base])
+    for par in ("Mallory", "systeme", "../Marie Durand"):
+        assert cli.main(["envoyer", b.id_relance, "--par", par, *base]) == 1
+    assert cli.main(["envoyer", b.id_relance, "--par", VALIDEUSE, *base]) == 1   # pas encore valide
     assert list(inst.outbox.glob("*.eml")) == []
     assert cli.main(["valider", b.id_relance, "--par", "MARIE durand", *base]) == 0
-    assert cli.main(["envoyer", b.id_relance, *base, "--heure", "07:59"]) == 1   # hors creneau
-    assert cli.main(["envoyer", b.id_relance, *base]) == 0
-    assert cli.main(["envoyer", b.id_relance, *base]) == 1
+    assert cli.main(["envoyer", b.id_relance, "--par", VALIDEUSE, *base, "--heure", "07:59"]) == 1   # hors creneau
+    assert cli.main(["envoyer", b.id_relance, "--par", "Mallory", *base]) == 1
+    assert list(inst.outbox.glob("*.eml")) == []
+    assert cli.main(["envoyer", b.id_relance, "--par", "paul martin", *base]) == 0
+    assert cli.main(["envoyer", b.id_relance, "--par", VALIDEUSE, *base]) == 1
     assert len(list(inst.outbox.glob("*.eml"))) == 1
+    from rapprochement.audit import JournalAudit
+    envoye = [e for e in JournalAudit(inst.audit).lire() if e.action == "envoi_effectue"]
+    assert [e.details["envoye_par"] for e in envoye] == ["Paul Martin"]      # qui a DECLENCHE
 
 
 # ===========================================================================
@@ -432,7 +449,7 @@ class _Coupure:
 
 def test_regression_envoi_incertain_ignore_par_la_limite_hebdo(tmp_path: Path) -> None:
     entree = ecrire_entree(tmp_path / "e")
-    inst = nouvelle_instance(tmp_path / "i")
+    inst = avec_responsable(nouvelle_instance(tmp_path / "i"))
     lancer(entree, inst, J0)
     b1 = brouillon_de(inst, "compta@alpha-sarl.fr")
     cycle.valider_relance(inst, b1.id_relance, VALIDEUSE, maintenant=a(J0))
@@ -455,7 +472,10 @@ def test_regression_envoi_incertain_ignore_par_la_limite_hebdo(tmp_path: Path) -
         cycle.envoyer_relance(inst, b2.id_relance, maintenant=a(j1))
     assert list(inst.outbox.glob("*.eml")) == []
     # Un humain constate que b1 est parti : la limite hebdomadaire prend le relais.
-    cycle.trancher_envoi(inst, b1.id_relance, VALIDEUSE, parti=True, maintenant=a(j1))
+    with pytest.raises(cycle.ValidateurRefuse):          # un validateur simple ne tranche pas
+        cycle.trancher_envoi(inst, b1.id_relance, VALIDEUSE, parti=True, maintenant=a(j1))
+    assert cycle.brouillons(inst, StatutBrouillon.EN_COURS)[0].id_relance == b1.id_relance
+    cycle.trancher_envoi(inst, b1.id_relance, RESPONSABLE, parti=True, maintenant=a(j1))
     with pytest.raises(envoi.EnvoiNonValide, match="7 jours"):
         cycle.envoyer_relance(inst, b2.id_relance, maintenant=a(j1))
     assert list(inst.outbox.glob("*.eml")) == []
@@ -769,7 +789,7 @@ def test_regression_journal_tronque_refus_avant_ecriture_puis_reparation(tmp_pat
     `reparer-audit` retire la fin tronquee (sauvegardee) ; le cycle reprend normalement."""
     from rapprochement.audit import JournalAudit
     entree = ecrire_entree(tmp_path / "e", operations=[OPERATIONS[0]])
-    inst = nouvelle_instance(tmp_path / "i")
+    inst = avec_responsable(nouvelle_instance(tmp_path / "i"))
     lancer(entree, inst, J0)
     sain = inst.audit.read_bytes()
     with open(inst.audit, "ab") as f:
@@ -790,14 +810,16 @@ def test_regression_journal_tronque_refus_avant_ecriture_puis_reparation(tmp_pat
     base = ["--instance", str(inst.racine), "--date", j1.isoformat()]
     assert cli.main(["cycle", "--entree", str(entree), *base]) == 1
     assert cli.main(["reparer-audit", "--par", "Mallory", *base]) == 1
-    assert cli.main(["reparer-audit", "--par", VALIDEUSE, *base]) == 0
+    assert cli.main(["reparer-audit", "--par", VALIDEUSE, *base]) == 1       # validateur simple : refus
+    assert len(inst.audit.read_bytes()) > len(sain)                           # rien n'a ete retire
+    assert cli.main(["reparer-audit", "--par", RESPONSABLE, *base]) == 0
     [fragment] = list(inst.racine.glob("audit.jsonl.fragment-*"))
     assert fragment.read_bytes() == b'{"acteur":"systeme","action":"pie'
     assert inst.audit.read_bytes().startswith(sain)
     assert cycle.verifier_audit(inst).ok
     derniere = JournalAudit(inst.audit).lire()[-1]
-    assert (derniere.action, derniere.acteur) == ("journal_repare", VALIDEUSE)
-    assert cli.main(["reparer-audit", "--par", VALIDEUSE, *base]) == 0      # idempotent
+    assert (derniere.action, derniere.acteur) == ("journal_repare", RESPONSABLE)
+    assert cli.main(["reparer-audit", "--par", RESPONSABLE, *base]) == 0    # idempotent
     assert len(list(inst.racine.glob("audit.jsonl.fragment-*"))) == 1
     assert cli.main(["cycle", "--entree", str(entree), *base]) == 0
     assert {p.reference for p in cycle.pieces(inst)} == {"A-001", "A-002", "B-001"}
@@ -1153,8 +1175,8 @@ def test_sain_boucle_cli_des_correctifs(tmp_path, capsys) -> None:
     for i in ids:
         assert cli.main(["valider", i, "--par", "marie durand", *base]) == 0       # BOM
     # Apres tous les correctifs, un envoi valide reste possible, et une seule fois.
-    assert cli.main(["envoyer", ids[0], *base]) == 0
-    assert cli.main(["envoyer", ids[0], *base]) == 1
+    assert cli.main(["envoyer", ids[0], "--par", "marie durand", *base]) == 0
+    assert cli.main(["envoyer", ids[0], "--par", "marie durand", *base]) == 1
     assert len(list(inst.outbox.glob("*.eml"))) == 1
     assert cli.main(["verifier-audit", *base]) == 0
 
@@ -1178,7 +1200,7 @@ def test_sain_cli_envoi_incertain_bloque_le_suivant(tmp_path, capsys) -> None:
     b2 = brouillon_de(inst, "compta@alpha-sarl.fr")
     assert cli.main(["valider", b2.id_relance, "--par", VALIDEUSE, *base]) == 0
     capsys.readouterr()
-    assert cli.main(["envoyer", b2.id_relance, *base]) == 1
+    assert cli.main(["envoyer", b2.id_relance, "--par", VALIDEUSE, *base]) == 1
     assert "EnvoiIncertainEnAttente" in capsys.readouterr().err
     assert list(inst.outbox.glob("*.eml")) == []
 

@@ -54,6 +54,7 @@ PARIS = ZoneInfo("Europe/Paris")
 J0 = dt.date(2026, 10, 5)            # lundi
 RELAIS = "pieces@cabinet-relais.fr"
 VALIDEUSE = "Marie Durand"
+RESPONSABLE = "Paul Martin"
 
 
 def a_10h(jour: dt.date) -> dt.datetime:
@@ -118,6 +119,9 @@ def nouvelle_instance(rep: Path, validateurs: str | None = f"{VALIDEUSE}\nPaul M
     inst.preparer()
     if validateurs is not None:
         inst.validateurs.write_text(validateurs, encoding="utf-8")
+        # Depuis A14, arbitrer / trancher / reparer-audit sont reserves aux RESPONSABLES : Paul
+        # Martin est responsable (et validateur), Marie Durand n'est que validatrice.
+        inst.responsables.write_text(f"{RESPONSABLE}\n", encoding="utf-8")
     return inst
 
 
@@ -262,14 +266,17 @@ def test_ca06_cli(entree, inst):
     assert cli.main(["cycle", *base, "--entree", str(entree)]) == 0
     ids = [b.id_relance for b in cycle.brouillons(inst)]
     assert emls(inst) == []
-    assert cli.main(["envoyer", *base, ids[0]]) == 1                       # pas valide
+    assert cli.main(["envoyer", *base, "--par", "paul martin", ids[0]]) == 1   # pas valide
+    with pytest.raises(SystemExit):
+        cli.main(["envoyer", *base, ids[0]])                                # --par absent (A17)
+    assert cli.main(["envoyer", *base, "--par", "Mallory", ids[0]]) == 1   # envoyeur hors liste
     assert cli.main(["valider", *base, "--par", "Mallory", ids[0]]) == 1   # hors liste
     with pytest.raises(SystemExit):
         cli.main(["valider", *base, ids[0]])                               # --par absent
     assert emls(inst) == []
     assert cli.main(["valider", *base, "--par", "paul martin", ids[0]]) == 0
-    assert cli.main(["envoyer", *base, ids[0]]) == 0
-    assert cli.main(["envoyer", *base, ids[0]]) == 1
+    assert cli.main(["envoyer", *base, "--par", "paul martin", ids[0]]) == 0
+    assert cli.main(["envoyer", *base, "--par", "paul martin", ids[0]]) == 1
     assert len(emls(inst)) == 1
     assert cli.main(["file", *base]) == 0
     assert cli.main(["verifier-audit", *base]) == 0
@@ -809,8 +816,35 @@ def test_audit_apres_la_transaction(entree, inst, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def corpus_avec_circuit(destination: Path, circuit: str = "C-DIRECT") -> Path:
+    """Copie du corpus dont `dossiers.csv` DECLARE le circuit (decision D6 : hors mode test, un
+    circuit absent est refuse). Le contenu des autres fichiers est inchange."""
+    shutil.copytree(RACINE / "data" / "corpus", destination)
+    with open(destination / "dossiers.csv", newline="", encoding="utf-8") as f:
+        lignes = list(csv.reader(f))
+    if "circuit" not in lignes[0]:                       # le corpus fourni DECLARE deja son circuit
+        lignes[0].append("circuit")
+        for ligne in lignes[1:]:
+            ligne.append(circuit)
+    with open(destination / "dossiers.csv", "w", newline="", encoding="utf-8") as f:
+        csv.writer(f, lineterminator="\n").writerows(lignes)
+    return destination
+
+
+def corpus_sans_circuit(destination: Path) -> Path:
+    """Copie du corpus dont `dossiers.csv` est depouille de la colonne `circuit` (cas « circuit
+    absent » de la decision D6). Les autres colonnes et fichiers sont inchanges."""
+    shutil.copytree(RACINE / "data" / "corpus", destination)
+    with open(destination / "dossiers.csv", newline="", encoding="utf-8") as f:
+        lignes = list(csv.reader(f))
+    colonne = lignes[0].index("circuit")
+    with open(destination / "dossiers.csv", "w", newline="", encoding="utf-8") as f:
+        csv.writer(f, lineterminator="\n").writerows([ligne[:colonne] + ligne[colonne + 1:] for ligne in lignes])
+    return destination
+
+
 def test_corpus_de_reference(tmp_path):
-    entree = RACINE / "data" / "corpus"
+    entree = corpus_avec_circuit(tmp_path / "entree_corpus")
     inst = nouvelle_instance(tmp_path / "corpus")
     r = lancer(entree, inst, J0)
     assert r.operations == 284 and r.manquants == 23 and r.pieces_creees == 23
@@ -1024,7 +1058,7 @@ def test_arbitrer_escaladee_jusqu_a_periode_complete(entree, inst):
     assert arbitrage.acteur == "Paul Martin" and arbitrage.objet == "ALPHA/A-003"
     assert arbitrage.details["motif"].startswith("Fournisseur liquide")
     n = len(journal)
-    cycle.arbitrer_piece(inst, "ALPHA", "A-003", VALIDEUSE, motif="rejeu",
+    cycle.arbitrer_piece(inst, "ALPHA", "A-003", RESPONSABLE, motif="rejeu",
                          maintenant=a_10h(jour(18)))                   # rejeu : sans effet
     assert len(JournalAudit(inst.audit).lire()) == n
 
@@ -1044,11 +1078,11 @@ def test_arbitrer_refus(entree, inst):
     with pytest.raises(cycle.ValidateurRefuse):
         cycle.arbitrer_piece(inst, "ALPHA", "A-001", "Mallory", motif="x", maintenant=m)
     with pytest.raises(cycle.ErreurCycle, match="introuvable"):
-        cycle.arbitrer_piece(inst, "ALPHA", "Z-999", VALIDEUSE, motif="x", maintenant=m)
+        cycle.arbitrer_piece(inst, "ALPHA", "Z-999", RESPONSABLE, motif="x", maintenant=m)
     with pytest.raises(cycle.ErreurCycle, match="motif"):
-        cycle.arbitrer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="  ", maintenant=m)
+        cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="  ", maintenant=m)
     with pytest.raises(etats.TransitionInterdite, match="arbitrage_classement interdit depuis demandee"):
-        cycle.arbitrer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="x", maintenant=m)
+        cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="x", maintenant=m)
     assert etat_depot(inst) == avant and actions_audit(inst) == journal_avant
 
 
@@ -1205,14 +1239,14 @@ def test_cli_suivi_humain(entree, inst, capsys):
     piece = ["--dossier", "ALPHA", "--reference"]
     # arbitrer
     assert cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "x", "--par", "Mallory", date=j)[0] == 1
-    rc, _, err = cli(capsys, inst, "arbitrer", *piece, "Z-9", "--motif", "x", "--par", VALIDEUSE, date=j)
+    rc, _, err = cli(capsys, inst, "arbitrer", *piece, "Z-9", "--motif", "x", "--par", RESPONSABLE, date=j)
     assert rc == 1 and "introuvable" in err
-    rc, _, err = cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "", "--par", VALIDEUSE, date=j)
+    rc, _, err = cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "", "--par", RESPONSABLE, date=j)
     assert rc == 1 and "motif" in err
-    rc, out, _ = cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "classe", "--par", VALIDEUSE, date=j)
+    rc, out, _ = cli(capsys, inst, "arbitrer", *piece, "A-003", "--motif", "classe", "--par", RESPONSABLE, date=j)
     assert rc == 0 and "close_sans_suite" in out
     rc, _, err = cli(capsys, inst, "arbitrer", "--dossier", "BETA", "--reference", "B-001",
-                     "--motif", "x", "--par", VALIDEUSE, date=j)
+                     "--motif", "x", "--par", RESPONSABLE, date=j)
     assert rc == 0
     # bloquer / debloquer sur une piece escaladee
     rc, out, _ = cli(capsys, inst, "bloquer", *piece, "A-001", "--motif", "litige", "--par", VALIDEUSE, date=j)
@@ -1384,7 +1418,7 @@ def test_journal_tronque_refus_avant_toute_ecriture_puis_reparation(entree, tmp_
     assert derniere.details["octets_retires"] == len(fragment)
     assert derniere.details["fragment"] == sauvegarde.name
     assert cycle.verifier_audit(inst).ok
-    rc, out, _ = cli(capsys, inst, "reparer-audit", "--par", VALIDEUSE, date=jour(1))
+    rc, out, _ = cli(capsys, inst, "reparer-audit", "--par", RESPONSABLE, date=jour(1))
     assert rc == 0 and "rien a reparer" in out and actions_audit(inst).count("journal_repare") == 1
     assert lancer(entree, inst, jour(1)).pieces_creees == 4
 
@@ -1397,8 +1431,8 @@ def test_journal_altere_au_milieu_reparation_refusee(entree, inst, capsys):
     inst.audit.write_bytes(altere)
     from rapprochement.audit import JournalCorrompu
     with pytest.raises(JournalCorrompu):
-        cycle.reparer_audit(inst, VALIDEUSE, maintenant=a_10h(J0))
-    rc, _, err = cli(capsys, inst, "reparer-audit", "--par", VALIDEUSE)
+        cycle.reparer_audit(inst, RESPONSABLE, maintenant=a_10h(J0))
+    rc, _, err = cli(capsys, inst, "reparer-audit", "--par", RESPONSABLE)
     assert rc == 1 and "REFUS (JournalCorrompu)" in err and "reparation refusee" in err
     assert inst.audit.read_bytes() == altere and not list(inst.racine.glob("audit.jsonl.fragment-*"))
     rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
@@ -1815,7 +1849,7 @@ def test_mode_test_drapeau_cli_et_config_invalide_refusee_sans_rien_ecrire(entre
     rc, _, err = cli(capsys, jamais, "cycle", "--entree", str(entree))
     assert rc == 1 and "REFUS (ConfigInvalide)" in err and "config.json invalide" in err
     assert sorted(p.name for p in jamais.racine.iterdir()) == ["config.json"]
-    rc, _, err = cli(capsys, jamais, "envoyer", "abc")
+    rc, _, err = cli(capsys, jamais, "envoyer", "abc", "--par", VALIDEUSE)
     assert rc == 1 and "ConfigInvalide" in err
 
 
@@ -2042,7 +2076,7 @@ def test_envoi_mode_test_enveloppe_aussi_un_expediteur_fourni_et_le_drapeau_cli(
     espion = Espion()
     cycle.envoyer_relance(inst, b1.id_relance, maintenant=a_10h(J0), expediteur=espion, mode_test=True)
     assert [x.destinataire for x in espion.recus] == [ADRESSE_TEST] and espion.recus[0].objet.startswith("[TEST] ")
-    rc, out, _ = cli(capsys, inst, "envoyer", b2.id_relance, "--mode-test")
+    rc, out, _ = cli(capsys, inst, "envoyer", b2.id_relance, "--mode-test", "--par", VALIDEUSE)
     assert rc == 0 and f"[MODE TEST] {b2.id_relance} envoye a {ADRESSE_TEST}" in out
     assert f"destinataire reel, NON contacte : {b2.destinataire}" in out
     msg, _ = _eml_sorti(inst, b2.id_relance)
@@ -2082,7 +2116,7 @@ def test_console_cp1252_le_cli_ne_plante_pas_sur_un_caractere_hors_page_de_codes
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
     assert nom in r.stdout.decode("utf-8")                                       # octets UTF-8, rien de perdu
     r = _cli_en_sous_processus(["arbitrer", *base, "--dossier", "ALPHA", "--reference", "日本語-Ж",
-                                "--motif", "x", "--par", VALIDEUSE])
+                                "--motif", "x", "--par", RESPONSABLE])
     assert r.returncode == 1 and "Traceback" not in r.stderr.decode("utf-8")
     assert "ALPHA/日本語-Ж" in r.stderr.decode("utf-8")                           # message d'erreur compris
     cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="litige 日本語", maintenant=a_10h(J0))
@@ -2108,3 +2142,802 @@ def test_console_utf8_flux_sans_reconfigure_ou_ferme(monkeypatch):
     flux.write("日本語 \udcff")                                                    # ni exception, ni perte de flux
     monkeypatch.setattr(sys, "stdout", Ferme())
     cli_module._console_utf8()
+
+
+# ---------------------------------------------------------------------------
+# Audit de conformite : A7 (CA-03), A1 (D6), A14 (roles), A15, A17, A10, A8, envoi nominatif,
+# garde-fous du mode test (attaque ET cas nominal, chaque garde verifiee par mutation)
+# ---------------------------------------------------------------------------
+
+
+def _proposition_alpha(inst: cycle.Instance, entree: Path):
+    """Un message d'ALPHA qui propose A-001 ; renvoie la decision de la file."""
+    lancer(entree, inst, J0)
+    ecrire_eml(inst.entrant, "1.eml", expediteur=ORIGINE, message_id="<loxam@a>", corps="120,00 EUR",
+               fichiers=(("loxam_2026-09-03.pdf", b"%PDF-loxam"),))
+    lancer(entree, inst, jour(1))
+    (d,) = cycle.lister_file(inst)
+    assert d.statut is StatutRoutage.PROPOSEE and d.dossier == "ALPHA" and d.reference_operation == "A-001"
+    return d
+
+
+# --- A7 : rattachement inter-dossiers --------------------------------------
+
+
+def test_a7_rattacher_refuse_un_dossier_different_de_la_decision(entree, inst):
+    d = _proposition_alpha(inst, entree)
+    avant = etat_depot(inst)
+    m = a_10h(jour(1))
+    with pytest.raises(cycle.ErreurCycle, match="designe le dossier ALPHA, pas BETA") as exc:
+        cycle.rattacher_piece(inst, VALIDEUSE, maintenant=m, message_id=d.message_id,
+                              dossier="BETA", reference="B-001")
+    assert "--forcer" in str(exc.value)
+    assert etat_depot(inst) == avant                                  # ni piece, ni file modifiees
+    assert pieces_par_ref(inst)["B-001"].etat is EtatPiece.ATTENDUE
+    (refus,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "rattachement_refuse"]
+    assert refus.acteur == VALIDEUSE and refus.details["dossier_origine"] == "ALPHA"
+    assert refus.details["dossier_cible"] == "BETA" and refus.details["message_id"] == "<loxam@a>"
+    assert JournalAudit(inst.audit).verifier().ok
+
+
+@pytest.mark.parametrize("motif", ["", "   ", None])
+def test_a7_forcer_sans_motif_refuse(entree, inst, motif):
+    d = _proposition_alpha(inst, entree)
+    avant = etat_depot(inst)
+    with pytest.raises(cycle.ErreurCycle, match="--forcer exige un --motif non vide"):
+        cycle.rattacher_piece(inst, RESPONSABLE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="BETA", reference="B-001", forcer=True, motif=motif)
+    assert etat_depot(inst) == avant
+    assert "rattachement_force" not in actions_audit(inst)
+
+
+def test_a7_forcer_avec_motif_rattache_et_journalise(entree, inst):
+    d = _proposition_alpha(inst, entree)
+    p = cycle.rattacher_piece(inst, RESPONSABLE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="BETA", reference="B-001", forcer=True,
+                              motif="  Facture mal adressee par le client, verifiee par telephone ")
+    assert (p.dossier, p.reference, p.etat) == ("BETA", "B-001", EtatPiece.RECUE)
+    assert cycle.lister_file(inst) == []                              # decision resolue
+    (force,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "rattachement_force"]
+    assert force.acteur == RESPONSABLE and force.objet == "BETA/B-001"
+    assert force.details["dossier_origine"] == "ALPHA" and force.details["dossier_cible"] == "BETA"
+    assert force.details["motif"] == "Facture mal adressee par le client, verifiee par telephone"
+    assert force.details["message_id"] == "<loxam@a>" and force.details["par"] == RESPONSABLE
+    assert "rattachement_confirme" in actions_audit(inst)
+    assert JournalAudit(inst.audit).verifier().ok
+
+
+def test_a7_rattachement_normal_inchange(entree, inst):
+    for variante in ("defaut", "explicite", "forcer_inutile"):
+        rep = inst.racine.parent / f"i_{variante}"
+        instance = nouvelle_instance(rep)
+        d = _proposition_alpha(instance, entree)
+        kw = {"explicite": {"dossier": "ALPHA"},
+              "forcer_inutile": {"dossier": "ALPHA", "forcer": True}}.get(variante, {})
+        par = RESPONSABLE if variante == "forcer_inutile" else VALIDEUSE     # forcer : responsable, meme inutile
+        p = cycle.rattacher_piece(instance, par, maintenant=a_10h(jour(1)),
+                                  message_id=d.message_id, **kw)
+        assert (p.dossier, p.reference, p.etat) == ("ALPHA", "A-001", EtatPiece.RECUE), variante
+        actions = actions_audit(instance)
+        assert "rattachement_force" not in actions and "rattachement_refuse" not in actions, variante
+
+
+def test_a7_decision_non_routee_avec_dossier_connu_aussi_protegee(entree, inst):
+    lancer(entree, inst, J0)
+    ecrire_eml(inst.entrant, "1.eml", expediteur=ORIGINE, message_id="<flou@a>", corps="Facture 999,99 EUR",
+               fichiers=(("facture.pdf", b"%PDF-x"),))
+    lancer(entree, inst, jour(1))
+    (d,) = cycle.lister_file(inst)
+    assert d.statut is StatutRoutage.NON_ROUTEE and d.dossier == "ALPHA"
+    with pytest.raises(cycle.ErreurCycle, match="designe le dossier ALPHA, pas BETA"):
+        cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="BETA", reference="B-001")
+    p = cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="ALPHA", reference="A-002")      # meme dossier : libre
+    assert (p.dossier, p.etat) == ("ALPHA", EtatPiece.RECUE)
+
+
+def test_a7_expediteur_inconnu_sans_dossier_d_origine_reste_libre(entree, inst):
+    """Aucune decision de dossier a comparer : l'humain choisit (le cas ordinaire du relais)."""
+    lancer(entree, inst, J0)
+    ecrire_eml(inst.entrant, "1.eml", expediteur="pieces@cabinet-relais.fr", message_id="<r@x>",
+               corps="230,40 EUR", fichiers=(("metro.pdf", b"%PDF-m"),))
+    lancer(entree, inst, jour(1))
+    (d,) = cycle.lister_file(inst)
+    assert d.dossier is None
+    p = cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="BETA", reference="B-001")
+    assert (p.dossier, p.etat) == ("BETA", EtatPiece.RECUE)
+    assert "rattachement_force" not in actions_audit(inst)
+
+
+def test_a7_cli_refus_forcage_et_options_incoherentes(entree, inst, capsys):
+    d = _proposition_alpha(inst, entree)
+    base = ["--message-id", d.message_id, "--par", RESPONSABLE]
+    rc, _, err = cli(capsys, inst, "rattacher", *base, "--dossier", "BETA", "--reference", "B-001", date=jour(1))
+    assert rc == 1 and "REFUS (ErreurCycle)" in err and "designe le dossier ALPHA, pas BETA" in err
+    rc, _, err = cli(capsys, inst, "rattacher", *base, "--dossier", "BETA", "--reference", "B-001",
+                     "--forcer", date=jour(1))
+    assert rc == 1 and "--forcer exige un --motif" in err
+    rc, _, err = cli(capsys, inst, "rattacher", *base, "--motif", "x", date=jour(1))
+    assert rc == 1 and "--motif n'a de sens qu'avec --forcer" in err
+    assert pieces_par_ref(inst)["B-001"].etat is EtatPiece.ATTENDUE and cycle.lister_file(inst)
+    rc, out, _ = cli(capsys, inst, "rattacher", *base, "--dossier", "BETA", "--reference", "B-001",
+                     "--forcer", "--motif", "verifie par telephone", date=jour(1))
+    assert rc == 0 and "BETA/B-001 -> recue" in out
+
+
+# --- A1 : circuit obligatoire (decision D6) ---------------------------------
+
+
+def test_a1_corpus_sans_circuit_refuse_hors_mode_test_avant_toute_ecriture(tmp_path, capsys):
+    corpus = corpus_sans_circuit(tmp_path / "corpus_sans_circuit")
+    assert "circuit" not in (corpus / "dossiers.csv").read_text(encoding="utf-8").splitlines()[0]
+    inst = cycle.Instance(tmp_path / "jamais")
+    with pytest.raises(cycle.ErreurFormat, match="circuit manquant pour MARTIN-BTP"):
+        cycle.executer_cycle(corpus, inst, J0, a_10h(J0))
+    assert not inst.racine.exists()
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(corpus))
+    assert rc == 1 and "REFUS [cycle]" in err and "circuit manquant" in err and "dossiers.csv" in err
+    assert not inst.racine.exists()
+
+
+def test_a1_une_seule_cellule_circuit_vide_suffit_a_refuser(tmp_path):
+    dossiers = [list(d) for d in DOSSIERS]
+    dossiers[0][6] = ""                                              # ALPHA : circuit vide
+    entree = ecrire_entree(tmp_path / "e", dossiers=dossiers)
+    inst = nouvelle_instance(tmp_path / "i")
+    with pytest.raises(cycle.ErreurFormat, match="circuit manquant pour ALPHA"):
+        lancer(entree, inst, J0)
+    assert not inst.depot.exists() and not inst.audit.exists()      # refus AVANT toute ecriture
+
+
+def test_a1_mode_test_garde_c_direct_mais_avertit_et_journalise(tmp_path):
+    corpus = corpus_sans_circuit(tmp_path / "corpus_sans_circuit")
+    inst = nouvelle_instance(tmp_path / "i")
+    r = lancer(corpus, inst, J0, mode_test=True)
+    assert r.pieces_creees == 23 and r.brouillons_crees == 3                 # comportement historique
+    attendu = ("circuit absent pour 3 dossier(s), C-DIRECT par defaut : ATELIER-9, LOPEZ-CONSEIL, "
+               "MARTIN-BTP (hors mode test : refus, decision D6)")
+    assert r.alertes == [attendu] and f"AVERTISSEMENT : {attendu}" in r.texte().splitlines()
+    assert f"AVERTISSEMENT : {attendu}" in (inst.sortie / "resume.txt").read_text().splitlines()
+    (trace,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "circuit_par_defaut"]
+    assert trace.details["dossiers"] == ["ATELIER-9", "LOPEZ-CONSEIL", "MARTIN-BTP"]
+    assert {b.destinataire for b in cycle.brouillons(inst)} == {
+        "contact@atelier9.fr", "s.lopez@lopez-conseil.fr", "compta@martin-batiment.fr"}
+
+
+def test_a1_circuit_explicite_aucune_alerte(entree, inst):
+    r = lancer(entree, inst, J0, mode_test=True)
+    assert r.alertes == [] and "circuit_par_defaut" not in actions_audit(inst)
+    assert cycle.dossiers_sans_circuit(entree / "dossiers.csv") == []
+    assert cycle.dossiers_sans_circuit(RACINE / "data" / "corpus" / "dossiers.csv") == []   # corpus tel quel
+    assert cycle.dossiers_sans_circuit(corpus_sans_circuit(entree.parent / "sans") / "dossiers.csv") == [
+        "ATELIER-9", "LOPEZ-CONSEIL", "MARTIN-BTP"]
+    r = lancer(RACINE / "data" / "corpus", nouvelle_instance(entree.parent / "i_corpus"), J0)   # accepte hors mode test
+    assert r.alertes == [] and r.pieces_creees == 23
+
+
+# --- A14 : roles (validateurs / responsables) -------------------------------
+
+
+def _pret_pour_arbitrage(entree: Path, inst: cycle.Instance) -> None:
+    for n in (0, 7, 14):
+        lancer(entree, inst, jour(n))
+        valider_et_envoyer(inst, jour(n))
+    lancer(entree, inst, jour(18))
+    assert _etats(inst) == {(EtatPiece.ESCALADEE, 3)}
+
+
+def test_a14_un_simple_validateur_ne_peut_pas_arbitrer_trancher_ni_reparer(entree, inst):
+    _pret_pour_arbitrage(entree, inst)
+    m = a_10h(jour(18))
+    avant = etat_depot(inst)
+    with pytest.raises(cycle.ValidateurRefuse, match=r"n'est pas dans responsables\.txt"):
+        cycle.arbitrer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="classe", maintenant=m)
+    with pytest.raises(cycle.ValidateurRefuse, match=r"responsables\.txt"):
+        cycle.trancher_envoi(inst, "abc", VALIDEUSE, parti=True, maintenant=m)
+    with pytest.raises(cycle.ValidateurRefuse, match=r"responsables\.txt"):
+        cycle.reparer_audit(inst, VALIDEUSE, maintenant=m)
+    assert etat_depot(inst) == avant
+    p = cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="classe", maintenant=m)
+    assert p.etat is EtatPiece.CLOSE_SANS_SUITE
+
+
+def test_a14_sans_responsables_txt_refus_hors_mode_test_meme_pour_un_validateur(entree, inst):
+    _pret_pour_arbitrage(entree, inst)
+    inst.responsables.unlink()
+    m = a_10h(jour(18))
+    for appel in (
+        lambda: cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="x", maintenant=m),
+        lambda: cycle.trancher_envoi(inst, "abc", RESPONSABLE, parti=True, maintenant=m),
+        lambda: cycle.reparer_audit(inst, RESPONSABLE, maintenant=m),
+    ):
+        with pytest.raises(cycle.ValidateurRefuse, match=r"responsables\.txt est absent"):
+            appel()
+    assert cycle.avertissement_roles(inst) is None
+    # Fichier present mais vide : refus aussi, mode test compris (jamais d'acceptation par defaut).
+    inst.responsables.write_text("\n# personne\n", encoding="utf-8")
+    for mode in (False, True):
+        with pytest.raises(cycle.ValidateurRefuse, match="aucun responsable declare"):
+            cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="x", maintenant=m, mode_test=mode)
+
+
+def test_a14_mode_test_sans_responsables_txt_repli_annonce_et_journalise(entree, inst, capsys):
+    _pret_pour_arbitrage(entree, inst)
+    inst.responsables.unlink()
+    m = a_10h(jour(18))
+    assert "mode test" in cycle.avertissement_roles(inst, mode_test=True)
+    p = cycle.arbitrer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="classe", maintenant=m, mode_test=True)
+    assert p.etat is EtatPiece.CLOSE_SANS_SUITE
+    (repli,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "repli_roles_mode_test"]
+    assert repli.acteur == VALIDEUSE and repli.objet == "arbitrer"
+    with pytest.raises(cycle.ValidateurRefuse, match="Mallory"):
+        cycle.arbitrer_piece(inst, "ALPHA", "A-002", "Mallory", motif="x", maintenant=m, mode_test=True)
+    ecrire_config(inst, mode_test=True)                              # config.json suffit aussi
+    rc, out, _ = cli(capsys, inst, "arbitrer", "--dossier", "ALPHA", "--reference", "A-002", "--motif", "x",
+                     "--par", VALIDEUSE, date=jour(18))
+    assert rc == 0 and "AVERTISSEMENT : responsables.txt absent" in out
+    rc, out, _ = cli(capsys, inst, "reparer-audit", "--par", VALIDEUSE, date=jour(18))
+    assert rc == 0 and out.startswith("AVERTISSEMENT : responsables.txt absent")
+
+
+def test_a14_un_responsable_est_aussi_accepte_pour_les_operations_de_validateur(entree, inst):
+    inst.responsables.write_text("﻿Claire Responsable\r\n", encoding="utf-8")   # BOM + CRLF
+    inst.validateurs.write_text("Marie Durand\n", encoding="utf-8")                  # Claire n'y est pas
+    assert cycle.lire_responsables(inst) == ("Claire Responsable",)
+    assert cycle.exiger_validateur(inst, "claire responsable") == "Claire Responsable"
+    assert cycle.exiger_responsable(inst, "CLAIRE RESPONSABLE") == "Claire Responsable"
+    lancer(entree, inst, J0)
+    b = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE)
+    assert cycle.valider_relance(inst, b.id_relance, "Claire Responsable", maintenant=a_10h(J0)).valide_par == \
+        "Claire Responsable"
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0), par="Claire Responsable")
+    cycle.rattacher_piece(inst, "Claire Responsable", maintenant=a_10h(J0), dossier="BETA",
+                          reference="B-001", id_piece="P-9")
+    with pytest.raises(cycle.ValidateurRefuse):                      # et le contraire reste faux
+        cycle.exiger_responsable(inst, "Marie Durand")
+
+
+def test_a14_cli_arbitrer_par_un_validateur_refuse(entree, inst, capsys):
+    _pret_pour_arbitrage(entree, inst)
+    args = ["--dossier", "ALPHA", "--reference", "A-001", "--motif", "x"]
+    rc, _, err = cli(capsys, inst, "arbitrer", *args, "--par", VALIDEUSE, date=jour(18))
+    assert rc == 1 and "REFUS (ValidateurRefuse)" in err and "responsables.txt" in err
+    rc, out, _ = cli(capsys, inst, "arbitrer", *args, "--par", "paul martin", date=jour(18))
+    assert rc == 0 and "close_sans_suite" in out
+
+
+# --- A15 : alias fournisseurs ------------------------------------------------
+
+
+def _entree_amazon(rep: Path, alias: str | None) -> Path:
+    entree = ecrire_entree(rep, operations=[["ALPHA", "2026-09-10", "CB AMZN MKTPLACE 4471", "89.90", "A-AMZ"]],
+                           pieces=[["P-1", "ALPHA", "amazon.pdf", "Amazon EU Sarl", "2026-09-09", "89.90",
+                                    "EUR", "2026-09-11", "email"]])
+    if alias is not None:
+        (entree / "alias_fournisseurs.csv").write_text(alias, encoding="utf-8")
+    return entree
+
+
+def test_a15_un_libelle_abrege_n_est_apparie_qu_avec_l_alias(tmp_path):
+    sans = lancer(_entree_amazon(tmp_path / "e1", None), nouvelle_instance(tmp_path / "i1"), J0)
+    assert (sans.a_verifier, sans.manquants) == (1, 0)                     # peu sur : humain
+    avec_entree = _entree_amazon(tmp_path / "e2", "alias,fournisseur\r\namzn mktplace,Amazon EU Sarl\r\n")
+    inst = nouvelle_instance(tmp_path / "i2")
+    avec = lancer(avec_entree, inst, J0)
+    assert (avec.a_verifier, avec.manquants) == (0, 0)                     # justifiee sans intervention
+    suivi = lire_csv(inst.sortie / "tableau_suivi.csv")
+    assert [(l["reference"], l["statut"]) for l in suivi] == [("A-AMZ", "justifie")]
+    assert cycle.lire_entrees(avec_entree).alias == {"amzn mktplace": "Amazon EU Sarl"}
+    assert cycle.lire_entrees(tmp_path / "e1").alias == {}                 # fichier absent : aucun alias
+
+
+@pytest.mark.parametrize("contenu, attendu", [
+    ("alias;fournisseur\namzn;Amazon\n", "colonnes manquantes"),          # message de parseurs.lire_alias
+    ("alias,fournisseur\n,Amazon EU Sarl\n", "ligne 2 .* obligatoires"),
+    ("alias,fournisseur\namzn mktplace,\n", "ligne 2 .* obligatoires"),
+    ("alias,fournisseur\nab,Amazon EU Sarl\n", "trop court"),                # garde du cycle
+    ("alias,fournisseur\n-- --,Amazon EU Sarl\n", "vide une fois normalise"),   # refuse par le parseur
+])
+def test_a15_alias_malforme_refus_lisible_avant_toute_ecriture(tmp_path, capsys, contenu, attendu):
+    entree = _entree_amazon(tmp_path / "e", contenu)
+    inst = cycle.Instance(tmp_path / "jamais")
+    with pytest.raises(cycle.ErreurFormat, match=attendu) as exc:
+        cycle.executer_cycle(entree, inst, J0, a_10h(J0))
+    assert "alias_fournisseurs.csv" in str(exc.value) and not inst.racine.exists()
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1 and "REFUS [cycle]" in err and "alias_fournisseurs.csv" in err and not inst.racine.exists()
+
+
+# Etat initial (defaut corrige, test de regression) : parseurs.lire_alias laissait un meme alias
+# associe a DEUX fournisseurs ecraser silencieusement la premiere ligne ({'amzn mktplace': 'B'}) ;
+# ce test etait un xfail strict, devenu rouge (XPASS) quand le parseur a refuse le doublon.
+def test_a15_regression_alias_en_double_vers_deux_fournisseurs(tmp_path):
+    entree = _entree_amazon(tmp_path / "e", "alias,fournisseur\namzn mktplace,Amazon EU Sarl\n"
+                                            "amzn mktplace,Garage Dupont\n")
+    with pytest.raises(cycle.ErreurFormat, match="alias_fournisseurs.csv.*deux fournisseurs"):
+        cycle.lire_entrees(entree)
+
+
+def test_a15_le_meme_alias_ne_justifie_pas_un_autre_fournisseur(tmp_path):
+    """L'alias ne vaut que pour SON fournisseur : une piece d'un autre fournisseur n'est pas
+    appariee a cause de lui (sinon un manque serait masque)."""
+    entree = ecrire_entree(tmp_path / "e", operations=[["ALPHA", "2026-09-10", "CB AMZN MKTPLACE 4471", "89.90", "A-AMZ"]],
+                           pieces=[["P-1", "ALPHA", "autre.pdf", "Garage Dupont", "2026-09-09", "89.90", "EUR",
+                                    "2026-09-11", "email"]])
+    (entree / "alias_fournisseurs.csv").write_text("alias,fournisseur\namzn mktplace,Amazon EU Sarl\n", encoding="utf-8")
+    r = lancer(entree, nouvelle_instance(tmp_path / "i"), J0)
+    assert r.pieces_creees + r.a_verifier == 1                              # jamais "justifie"
+
+
+# --- A10 : regle et motif dans l'audit de creation ---------------------------
+
+
+def test_a10_piece_creee_explique_la_regle_et_le_motif(entree, inst):
+    lancer(entree, inst, J0)
+    creees = [e for e in JournalAudit(inst.audit).lire() if e.action == "piece_creee"]
+    assert len(creees) == 5
+    for e in creees:
+        assert e.details["regle"] == "aucun_candidat"
+        assert e.details["motif"] == "Aucune piece justificative recue pour ce paiement"
+    assert {e.objet for e in creees} == {f"{('ALPHA' if r[0] == 'A' else 'BETA' if r[0] == 'B' else 'GAMMA')}/{r}"
+                                         for r in ("A-001", "A-002", "A-003", "B-001")} | {"GAMMA/G-001"} \
+        or len({e.objet for e in creees}) == 5
+
+
+# --- A8 : contexte de la file humaine ----------------------------------------
+
+
+def _decision(detail: str) -> cycle.DecisionRoutage:
+    return cycle.DecisionRoutage("<m@x>", "f.pdf", "abc", StatutRoutage.NON_ROUTEE, detail=detail)
+
+
+def test_a8_le_contexte_du_message_est_conserve_dans_le_detail(entree, inst, capsys):
+    ecrire_eml(inst.entrant, "1.eml", expediteur="Jean <jean@inconnu-sarl.fr>", message_id="<ctx@x>",
+               objet="Facture 12,00 EUR  de\x1b[2Jjuin", corps="voir PJ", fichiers=(("f.pdf", b"%PDF-c"),))
+    lancer(entree, inst, J0)
+    (d,) = cycle.lister_file(inst)
+    ctx = cycle.contexte_file(d)
+    assert set(ctx) == {"raison", "expediteur", "recu_le", "objet"}
+    assert ctx["expediteur"] == "jean@inconnu-sarl.fr" and ctx["recu_le"] == "2026-10-07T09:00:00+02:00"
+    assert ctx["objet"].startswith("Facture 12,00 EUR de") and "inconnu" in ctx["raison"]
+    assert json.loads(d.detail) == ctx                                       # JSON dans detail, schema inchange
+    ligne = lire_csv(inst.sortie / "file_humaine.csv")[0]
+    assert (ligne["expediteur"], ligne["recu_le"], ligne["detail"]) == (
+        "jean@inconnu-sarl.fr", "2026-10-07T09:00:00+02:00", ctx["raison"])
+    rc, out, _ = cli(capsys, inst, "file")
+    assert rc == 0 and "[de jean@inconnu-sarl.fr le 2026-10-07T09:00:00+02:00 : Facture 12,00 EUR de" in out
+    assert "\x1b" not in out and "\\x1b" in out                              # affichable
+    lancer(entree, inst, J0)                                                 # rejeu : rien de duplique
+    assert len(cycle.lister_file(inst)) == 1
+
+
+def test_a8_contexte_pour_chaque_cas_non_route(entree, inst):
+    ecrire_eml(inst.entrant, "1.eml", expediteur="inconnu@gmail.com", message_id="<a@x>", objet="sans PJ")
+    ecrire_eml(inst.entrant, "2.eml", expediteur=ORIGINE, message_id="<b@x>", objet="x" * 900, corps="9,99 EUR",
+               fichiers=(("f.pdf", b"%PDF-b"),))
+    lancer(entree, inst, J0)
+    contextes = [cycle.contexte_file(d) for d in cycle.lister_file(inst)]
+    assert len(contextes) == 2 and all(set(c) == {"raison", "expediteur", "recu_le", "objet"} for c in contextes)
+    assert {c["expediteur"] for c in contextes} == {"inconnu@gmail.com", ORIGINE}
+    assert max(len(c["objet"]) for c in contextes) == cycle.LONGUEUR_MAX_OBJET
+
+
+@pytest.mark.parametrize("detail, attendu", [
+    ("adresse x@y.fr et domaine y.fr inconnus", {"raison": "adresse x@y.fr et domaine y.fr inconnus"}),
+    ("", {"raison": ""}),
+    ("123", {"raison": "123"}),                                              # JSON valide mais pas un objet
+    ('["a", "b"]', {"raison": '["a", "b"]'}),
+    ("{pas du json", {"raison": "{pas du json"}),
+    ('{"raison": 5}', {"raison": '{"raison": 5}'}),                          # raison non textuelle
+    ('{"expediteur": "a@b.fr"}', {"expediteur": "a@b.fr", "raison": ""}),    # JSON partiel
+    ('{"raison": "r", "expediteur": "a@b.fr", "recu_le": "2026-10-01", "objet": "o", "autre": [1]}',
+     {"raison": "r", "expediteur": "a@b.fr", "recu_le": "2026-10-01", "objet": "o"}),
+])
+def test_a8_contexte_file_tolerant_aux_anciens_detail(detail, attendu):
+    assert cycle.contexte_file(_decision(detail)) == attendu
+
+
+# --- Envoi nominatif -----------------------------------------------------------
+
+
+def _entrees_audit(inst: cycle.Instance, action: str):
+    return [e for e in JournalAudit(inst.audit).lire() if e.action == action]
+
+
+def _valider_premier(inst: cycle.Instance, entree: Path, par: str = VALIDEUSE, jour_: dt.date = J0) -> Brouillon:
+    lancer(entree, inst, jour_)
+    b = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE)
+    cycle.valider_relance(inst, b.id_relance, par, maintenant=a_10h(jour_))
+    return b
+
+
+def test_envoi_nominatif_envoye_par_dans_le_journal(entree, inst):
+    b = _valider_premier(inst, entree)
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0), par="paul MARTIN")
+    (effectue,) = _entrees_audit(inst, "envoi_effectue")
+    assert effectue.details["envoye_par"] == "Paul Martin"                   # nom tel que declare
+    assert effectue.details["valide_par"] == VALIDEUSE                       # valider et envoyer : deux personnes
+    (demarre,) = _entrees_audit(inst, "envoi_demarre")
+    assert demarre.details["envoye_par"] == "Paul Martin"
+    assert JournalAudit(inst.audit).verifier().ok
+
+
+def test_envoi_sans_par_garde_son_comportement_et_journalise_null(entree, inst):
+    b = _valider_premier(inst, entree)
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0))
+    (effectue,) = _entrees_audit(inst, "envoi_effectue")
+    assert "envoye_par" in effectue.details and effectue.details["envoye_par"] is None
+
+
+def test_envoi_par_inconnu_refuse_avant_tout_effet(entree, inst):
+    b = _valider_premier(inst, entree)
+    avant = etat_depot(inst)
+    for par in ("Mallory", "  ", "systeme"):
+        with pytest.raises(cycle.ValidateurRefuse):
+            cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0), par=par)
+    assert etat_depot(inst) == avant and emls(inst) == []
+    assert cycle.brouillons(inst, StatutBrouillon.VALIDEE)[0].id_relance == b.id_relance
+
+
+# --- A17 : controler-envois (recette de CA-06) ---------------------------------
+
+
+def _reecrire_journal(inst: cycle.Instance, transformer) -> None:
+    """Reecrit tout le journal par l'API (chaine de hachage RECALCULEE, donc valide) en
+    appliquant `transformer(entree) -> (acteur, details) | None` (None : entree supprimee).
+    Simule un falsificateur qui connait le format : la chaine seule ne le trahit pas."""
+    entrees = JournalAudit(inst.audit).lire()
+    inst.audit.unlink()
+    journal = JournalAudit(inst.audit)
+    for e in entrees:
+        resultat = transformer(e)
+        if resultat is not None:
+            acteur, details = resultat
+            journal.ecrire(acteur, e.action, e.objet, details, horodatage=dt.datetime.fromisoformat(e.horodatage))
+    assert journal.verifier().ok
+
+
+def _envoi_sain(inst: cycle.Instance, entree: Path) -> Brouillon:
+    b = _valider_premier(inst, entree)
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0), par="Paul Martin")
+    return b
+
+
+def test_a17_journal_sain_aucune_anomalie(entree, inst, capsys):
+    b = _envoi_sain(inst, entree)
+    controle = cycle.controler_envois(inst)
+    assert controle.ok and controle.chaine_ok and controle.nb_anomalies == 0
+    (ligne,) = controle.lignes
+    assert (ligne.id_relance, ligne.destinataire, ligne.valide_par, ligne.envoye_par, ligne.nature) == (
+        b.id_relance, ORIGINE, VALIDEUSE, "Paul Martin", "effectue")
+    rc, out, _ = cli(capsys, inst, "controler-envois")
+    assert rc == 0 and b.id_relance in out and "Marie Durand" in out and "Paul Martin" in out
+    assert out.splitlines()[0].split()[:3] == ["brouillon", "valide", "par"] and "1 envoi(s) controle(s), 0 anomalie(s)" in out
+    assert "chaine du journal : saine" in out
+    avant = inst.audit.read_bytes()
+    cycle.controler_envois(inst)
+    assert inst.audit.read_bytes() == avant                                   # lecture seule
+
+
+def test_a17_journal_sans_aucun_envoi_ni_fichier(entree, inst, tmp_path):
+    lancer(entree, inst, J0)
+    assert cycle.controler_envois(inst).ok and cycle.controler_envois(inst).lignes == ()
+    vide = cycle.Instance(tmp_path / "vide")
+    controle = cycle.controler_envois(vide)
+    assert not controle.ok and "absent" in controle.raison_chaine and not vide.racine.exists()
+
+
+def test_a17_entree_valide_retiree_a_la_main_chaine_rompue(entree, inst, capsys):
+    _envoi_sain(inst, entree)
+    lignes = inst.audit.read_bytes().split(b"\n")
+    index = next(i for i, l in enumerate(lignes) if b'"action":"valide"' in l)
+    del lignes[index]
+    inst.audit.write_bytes(b"\n".join(lignes))
+    controle = cycle.controler_envois(inst)
+    assert not controle.ok and not controle.chaine_ok
+    assert any("aucune entree `valide` anterieure" in a for l in controle.lignes for a in l.anomalies)
+    rc, out, _ = cli(capsys, inst, "controler-envois")
+    assert rc == 1 and "NON SAINE" in out and "ANOMALIE" in out
+
+
+def test_a17_entree_valide_supprimee_avec_chaine_recalculee(entree, inst, capsys):
+    """Falsificateur habile : la chaine de hachage est refaite, seule la semantique le trahit."""
+    _envoi_sain(inst, entree)
+    _reecrire_journal(inst, lambda e: None if e.action == "valide" else (e.acteur, e.details))
+    assert cycle.verifier_audit(inst).ok                                      # verifier-audit ne voit rien
+    controle = cycle.controler_envois(inst)
+    assert controle.chaine_ok and not controle.ok
+    assert controle.lignes[0].anomalies == ("aucune entree `valide` anterieure pour ce brouillon",)
+    rc, out, _ = cli(capsys, inst, "controler-envois")
+    assert rc == 1 and "1 envoi(s) controle(s), 1 anomalie(s)" in out
+
+
+@pytest.mark.parametrize("falsification, attendu", [
+    ("validateur_inconnu", "absent de validateurs.txt et responsables.txt"),
+    ("destinataire_change", "destinataire valide"),
+    ("valide_apres_envoi", "aucune entree `valide` anterieure"),
+    ("valide_par_different", "`valide_par` de l'envoi"),
+    ("envoyeur_inconnu", "envoye par 'Mallory'"),
+])
+def test_a17_falsifications_semantiques_detectees(entree, inst, falsification, attendu):
+    _envoi_sain(inst, entree)
+
+    def transformer(e):
+        d = dict(e.details)
+        if falsification == "validateur_inconnu" and e.action == "valide":
+            d["par"] = "Mallory"
+            return "Mallory", d
+        if falsification == "destinataire_change" and e.action == "valide":
+            d["destinataire"] = "autre@client.fr"
+        if falsification == "valide_par_different" and e.action == "envoi_effectue":
+            d["valide_par"] = "Paul Martin"
+        if falsification == "envoyeur_inconnu" and e.action == "envoi_effectue":
+            d["envoye_par"] = "Mallory"
+        return e.acteur, d
+
+    if falsification == "valide_apres_envoi":                               # la validation date d'apres l'envoi
+        entrees = JournalAudit(inst.audit).lire()
+        ordre = [e for e in entrees if e.action != "valide"]
+        ordre.insert(next(i for i, e in enumerate(ordre) if e.action == "envoi_effectue") + 1,
+                     next(e for e in entrees if e.action == "valide"))
+        inst.audit.unlink()
+        j = JournalAudit(inst.audit)
+        for e in ordre:
+            j.ecrire(e.acteur, e.action, e.objet, e.details, horodatage=dt.datetime.fromisoformat(e.horodatage))
+    else:
+        _reecrire_journal(inst, transformer)
+    controle = cycle.controler_envois(inst)
+    assert controle.chaine_ok and not controle.ok
+    assert any(attendu in a for a in controle.lignes[0].anomalies), controle.lignes[0].anomalies
+
+
+def test_a17_validation_forgee_en_sql_puis_envoi_detectee(entree, inst, capsys):
+    """L'attaque du xfail S4 : statut `validee` et `valide_par` ecrits en SQL, sans entree `valide`.
+    `envoyer` part (limite assumee) mais la recette de CA-06 la trahit."""
+    import sqlite3
+    lancer(entree, inst, J0)
+    b = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE)
+    with sqlite3.connect(inst.depot) as c:
+        c.execute("UPDATE brouillons SET statut='validee', valide_par='Marie Durand', valide_le=? "
+                  "WHERE id_relance=?", (a_10h(J0).isoformat(), b.id_relance))
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0), par="Paul Martin")
+    rc, out, _ = cli(capsys, inst, "controler-envois")
+    assert rc == 1 and "aucune entree `valide` anterieure" in out
+
+
+def test_a17_brouillon_envoye_deux_fois_et_envoi_confirme_par_un_humain(entree, inst):
+    b = _envoi_sain(inst, entree)
+    envoi = next(e for e in JournalAudit(inst.audit).lire() if e.action == "envoi_effectue")
+    journal = JournalAudit(inst.audit)
+    journal.ecrire("systeme", "envoi_effectue", b.id_relance, dict(envoi.details))      # doublon
+    controle = cycle.controler_envois(inst)
+    assert [l.anomalies for l in controle.lignes] == [("brouillon envoye 2 fois",)] * 2
+    # un envoi incertain tranche par un humain est controle comme les autres
+    autre = tuple(x for x in cycle.brouillons(inst) if x.id_relance != b.id_relance)[0]
+    cycle.valider_relance(inst, autre.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+
+    class Coupure:
+        def envoyer(self, brouillon):
+            raise TimeoutError("muet")
+
+    with pytest.raises(TimeoutError):
+        cycle.envoyer_relance(inst, autre.id_relance, maintenant=a_10h(J0 + dt.timedelta(days=1)),
+                              expediteur=Coupure(), par="Paul Martin")
+    cycle.trancher_envoi(inst, autre.id_relance, RESPONSABLE, parti=True, maintenant=a_10h(J0 + dt.timedelta(days=1)))
+    natures = {l.id_relance: l.nature for l in cycle.controler_envois(inst).lignes}
+    assert natures[autre.id_relance] == "confirme"
+    assert next(l for l in cycle.controler_envois(inst).lignes if l.id_relance == autre.id_relance).anomalies == ()
+
+
+# --- Mode test : creneau libre et limite hebdomadaire -------------------------------
+
+NUIT = dt.datetime.combine(J0, dt.time(23, 30), tzinfo=PARIS)
+SAMEDI = dt.datetime.combine(dt.date(2026, 10, 10), dt.time(10, 0), tzinfo=PARIS)
+
+
+def test_mode_test_creneau_libre_par_defaut_envoi_de_nuit_accepte(entree, inst):
+    ecrire_config(inst, mode_test=True)
+    b = _valider_premier(inst, entree)
+    envoye = cycle.envoyer_relance(inst, b.id_relance, maintenant=NUIT, par=VALIDEUSE)
+    assert envoye.statut is StatutBrouillon.ENVOYEE
+    (coupes,) = _entrees_audit(inst, "garde_fous_coupes")                     # une fois par commande
+    assert coupes.details["garde_fous"] == ["creneau d'envoi libre (heures et jours ouvres ignores)"]
+    assert coupes.details["envoye_par"] == VALIDEUSE
+    assert cycle.garde_fous_mode_test(inst) == tuple(coupes.details["garde_fous"])
+
+
+def test_hors_mode_test_le_creneau_reste_applique_quoi_que_dise_config(entree, inst):
+    ecrire_config(inst, mode_test=False, creneau_envoi_libre=True, limite_hebdomadaire=False)
+    b = _valider_premier(inst, entree)
+    with pytest.raises(envoi.EnvoiHorsCreneau):
+        cycle.envoyer_relance(inst, b.id_relance, maintenant=NUIT)
+    with pytest.raises(envoi.EnvoiHorsCreneau):
+        cycle.envoyer_relance(inst, b.id_relance, maintenant=SAMEDI)
+    assert cycle.garde_fous_mode_test(inst) == () and "garde_fous_coupes" not in actions_audit(inst)
+    assert cycle.brouillons(inst, StatutBrouillon.VALIDEE) and emls(inst) == []
+
+
+def test_mode_test_creneau_envoi_libre_faux_rend_le_creneau(entree, inst):
+    ecrire_config(inst, mode_test=True, creneau_envoi_libre=False)
+    b = _valider_premier(inst, entree)
+    with pytest.raises(envoi.EnvoiHorsCreneau):
+        cycle.envoyer_relance(inst, b.id_relance, maintenant=NUIT)
+    assert cycle.garde_fous_mode_test(inst) == ()
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0))
+
+
+def _deux_brouillons_meme_destinataire(inst: cycle.Instance, entree: Path):
+    b1 = _valider_premier(inst, entree)
+    b2 = Brouillon(identifiant_relance(ORIGINE, ("A-002",), 1, J0), ORIGINE, "Autre", "x", ("ALPHA",),
+                   ("A-002",), 1, J0)
+    with Depot(inst.depot) as d:
+        d.sauver_brouillon(b2)
+    cycle.valider_relance(inst, b2.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    return b1, b2
+
+
+def test_mode_test_limite_hebdomadaire_active_par_defaut(entree, inst):
+    ecrire_config(inst, mode_test=True)
+    b1, b2 = _deux_brouillons_meme_destinataire(inst, entree)
+    cycle.envoyer_relance(inst, b1.id_relance, maintenant=a_10h(J0))
+    with pytest.raises(cycle.EnvoiRefuse, match="un e-mail par 7 jours"):
+        cycle.envoyer_relance(inst, b2.id_relance, maintenant=a_10h(jour(1)))
+
+
+def test_mode_test_limite_hebdomadaire_coupee_journalisee_et_affichee(entree, inst, capsys):
+    ecrire_config(inst, mode_test=True, limite_hebdomadaire=False)
+    b1, b2 = _deux_brouillons_meme_destinataire(inst, entree)
+    cycle.envoyer_relance(inst, b1.id_relance, maintenant=a_10h(J0))
+    rc, out, _ = cli(capsys, inst, "envoyer", b2.id_relance, "--par", VALIDEUSE, date=jour(1))
+    assert rc == 0 and "GARDE-FOU DESACTIVE (mode test) : limite hebdomadaire ignoree" in out
+    assert len(emls(inst)) == 2
+    assert [e.details["garde_fous"] for e in _entrees_audit(inst, "garde_fous_coupes")] == [
+        ["creneau d'envoi libre (heures et jours ouvres ignores)",
+         "limite hebdomadaire ignoree (plusieurs e-mails par semaine au meme destinataire)"]] * 2
+    assert len(_entrees_audit(inst, "limite_hebdomadaire_ignoree")) >= 1         # trace d'envoi.py aussi
+    # Le bandeau du cycle les annonce.
+    r = lancer(entree, inst, jour(2))
+    assert r.garde_fous_coupes == list(cycle.garde_fous_mode_test(inst))
+    lignes = r.texte().splitlines()
+    assert "GARDE-FOU DESACTIVE (mode test) : limite hebdomadaire ignoree (plusieurs e-mails par semaine " \
+           "au meme destinataire)" in lignes
+    assert lignes[0].startswith("*** MODE TEST ACTIF")
+    assert "GARDE-FOU DESACTIVE (mode test) : creneau d'envoi libre (heures et jours ouvres ignores)" in \
+        (inst.sortie / "resume.txt").read_text().splitlines()
+
+
+@pytest.mark.parametrize("cle", ["creneau_envoi_libre", "limite_hebdomadaire"])
+def test_config_garde_fous_doivent_etre_booleens(inst, cle):
+    ecrire_config(inst, mode_test=True, **{cle: "false"})
+    with pytest.raises(cycle.ConfigInvalide, match=cle):
+        cycle.charger_config(inst)
+    ecrire_config(inst, mode_test=True)
+    assert cle not in cycle.charger_config(inst)                               # defauts non injectes
+
+
+# --- Regles d'exclusion provisoires (statut `proposee`) --------------------------------------
+
+
+def _entree_avec_regles(rep: Path) -> Path:
+    entree = ecrire_entree(rep)
+    (entree / "exclusions_dossier.csv").write_text(
+        "dossier,motif_regex,motif,nom,auteur,date_activation,statut\n"
+        "ALPHA,loxam,Location refacturee,regle-loxam,Claire,2026-10-01,proposee\n"
+        "ALPHA,=cmd|x,Piege tableur,=regle-piegee,Mallory,2026-10-02,proposee\n"
+        "BETA,metro,Achats revendus,regle-metro,Claire,2026-10-01,validee\n", encoding="utf-8")
+    return entree
+
+
+def test_regles_provisoires_comptees_listees_jamais_appliquees(tmp_path):
+    entree = _entree_avec_regles(tmp_path / "e")
+    inst = nouvelle_instance(tmp_path / "i")
+    r = lancer(entree, inst, J0)
+    assert r.regles_provisoires == ["regle-loxam", "=regle-piegee"]
+    ligne = "  regles provisoires          : 2 en attente de validation (regle-loxam, =regle-piegee)"
+    assert ligne in r.texte().splitlines() and ligne in (inst.sortie / "resume.txt").read_text().splitlines()
+    pieces = pieces_par_ref(inst)
+    assert pieces["A-001"].etat is EtatPiece.ATTENDUE                        # `proposee` : A-001 reste reclamee
+    assert "B-001" not in pieces                                              # `validee` : B-001 exclue
+    lignes = lire_csv(inst.sortie / "regles_provisoires.csv")
+    assert [(l["dossier"], l["nom"], l["auteur"], l["date_activation"]) for l in lignes] == [
+        ("ALPHA", "=regle-piegee".replace("=", "'="), "Mallory", "2026-10-02"),
+        ("ALPHA", "regle-loxam", "Claire", "2026-10-01")]
+    assert _cellules_dangereuses(inst.sortie / "regles_provisoires.csv") == []   # ligne_sure
+    assert [c["motif_regex"] for c in lignes] == ["'=cmd|x", "loxam"]
+    cd = [e for e in JournalAudit(inst.audit).lire() if e.action == "cycle_termine"][-1].details
+    assert cd["regles_provisoires"] == 2
+
+
+def test_sans_regle_provisoire_aucune_ligne_et_csv_vide(entree, inst):
+    r = lancer(entree, inst, J0)
+    assert r.regles_provisoires == [] and "regles provisoires" not in r.texte()
+    assert (inst.sortie / "regles_provisoires.csv").read_text(encoding="utf-8").splitlines() == [
+        "dossier,nom,motif_regex,motif,auteur,date_activation"]
+
+
+
+# --- Forcer un rattachement inter-dossiers : reserve au RESPONSABLE (cahier v1.1, section 7, regle 7) ---
+
+
+def test_forcer_par_un_simple_validateur_refuse_sans_effet_et_avant_le_motif(entree, inst):
+    d = _proposition_alpha(inst, entree)
+    avant, journal_avant = etat_depot(inst), actions_audit(inst)
+    for motif in ("verifie par telephone", "", None):                  # le role est controle AVANT le motif
+        with pytest.raises(cycle.ValidateurRefuse, match=r"n'est pas dans responsables\.txt"):
+            cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                                  dossier="BETA", reference="B-001", forcer=True, motif=motif)
+    with pytest.raises(cycle.ValidateurRefuse):                        # meme sans decision de routage
+        cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), dossier="BETA",
+                              reference="B-001", id_piece="P", forcer=True, motif="x")
+    assert etat_depot(inst) == avant and actions_audit(inst) == journal_avant      # aucune ecriture, aucun journal
+    assert "rattachement_force" not in actions_audit(inst)
+    assert pieces_par_ref(inst)["B-001"].etat is EtatPiece.ATTENDUE and cycle.lister_file(inst)
+
+
+def test_forcer_responsable_sans_motif_refuse_puis_avec_motif_accepte(entree, inst):
+    d = _proposition_alpha(inst, entree)
+    with pytest.raises(cycle.ErreurCycle, match="--forcer exige un --motif non vide"):
+        cycle.rattacher_piece(inst, RESPONSABLE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="BETA", reference="B-001", forcer=True, motif=" ")
+    p = cycle.rattacher_piece(inst, "paul MARTIN", maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="BETA", reference="B-001", forcer=True, motif="verifie par telephone")
+    assert p.etat is EtatPiece.RECUE
+    (force,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "rattachement_force"]
+    assert force.acteur == RESPONSABLE and force.details["motif"] == "verifie par telephone"
+
+
+def test_rattachement_normal_reste_ouvert_a_un_simple_validateur(entree, inst):
+    d = _proposition_alpha(inst, entree)
+    p = cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="ALPHA", reference="A-001")
+    assert (p.dossier, p.etat) == ("ALPHA", EtatPiece.RECUE)
+    assert "rattachement_force" not in actions_audit(inst)
+
+
+def test_forcer_sans_responsables_txt_refuse_hors_mode_test_meme_pour_un_validateur(entree, inst):
+    d = _proposition_alpha(inst, entree)
+    inst.responsables.unlink()
+    avant = etat_depot(inst)
+    for par in (VALIDEUSE, RESPONSABLE):
+        with pytest.raises(cycle.ValidateurRefuse, match=r"responsables\.txt est absent"):
+            cycle.rattacher_piece(inst, par, maintenant=a_10h(jour(1)), message_id=d.message_id,
+                                  dossier="BETA", reference="B-001", forcer=True, motif="x")
+    assert etat_depot(inst) == avant and "rattachement_force" not in actions_audit(inst)
+    # et le rattachement normal n'a besoin d'aucun responsable
+    assert cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), message_id=d.message_id).etat is EtatPiece.RECUE
+
+
+def test_forcer_en_mode_test_sans_responsables_txt_repli_annonce_et_journalise(entree, inst, capsys):
+    d = _proposition_alpha(inst, entree)
+    inst.responsables.unlink()
+    with pytest.raises(cycle.ValidateurRefuse, match="Mallory"):
+        cycle.rattacher_piece(inst, "Mallory", maintenant=a_10h(jour(1)), message_id=d.message_id,
+                              dossier="BETA", reference="B-001", forcer=True, motif="x", mode_test=True)
+    ecrire_config(inst, mode_test=True)                                 # config.json suffit aussi
+    rc, out, _ = cli(capsys, inst, "rattacher", "--message-id", d.message_id, "--par", VALIDEUSE,
+                     "--dossier", "BETA", "--reference", "B-001", "--forcer", "--motif", "verifie", date=jour(1))
+    assert rc == 0 and "AVERTISSEMENT : responsables.txt absent" in out and "BETA/B-001 -> recue" in out
+    (repli,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "repli_roles_mode_test"]
+    assert repli.acteur == VALIDEUSE and repli.objet == "rattacher --forcer"
+    assert "rattachement_force" in actions_audit(inst)
+
+
+def test_cli_forcer_par_un_simple_validateur_refuse(entree, inst, capsys):
+    d = _proposition_alpha(inst, entree)
+    rc, _, err = cli(capsys, inst, "rattacher", "--message-id", d.message_id, "--par", VALIDEUSE,
+                     "--dossier", "BETA", "--reference", "B-001", "--forcer", "--motif", "verifie", date=jour(1))
+    assert rc == 1 and "REFUS (ValidateurRefuse)" in err and "responsables.txt" in err
+    assert pieces_par_ref(inst)["B-001"].etat is EtatPiece.ATTENDUE and "rattachement_force" not in actions_audit(inst)
+
+
+def test_cli_forcer_option_mode_test_suffit_au_repli(entree, inst, capsys):
+    d = _proposition_alpha(inst, entree)
+    inst.responsables.unlink()
+    args = ["--message-id", d.message_id, "--par", VALIDEUSE, "--dossier", "BETA", "--reference", "B-001",
+            "--forcer", "--motif", "verifie"]
+    rc, _, err = cli(capsys, inst, "rattacher", *args, date=jour(1))               # ni option ni config : refus
+    assert rc == 1 and "responsables.txt est absent" in err
+    rc, out, _ = cli(capsys, inst, "rattacher", *args, "--mode-test", date=jour(1))
+    assert rc == 0 and "AVERTISSEMENT : responsables.txt absent" in out
