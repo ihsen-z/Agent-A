@@ -505,3 +505,80 @@ def test_code_dossier_des_regles_est_normalise_en_nfc(tmp_path):
 def test_expression_optionnelle_repetee_est_sondee_et_refusee(tmp_path):
     with pytest.raises(ErreurFormat, match="ne termine pas"):
         Referentiel.depuis_csv(_fichier_regles(tmp_path, 'dossier,motif_regex\nD1,"(a?){30}a{30}"\n'))
+
+
+# ------------------------------------------- 6e passage : montants et en-tetes sans ambiguite
+
+
+@pytest.mark.parametrize("valeur", ["12€50", "12 EUR 50", "1EUR2", "(12,50", "12,50)", "(-12,50)", "1,234", "1.234", "-1,234"])
+def test_montants_ambigus_ou_mal_formes_sont_refuses(valeur):
+    with pytest.raises(ErreurFormat):
+        lire_montant(valeur)
+
+
+@pytest.mark.parametrize("valeur, attendu", [
+    ("12€", "12"), ("€12,50", "12.50"), ("12,50 EUR", "12.50"), ("+12", "12"), (".5", "0.5"),
+    ("1,234.56", "1234.56"), ("1.234,56", "1234.56"), ("12.5", "12.5"), ("0,12", "0.12"),
+])
+def test_montants_bien_formes_restent_lus(valeur, attendu):
+    assert lire_montant(valeur) == Decimal(attendu)
+
+
+@pytest.mark.parametrize("entetes", ["Débit,debit", "debit,DEBIT"])
+def test_entetes_en_double_apres_normalisation_sont_refuses(tmp_path, entetes):
+    chemin = _releve(tmp_path, f"dossier,date_operation,libelle,{entetes},credit,reference\n"
+                               "D1,2026-09-03,CB X,120.00,5.00,,R1\n")
+    with pytest.raises(ErreurFormat, match="double"):
+        lire_releve(chemin)
+
+
+def test_circuit_en_double_ne_transforme_pas_un_relais_en_direct(tmp_path):
+    chemin = tmp_path / "dossiers.csv"
+    chemin.write_text("dossier,raison_sociale,email_contact,Circuit,circuit,email_relais\n"
+                      "D1,Alpha,a@alpha.fr,C-RELAIS,C-DIRECT,cabinet@exemple.fr\n", encoding="utf-8")
+    with pytest.raises(ErreurFormat, match="double"):
+        lire_dossiers(chemin)
+
+
+@pytest.mark.parametrize("motif", [".*" * 10, "a*" * 8, "x+" * 6])
+def test_repetitions_successives_sont_refusees(tmp_path, motif):
+    with pytest.raises(ErreurFormat, match="imbriques|quantificateurs"):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path, f'dossier,motif_regex\nD1,"loyer{motif}x"\n'))
+
+
+def test_sonde_regex_echoue_ferme(tmp_path, monkeypatch):
+    import subprocess
+    from rapprochement import exclusions
+
+    def en_panne(*a, **k):
+        raise OSError("fork impossible")
+
+    monkeypatch.setattr(exclusions.subprocess, "run", en_panne)
+    with pytest.raises(ErreurFormat, match="pas pu etre verifiee"):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path, 'dossier,motif_regex\nD1,"(a|aa)+$"\n'))
+
+
+def test_mille_regles_saines_ne_lancent_aucun_processus(tmp_path, monkeypatch):
+    from rapprochement import exclusions
+
+    appels = []
+    monkeypatch.setattr(exclusions.subprocess, "run", lambda *a, **k: appels.append(1))
+    lignes = "\n".join(f"D1,fournisseur{i} loyer" for i in range(1000))
+    ref = Referentiel.depuis_csv(_fichier_regles(tmp_path, "dossier,motif_regex\n" + lignes + "\n"))
+    assert len(ref.apprises["D1"]) == 1000 and appels == []
+
+
+def test_sonde_regroupee_en_un_seul_processus(tmp_path, monkeypatch):
+    from rapprochement import exclusions
+
+    appels = []
+    reel = exclusions.subprocess.run
+
+    def compteur(*a, **k):
+        appels.append(1)
+        return reel(*a, **k)
+
+    monkeypatch.setattr(exclusions.subprocess, "run", compteur)
+    lignes = "\n".join(f'D1,"(a|b)+x{i}"' for i in range(20))
+    Referentiel.depuis_csv(_fichier_regles(tmp_path, "dossier,motif_regex\n" + lignes + "\n"))
+    assert len(appels) == 1

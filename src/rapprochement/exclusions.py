@@ -177,6 +177,7 @@ def _contre_exemple(operation: OperationBancaire) -> bool:
 STATUTS_REGLE = ("validee", "proposee")
 COLONNES_REGLE = ("dossier", "motif_regex", "motif", "nom", "auteur", "date_activation", "statut")
 LONGUEUR_MAX_REGEX = 300
+MAX_QUANTIFICATEURS_NON_BORNES = 4
 DELAI_SONDE_REGEX = 2.0   # secondes, pour l'ensemble des expressions a sonder
 
 
@@ -188,6 +189,9 @@ def _analyser_regex(motif: str) -> str:
     les dossiers (le module `re` ne peut pas etre interrompu). Une alternative quantifiee
     (`(a|aa)+`) peut l'etre aussi : elle est sondee dans un processus a part, avec un delai.
     """
+    non_bornes = len(re.findall(r"(?<!\\)(?:[*+]|\{\d+,\})", motif))
+    if non_bornes > MAX_QUANTIFICATEURS_NON_BORNES:
+        return "risquee"          # `.*.*.*.*.*...` : temps polynomial de degre eleve
     pile: list[list[bool]] = []          # [quantificateur, alternative, optionnel]
     a_sonder = False
     i, n = 0, len(motif)
@@ -250,19 +254,24 @@ _CODE_SONDE = (
 
 
 def _sonder(motifs: list[str]) -> int | None:
-    """Rang de la premiere expression qui ne termine pas dans le delai, ou None."""
+    """Rang de la premiere expression qui ne termine pas dans le delai, ou None.
+
+    ECHOUE FERME : si le processus de sondage ne peut pas demarrer ou plante, on ne sait pas si
+    l'expression gele le cycle, donc on la refuse (rang 0) plutot que de l'accepter.
+    """
     try:
         subprocess.run(
             [sys.executable, "-I", "-c", _CODE_SONDE], input=json.dumps(motifs), text=True,
-            capture_output=True, timeout=DELAI_SONDE_REGEX, check=True,
+            capture_output=True, timeout=DELAI_SONDE_REGEX * max(1, min(len(motifs), 5)), check=True,
         )
     except subprocess.TimeoutExpired as depassement:
         sortie = depassement.stdout or ""
         if isinstance(sortie, bytes):
             sortie = sortie.decode("utf-8", "replace")
-        return len(sortie.split())
+        return min(len(sortie.split()), len(motifs) - 1)
     except (subprocess.CalledProcessError, OSError):
-        return None
+        return 0
+    return None
     return None
 
 
@@ -325,6 +334,7 @@ class Referentiel:
                 raise ErreurFormat(
                     f"{nom_fichier} : colonne(s) manquante(s) : {', '.join(sorted(manquantes))}"
                 )
+            a_sonder: list[tuple[int, str]] = []
             for numero, cellules in enumerate(lecteur, start=2):
                 if not any(c.strip() for c in cellules):
                     continue
@@ -365,12 +375,8 @@ class Referentiel:
                         "quantificateurs imbriques : son temps d'execution est exponentiel et elle "
                         "gelerait le cycle de TOUS les dossiers. Reecrivez-la plus simplement"
                     )
-                if classe == "a_sonder" and _sonder([motif_regex]) is not None:
-                    raise ErreurFormat(
-                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » ne termine pas "
-                        f"en {DELAI_SONDE_REGEX:g} s sur un texte d'essai : elle gelerait le cycle de "
-                        "TOUS les dossiers. Reecrivez-la plus simplement"
-                    )
+                if classe == "a_sonder":
+                    a_sonder.append((numero, motif_regex))
                 if statut not in STATUTS_REGLE:
                     raise ErreurFormat(
                         f"{nom_fichier} ligne {numero} : statut « {statut} » inconnu "
@@ -395,6 +401,15 @@ class Referentiel:
                     })
                     continue
                 apprises.setdefault(dossier, []).append((motif_regex, motif, nom))
+            if a_sonder:
+                rang = _sonder([m for _, m in a_sonder])      # un seul processus pour tout le fichier
+                if rang is not None:
+                    numero, motif_regex = a_sonder[rang]
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » ne termine pas "
+                        f"en {DELAI_SONDE_REGEX:g} s sur un texte d'essai (ou n'a pas pu etre verifiee) : "
+                        "elle gelerait le cycle de TOUS les dossiers. Reecrivez-la plus simplement"
+                    )
         return cls(apprises, provisoires)
 
     def exclure(self, operation: OperationBancaire) -> tuple[bool, str, str]:

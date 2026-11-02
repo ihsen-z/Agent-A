@@ -38,20 +38,30 @@ def lire_date(valeur: str) -> dt.date:
 
 _MONTANT_BRUT = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)")
 _MILLIERS_VIRGULE = re.compile(r"\d{1,3}(,\d{3})+\.\d+")
+_TROIS_DECIMALES = re.compile(r"[+-]?\d+[.,]\d{3}")
+_SYMBOLE_DEVISE = re.compile(r"^(EUR|\u20ac)|(EUR|\u20ac)$")
 
 
 def lire_montant(valeur: str) -> Decimal:
-    """Accepte 1 234,56 / 1.234,56 / 1,234.56 / 1234.56 / (1234,56) / -1 234,56.
+    """Accepte 1 234,56 / 1.234,56 / 1,234.56 / 1234.56 / (1234,56) / -1 234,56 / 12 EUR.
 
-    Refuse `NaN`, `Infinity`, la notation scientifique (`1E5`) et tout melange de
-    separateurs ambigu : un montant mal lu est PIRE qu'un refus (il justifierait ou
-    manquerait a tort un paiement, sans aucune alerte).
+    Refuse `NaN`, `Infinity`, la notation scientifique (`1E5`), un symbole de devise au
+    milieu du nombre (`12€50`), des parentheses mal appariees et tout format ambigu
+    (`1,234` : mille deux cent trente-quatre ou un virgule deux trois quatre ?) : un
+    montant mal lu est PIRE qu'un refus (il justifierait ou manquerait a tort un
+    paiement, sans aucune alerte).
     """
     brut = (valeur or "").strip().replace(" ", "").replace(" ", "")
     if not brut:
         return Decimal("0")
-    negatif = brut.startswith("(") and brut.endswith(")")
-    brut = brut.strip("()").replace("EUR", "").replace("€", "")
+    ouvrante, fermante = brut.startswith("("), brut.endswith(")")
+    if ouvrante != fermante or brut.count("(") != ouvrante or brut.count(")") != fermante:
+        raise ErreurFormat(f"Montant illisible : {valeur!r} (parentheses mal appariees)")
+    negatif = ouvrante
+    brut = brut[1:-1] if negatif else brut
+    brut = _SYMBOLE_DEVISE.sub("", brut)
+    if negatif and brut.startswith(("-", "+")):
+        raise ErreurFormat(f"Montant illisible : {valeur!r} (parentheses et signe)")
     if "," in brut and "." in brut:
         if _MILLIERS_VIRGULE.fullmatch(brut.lstrip("+-")):
             brut = brut.replace(",", "")                       # 1,234.56
@@ -60,6 +70,10 @@ def lire_montant(valeur: str) -> Decimal:
         else:
             raise ErreurFormat(f"Montant ambigu : {valeur!r} (separateurs melanges)")
     else:
+        if _TROIS_DECIMALES.fullmatch(brut):
+            raise ErreurFormat(
+                f"Montant ambigu : {valeur!r} (1,234 est-il 1 234 ou 1,234 ? ecrivez 1234,00 ou 1,23)"
+            )
         brut = brut.replace(",", ".")
     if not _MONTANT_BRUT.fullmatch(brut):
         raise ErreurFormat(f"Montant illisible : {valeur!r}")
@@ -93,6 +107,12 @@ def _lignes(f, fichier: str):
         entetes = [_entete(c) for c in (lecteur.fieldnames or [])]
     except csv.Error as erreur:
         raise ErreurFormat(f"{fichier} : en-tete illisible ({erreur})") from None
+    doublons = sorted({c for c in entetes if entetes.count(c) > 1})
+    if doublons:
+        raise ErreurFormat(
+            f"{fichier} : colonne(s) en double apres normalisation : {', '.join(doublons)} "
+            "(`Débit` et `debit` sont la meme colonne). La derniere ecraserait la premiere en silence"
+        )
     lecteur.fieldnames = entetes
 
     def iterer():
