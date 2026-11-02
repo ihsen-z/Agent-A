@@ -121,22 +121,57 @@ humain nommé avant envoi**, journal d'audit chaîné.
 
 ```bash
 # Une instance = un répertoire par cabinet (base, journal, validateurs, sorties)
-mkdir -p instance && echo "Alice Durand" > instance/validateurs.txt
+mkdir -p instance
+echo "Alice Durand" > instance/validateurs.txt
+# Essais : les envois sont redirigés vers test@exemple.invalid (jamais un vrai
+# destinataire) et le créneau d'envoi est libre. À retirer hors test.
+echo '{"mode_test": true}' > instance/config.json
 
 # 1. Un cycle : rapproche, crée les pièces attendues, route les e-mails de
 #    instance/entrant/, prépare les brouillons. Il n'envoie et ne valide JAMAIS rien.
 python3 scripts/cycle.py cycle --entree data/corpus --instance instance --date 2026-10-05
 
 # 2. Un humain relit puis valide (le nom doit figurer dans validateurs.txt)
-python3 scripts/cycle.py valider  --instance instance --par "Alice Durand" <id_brouillon>
+python3 scripts/cycle.py valider --instance instance --par "Alice Durand" <id_brouillon>
 
-# 3. Seul chemin d'émission : refuse tout brouillon non validé, refuse un renvoi
-python3 scripts/cycle.py envoyer  --instance instance <id_brouillon>
+# 3. Seul chemin d'émission. Nominatif (--par obligatoire) ; refuse tout brouillon non
+#    validé et tout renvoi. Produit un fichier .eml dans instance/outbox/.
+python3 scripts/cycle.py envoyer --instance instance --par "Alice Durand" <id_brouillon>
 
-# Suivi : pièces et états, file des messages non rattachés, intégrité du journal
-python3 scripts/cycle.py pieces --instance instance
-python3 scripts/cycle.py file   --instance instance
-python3 scripts/cycle.py verifier-audit --instance instance
+# Suivi : pièces et états, file des messages non rattachés, intégrité et contrôle
+python3 scripts/cycle.py pieces          --instance instance
+python3 scripts/cycle.py file            --instance instance
+python3 scripts/cycle.py verifier-audit  --instance instance
+python3 scripts/cycle.py controler-envois --instance instance
+```
+
+Les identifiants des brouillons sont affichés à la fin du cycle (`brouillons du jour`).
+
+**Sous Windows** (PowerShell), mêmes commandes avec `py -3.11` ; installer d'abord
+la base des fuseaux horaires, absente de Windows :
+
+```powershell
+py -3.11 -m pip install tzdata pytest
+$env:PYTHONUTF8 = 1
+mkdir instance
+Set-Content instance\validateurs.txt "Alice Durand"
+Set-Content instance\config.json '{"mode_test": true}'
+py -3.11 scripts\cycle.py cycle --entree data\corpus --instance instance --date 2026-10-05
+py -3.11 scripts\cycle.py valider --instance instance --par "Alice Durand" <id_brouillon>
+py -3.11 scripts\cycle.py envoyer --instance instance --par "Alice Durand" <id_brouillon>
+```
+
+La lecture isolée des e-mails est limitée en temps (pas en mémoire) sous Windows, et
+elle n'y a été **simulée** que sous Linux, jamais exécutée sur Windows : voir
+[docs/application_web.md](docs/application_web.md) et le workflow d'intégration
+continue (`.github/workflows/tests.yml`), qui exécute la suite sur Windows à chaque
+poussée.
+
+**Application web de test** (comptes locaux, écoute sur 127.0.0.1) :
+
+```bash
+python3 scripts/web.py creer-utilisateur --instance instance --identifiant alice --nom "Alice Durand" --role responsable
+python3 scripts/web.py servir --instance instance        # puis ouvrir http://127.0.0.1:8000
 ```
 
 Autres commandes : `rejeter`, `trancher` (envoi dont le résultat est inconnu),
