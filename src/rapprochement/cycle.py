@@ -253,6 +253,11 @@ class ModeInstanceIncompatible(ErreurCycle):
     """Le mode demande (test ou reel) n'est pas celui dans lequel l'instance a ete creee."""
 
 
+class BaseRecreee(ModeInstanceIncompatible):
+    """Le journal d'audit contient des decisions ou des envois que la base ignore (base supprimee,
+    recreee ou restauree d'une ancienne sauvegarde) : aucune ecriture n'est permise."""
+
+
 class JournalNonSain(ErreurCycle):
     """Le journal d'audit ne verifie pas : aucune ecriture n'est faite tant qu'il ne l'est pas."""
 
@@ -550,6 +555,50 @@ def _marqueurs_de_mode(inst: Instance) -> list[str]:
         return [m for m in MODES_INSTANCE if depot.est_vu(CLE_MODE_INSTANCE + m)]
 
 
+_ACTIONS_DE_BROUILLON = ("brouillon_cree", "valide", "rejete", "envoi_effectue", "envoi_confirme_par_humain",
+                         "envoi_repercute", "envoi_refuse", "envoi_mode_test")
+_MARQUES_DE_BROUILLON = tuple(f'"action":"{a}"'.encode() for a in _ACTIONS_DE_BROUILLON)
+
+
+def _brouillons_du_journal(inst: Instance) -> set[str]:
+    """Identifiants de brouillons dont le journal d'audit porte une decision ou un envoi
+    (creation, validation, rejet, envoi, repercussion). Une passe sur les octets, comme
+    `_modes_du_journal` (ligne illisible ignoree : la chaine est l'affaire de `verifier_audit`)."""
+    if not inst.audit.exists():
+        return set()
+    ids: set[str] = set()
+    for ligne in inst.audit.read_bytes().split(b"\n"):
+        if not any(m in ligne for m in _MARQUES_DE_BROUILLON):
+            continue
+        try:
+            entree = json.loads(ligne)
+        except ValueError:
+            continue
+        if isinstance(entree, dict) and entree.get("action") in _ACTIONS_DE_BROUILLON and entree.get("objet"):
+            ids.add(str(entree["objet"]))
+    return ids
+
+
+def _brouillons_en_base(inst: Instance) -> set[str]:
+    if not inst.depot.exists():
+        return set()
+    with Depot(inst.depot) as depot:
+        return {b.id_relance for b in depot.lister_brouillons()}
+
+
+def _decisions_ignorees_de_la_base(inst: Instance, connus: set[str]) -> list[str]:
+    """Brouillons dont le journal garde une decision ou un envoi et que la base ignore."""
+    return sorted(_brouillons_du_journal(inst) - connus)
+
+
+def _message_base_recreee(manquants: list[str]) -> str:
+    exemples = ", ".join(affichable(m) for m in manquants[:3]) + (" ..." if len(manquants) > 3 else "")
+    return (f"base recreee ou restauree : le journal d'audit contient des decisions ou des envois pour "
+            f"{len(manquants)} brouillon(s) que la base ignore ({exemples}). Un nouveau cycle perdrait "
+            "l'historique des envois et pourrait ecrire une seconde fois au meme destinataire : operation "
+            "refusee. Restaurer la base d'origine (sauvegarde), ou creer une nouvelle instance")
+
+
 def controler_mode(instance: Instance | Path | str) -> tuple[str, ...]:
     """Incoherences du mode fige (lecture seule), pour `controler-envois` et `verifier-audit` :
     deux marqueurs dans la base, journal portant les deux modes, base et journal en desaccord,
@@ -573,6 +622,9 @@ def controler_mode(instance: Instance | Path | str) -> tuple[str, ...]:
         problemes.append(f"la base dit {base} mais le journal ne contient aucune entree mode_instance")
     elif journal and not marqueurs:
         problemes.append(f"le journal dit {journal} mais le marqueur du depot est absent (base recreee ?)")
+    manquants = _decisions_ignorees_de_la_base(inst, _brouillons_en_base(inst))
+    if manquants:
+        problemes.append(_message_base_recreee(manquants))
     return tuple(problemes)
 
 
@@ -642,6 +694,10 @@ def _ouvrir(instance: Instance, *, ecriture: bool = False,
     try:
         if mode is not None:
             _exiger_mode(instance, depot, mode)
+        if ecriture:                                  # base recreee : l'historique des envois est perdu
+            manquants = _decisions_ignorees_de_la_base(instance, {b.id_relance for b in depot.lister_brouillons()})
+            if manquants:
+                raise BaseRecreee(_message_base_recreee(manquants))
         yield depot, journal
     finally:
         depot.fermer()
@@ -1936,34 +1992,73 @@ def _adresses_de(champ: str) -> list[str]:
     return trouvees
 
 
+_BOITES_GMAIL = frozenset({"gmail.com", "googlemail.com"})
+
+
+def _domaine_comparable(domaine: str) -> str:
+    """Domaine en forme normalisee (`routage.normaliser_domaine` : casse, point final) ; un domaine
+    accentue est ramene a sa forme punycode (`société.fr` -> `xn--socit-esab.fr`). Sens d'erreur sans
+    danger : le codec IDNA 2003 peut replier deux domaines distincts, ce qui REFUSE davantage."""
+    brut = (domaine or "").strip().lower().rstrip(".")
+    for essai in (brut, _punycode(brut)):
+        normal = routage.normaliser_domaine(essai)
+        if normal:
+            return normal
+    return brut
+
+
+def _punycode(domaine: str) -> str:
+    try:
+        return domaine.encode("idna").decode("ascii")
+    except UnicodeError:
+        return domaine
+
+
+def _boite_comparable(adresse: str) -> str | None:
+    """Cle de la BOITE : `routage._cle_boite` (casse, point final, suffixe +tag) ; pour Gmail, les
+    points de la partie locale sont sans effet et `googlemail.com` est `gmail.com`."""
+    cle = routage._cle_boite(adresse)
+    if cle is None:
+        return None
+    locale, domaine = cle.split("@")
+    domaine = _domaine_comparable(domaine)
+    if domaine in _BOITES_GMAIL:
+        locale, domaine = locale.replace(".", ""), "gmail.com"
+    return f"{locale}@{domaine}"
+
+
 def _controle_adresse_test(adresse_test: str, clients: Iterable[tuple[str, str]],
                            domaines_declares: Iterable[tuple[str, str]] = ()) -> None:
-    """Refuse (`ConfigInvalide`) une adresse de test qui est celle d'un client ou dont le domaine
-    est celui d'un client : un « envoi de test » partirait alors chez lui. `clients` : paires
-    (adresse, origine). Comparaison insensible a la casse. Le domaine d'un fournisseur de messagerie
-    GRAND PUBLIC (gmail.com...) ne prouve rien et n'est pas compare : seule l'adresse exacte l'est."""
-    test = adresse_test.strip().lower()
-    domaine_test = test.rpartition("@")[2]
+    """Refuse (`ConfigInvalide`) une adresse de test qui est la boite d'un client ou dont le domaine
+    est celui d'un client (ou un de ses sous-domaines) : un « envoi de test » partirait alors chez
+    lui. `clients` : paires (adresse, origine). Tout est compare en forme NORMALISEE (routage) : casse,
+    point final, punycode, suffixe +tag, boites Gmail equivalentes. Le domaine d'un fournisseur
+    GRAND PUBLIC (gmail.com...) ne prouve rien et n'est pas compare : seule la boite l'est."""
+    boite_test = _boite_comparable(adresse_test)
+    domaine_test = _domaine_comparable(adresse_test.rpartition("@")[2])
     commun = routage.est_domaine_grand_public(domaine_test)
+    conseil = f"Choisir une adresse sans client (par defaut {ADRESSE_TEST_DEFAUT})"
+
+    def dans(domaine_client: str) -> bool:
+        return bool(domaine_client) and (domaine_test == domaine_client or domaine_test.endswith("." + domaine_client))
+
     for adresse, origine in clients:
         for a in _adresses_de(adresse):
-            if a == test:
+            if boite_test is not None and _boite_comparable(a) == boite_test:
                 raise ConfigInvalide(
                     f"adresse_test {adresse_test!r} est l'adresse d'un client ({affichable(origine)}) : un essai "
-                    "lui ecrirait, alors que le mode test promet de ne JAMAIS ecrire a un client. "
-                    f"Choisir une adresse sans client (par defaut {ADRESSE_TEST_DEFAUT})"
+                    f"lui ecrirait, alors que le mode test promet de ne JAMAIS ecrire a un client. {conseil}"
                 )
-            if not commun and a.rpartition("@")[2] == domaine_test:
+            if not commun and dans(_domaine_comparable(a.rpartition("@")[2])):
                 raise ConfigInvalide(
                     f"adresse_test {adresse_test!r} est dans le domaine d'un client ({affichable(origine)}, "
-                    f"{domaine_test}) : un essai risquerait d'atterrir chez lui. "
-                    f"Choisir une adresse sans client (par defaut {ADRESSE_TEST_DEFAUT})"
+                    f"{domaine_test}) : un essai risquerait d'atterrir chez lui. {conseil}"
                 )
     for domaine, origine in domaines_declares:
-        if not commun and domaine.strip().lower().rstrip(".") == domaine_test:
+        if not commun and dans(_domaine_comparable(domaine)):
             raise ConfigInvalide(
                 f"adresse_test {adresse_test!r} est dans le domaine declare d'un client ({affichable(origine)}, "
-                f"{domaine_test}). Choisir une adresse sans client (par defaut {ADRESSE_TEST_DEFAUT})"
+                f"{domaine_test}). {conseil}"
             )
 
 
@@ -2717,6 +2812,7 @@ __all__ = [
     "LigneControleEnvoi",
     "LigneSuivi",
     "ModeInstanceIncompatible",
+    "BaseRecreee",
     "ReparationAudit",
     "ResumeCycle",
     "STRATEGIES_ISOLATION",

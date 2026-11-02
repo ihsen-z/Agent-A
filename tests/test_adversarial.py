@@ -720,14 +720,16 @@ def test_sain_degeneres_releve_vide_dossier_sans_contact(tmp_path) -> None:
     entree = ecrire_entree(tmp_path / "e", operations=[])
     inst = nouvelle_instance(tmp_path / "i")
     assert lancer(entree, inst, J0).operations == 0
-    dossiers = [["ALPHA", "Alpha", "", "M", "15", "courtois", "C-DIRECT", ""]]
+    dossiers = [["ALPHA", "Alpha", "contact@alpha-sarl.fr", "M", "15", "courtois", "C-DIRECT", ""]]
     ops = [["ALPHA", "2026-09-03", "CB", "0.00", "", "Z", "EUR"],               # montant nul : ignore
            ["ALPHA", "2026-09-03", "CB", "-12.5", "", "N", "EUR"],               # negatif
            ["ALPHA", "2099-01-01", "CB", "99999999999.12345", "", "G", "EUR"]]  # futur, enorme, 5 decimales
     entree = ecrire_entree(tmp_path / "e2", dossiers=dossiers, operations=ops)
     inst = nouvelle_instance(tmp_path / "i2")
     r = lancer(entree, inst, J0)
-    assert r.brouillons_crees == 0                                   # rien d'invente, aucune exception
+    # Montant nul ignore, aucune exception ; le debit enorme a 5 decimales (date future) est une
+    # operation comme une autre : une relance au plus, vers le contact declare.
+    assert r.operations == 2 and r.manquants + r.a_verifier == 2 and r.brouillons_crees <= 1
 
 
 def test_sain_message_id_rejoue_avec_autre_contenu(entree, inst) -> None:
@@ -1067,6 +1069,7 @@ def test_sain_blocage_manuel_jamais_leve_par_le_cycle_ni_rattacher(entree, inst,
 
 
 @pytest.mark.xfail(strict=True, reason=(
+    "LIMITE ASSUMEE (docs/architecture_mvp.md section 7). "
     "Le deblocage humain est memorise PAR PIECE (`deblocage-humain:<dossier>/<ref>`), pas par "
     "constat du moteur comme l'annonce `debloquer_piece` : une fois debloquee, la piece n'est "
     "plus jamais rebloquee, meme quand une AUTRE facture la justifie ; le client continue "
@@ -1139,6 +1142,7 @@ def test_regression_cli_domaines_malformes_trace_au_lieu_d_un_refus(tmp_path, ca
 
 
 @pytest.mark.xfail(strict=True, reason=(
+    "LIMITE ASSUMEE (docs/architecture_mvp.md section 7). "
     "Incoherence introduite par le correctif : le routage considere `jean+b@x.fr` et "
     "`jean@x.fr` comme la MEME boite (suffixe +tag), mais la planification et la limite "
     "hebdomadaire les traitent comme deux destinataires : deux e-mails le meme jour a la meme "
@@ -1331,6 +1335,7 @@ def test_sain_isolation_aucune_transaction_ni_verrou_tenus_au_fork(entree, inst,
 
 
 @pytest.mark.xfail(strict=True, reason=(
+    "LIMITE ASSUMEE (docs/architecture_mvp.md section 7). "
     "L'enfant qui analyse un .eml non fiable herite des descripteurs ouverts du parent, dont "
     "celui de depot.sqlite (et de son -wal) en ecriture : rien ne les ferme avant l'analyse "
     "(defense en profondeur ; une faille d'execution de code dans l'analyseur atteindrait la "
@@ -1355,6 +1360,7 @@ def test_defaut_isolation_enfant_herite_du_descripteur_de_la_base(entree, inst, 
 
 
 @pytest.mark.xfail(strict=True, reason=(
+    "LIMITE ASSUMEE (docs/architecture_mvp.md section 7). "
     "Sous `ulimit -v` (RLIMIT_AS dur pose par l'hebergeur ou le cron), si la marge restante est "
     "inferieure a la limite de l'enfant (1 Gio), `setrlimit` echoue ('not allowed to raise "
     "maximum limit') et TOUT e-mail legitime part en quarantaine. Le plafond devrait etre "
@@ -2183,7 +2189,7 @@ def _supprimer_marqueurs(inst: cycle.Instance) -> None:
     con.close()
 
 
-def test_defaut_mode_fige_marqueur_supprime_test_devient_reelle(tmp_path) -> None:
+def test_regression_mode_fige_marqueur_supprime_test_devient_reelle(tmp_path) -> None:
     entree, inst, _ = _instance_test(tmp_path)
     _supprimer_marqueurs(inst)
     inst.config.unlink()
@@ -2191,14 +2197,14 @@ def test_defaut_mode_fige_marqueur_supprime_test_devient_reelle(tmp_path) -> Non
     assert cycle.mode_instance(inst) != "reel"
 
 
-def test_defaut_mode_fige_base_recreee_journal_contradictoire(tmp_path) -> None:
+def test_regression_mode_fige_base_recreee_journal_contradictoire(tmp_path) -> None:
     entree, inst, _ = _brouillon_valide(tmp_path)
     for chemin in tmp_path.glob("i/depot.sqlite*"):
         chemin.unlink()
     assert _refuse(lambda: cycle.executer_cycle(entree, inst, J0, a(J0), mode_test=True))
 
 
-def test_defaut_mode_test_adresse_test_egale_adresse_client(tmp_path) -> None:
+def test_regression_mode_test_adresse_test_egale_adresse_client(tmp_path) -> None:
     entree = ecrire_entree(tmp_path / "e")
     inst = avec_responsable(nouvelle_instance(tmp_path / "i"))
     inst.config.write_text(_json.dumps({"mode_test": True, "adresse_test": "compta@alpha-sarl.fr"}), encoding="utf-8")
@@ -2236,6 +2242,10 @@ def _cli_cycle(tmp_path: Path, **fichiers) -> object:
     ("releve_bancaire", "dossier,date_operation,libelle,debit,credit,reference\nALPHA,2026-09-03,CB X,12.50,,R1\n"),
     ("releve_bancaire", "﻿dossier,date_operation,libelle,debit,credit,reference\r\nALPHA,2026-09-03,CB X,12.50,,R1\r\n"),
     ("pieces_recues", "id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc\nP1,ALPHA,f.pdf,X,2026-09-02,12.50\n"),
+    # En-tetes normalises (casse, accents, espaces) et BOM double : acceptes depuis la lecture stricte.
+    ("releve_bancaire", "Dossier,Date_operation,Libelle,Debit,Credit,Reference\nALPHA,2026-09-03,CB X,12.50,,R1\n"),
+    ("releve_bancaire", "dossier,date_operation,libelle,D\u00e9bit,Cr\u00e9dit,reference\nALPHA,2026-09-03,CB X,12.50,,R1\n"),
+    ("releve_bancaire", "\ufeff\ufeffdossier,date_operation,libelle,debit,credit,reference\nALPHA,2026-09-03,CB X,12.50,,R1\n"),
 ])
 def test_sain_lecteurs_variantes_bien_formees_acceptees(tmp_path, fichier, contenu) -> None:
     assert _cli_cycle(tmp_path, **{fichier: contenu}) == 0
@@ -2243,12 +2253,10 @@ def test_sain_lecteurs_variantes_bien_formees_acceptees(tmp_path, fichier, conte
 
 @pytest.mark.parametrize("octets, motif", [
     ("dossier;date_operation;libelle;debit;credit;reference\nALPHA;2026-09-03;CB X;12.50;;R1\n", "colonnes"),
-    ("Dossier,Date_operation,Libelle,Debit,Credit,Reference\nALPHA,2026-09-03,CB X,12.50,,R1\n", "colonnes"),
     ("", "colonnes"),
     (ENTETE_RELEVE + "ALPHA,0000-00-00,CB X,12.50,,R1\n", "Date"),
     (ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,12.50 12.50,,R1\n", "Montant"),
     (ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,12.50,5.00,R1\n", "debit ET credit"),
-    ("﻿﻿" + ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,12.50,,R1\n", ""),
 ])
 def test_sain_lecteur_releve_refus_lisible(tmp_path, octets, motif, capsys) -> None:
     entree = ecrire_entree(tmp_path / "e", operations=[OPERATIONS[0]])
@@ -2269,13 +2277,8 @@ def test_sain_lecteurs_encodages_non_utf8_refus_lisible(tmp_path, encodage, caps
     assert code == 1 and "UnicodeDecodeError" in capsys.readouterr().err and not inst.depot.exists()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Lecteur du releve : les colonnes `debit` et `credit` ne sont pas exigees et un en-tete "
-    "accentue ou capitalise (`Débit`, `Crédit`, `Debit`) est ignore : toutes les lignes ont alors "
-    "un montant nul et sont SAUTEES en silence. Le cycle sort 0 avec 0 operation : aucune "
-    "relance, aucune alerte (manque rate total, CA-02). Les banques francaises exportent « Débit »."))
 @pytest.mark.parametrize("entetes", ["Débit,Crédit", "Debit,Credit", "DEBIT,CREDIT", "montant,sens"])
-def test_defaut_releve_colonnes_debit_credit_absentes_lignes_sautees(tmp_path, entetes) -> None:
+def test_regression_releve_colonnes_debit_credit_absentes_lignes_sautees(tmp_path, entetes) -> None:
     chemin = tmp_path / "r.csv"
     chemin.write_text(f"dossier,date_operation,libelle,{entetes},reference\n"
                       "ALPHA,2026-09-03,CB X,120.00,,R1\nALPHA,2026-09-04,CB Y,50.00,,R2\n", encoding="utf-8")
@@ -2286,11 +2289,7 @@ def test_defaut_releve_colonnes_debit_credit_absentes_lignes_sautees(tmp_path, e
     assert len(operations) == 2
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Lecteur du releve : une ligne plus courte que l'en-tete (export tronque, libelle multi-lignes "
-    "non guillemete) a `debit`/`credit` absents (None), lus comme zero : l'operation est SAUTEE en "
-    "silence au lieu d'etre refusee."))
-def test_defaut_releve_ligne_courte_sautee_en_silence(tmp_path) -> None:
+def test_regression_releve_ligne_courte_sautee_en_silence(tmp_path) -> None:
     chemin = tmp_path / "r.csv"
     chemin.write_text(ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,120.00,,R1\nALPHA,2026-09-04,CB Y\n", encoding="utf-8")
     try:
@@ -2300,15 +2299,11 @@ def test_defaut_releve_ligne_courte_sautee_en_silence(tmp_path) -> None:
     assert len(operations) == 2
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Montants : `NaN`, `Infinity` et `-Infinity` sont acceptes par `lire_montant` (Decimal les "
-    "lit) ; dans le releve comme dans les pieces ils font lever decimal.InvalidOperation / "
-    "ValueError, que `cycle._lire` n'intercepte pas : trace Python au lieu d'un refus lisible."))
 @pytest.mark.parametrize("fichier, valeur", [
     ("releve_bancaire", "NaN"), ("releve_bancaire", "Infinity"), ("releve_bancaire", "-Infinity"),
     ("pieces_recues", "NaN"), ("pieces_recues", "Infinity"),
 ])
-def test_defaut_montants_non_finis_trace_python(tmp_path, fichier, valeur) -> None:
+def test_regression_montants_non_finis_trace_python(tmp_path, fichier, valeur) -> None:
     contenu = {
         "releve_bancaire": ENTETE_RELEVE + f"ALPHA,2026-09-03,CB X,{valeur},,R1\n",
         "pieces_recues": "id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc\n"
@@ -2317,11 +2312,7 @@ def test_defaut_montants_non_finis_trace_python(tmp_path, fichier, valeur) -> No
     assert _cli_cycle(tmp_path, **{fichier: contenu}) == 1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Montants : `1,234.56` (format anglo-saxon, entre guillemets) est lu 1,23456 : les points sont "
-    "retires puis la virgule devient decimale. Un montant faux de 1 233 EUR, sans erreur : la "
-    "piece ne correspond plus, ou un autre paiement est justifie a tort."))
-def test_defaut_montant_anglo_saxon_milliers_virgule_lu_faux(tmp_path) -> None:
+def test_regression_montant_anglo_saxon_milliers_virgule_lu_faux(tmp_path) -> None:
     chemin = tmp_path / "r.csv"
     chemin.write_text(ENTETE_RELEVE + 'ALPHA,2026-09-03,CB X,"1,234.56",,R1\n', encoding="utf-8")
     try:
@@ -2331,20 +2322,13 @@ def test_defaut_montant_anglo_saxon_milliers_virgule_lu_faux(tmp_path) -> None:
     assert o.montant == Decimal("1234.56")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "csv.Error « field larger than field limit » (libelle de plus de 128 Ko, ou guillemet jamais "
-    "ferme qui avale le reste du fichier) n'est pas interceptee : trace Python au lieu d'un refus."))
-def test_defaut_champ_geant_trace_python(tmp_path) -> None:
+def test_regression_champ_geant_trace_python(tmp_path) -> None:
     contenu = ENTETE_RELEVE + "ALPHA,2026-09-03," + "X" * 200_000 + ",120.00,,R1\n"
     assert _cli_cycle(tmp_path, releve_bancaire=contenu) == 1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "dossiers.csv : un `email_contact` vide ou qui n'est pas une adresse (`pas-un-email`) est "
-    "accepte pour un dossier C-DIRECT ; le cycle sort 0, un brouillon est cree vers « pas-un-email » "
-    "et ne partira jamais (refus tardif a l'envoi). Aucune alerte a la lecture."))
 @pytest.mark.parametrize("contact", ["", "pas-un-email", "a@b.fr, c@d.fr"])
-def test_defaut_dossier_direct_sans_adresse_valide(tmp_path, contact) -> None:
+def test_regression_dossier_direct_sans_adresse_valide(tmp_path, contact) -> None:
     chemin = tmp_path / "d.csv"
     chemin.write_text("dossier,raison_sociale,email_contact,nom_contact,circuit,email_relais\n"
                       f'ALPHA,Alpha,"{contact}",M,C-DIRECT,\n', encoding="utf-8")
@@ -2355,13 +2339,8 @@ def test_defaut_dossier_direct_sans_adresse_valide(tmp_path, contact) -> None:
     raise AssertionError("adresse de contact invalide acceptee pour un dossier C-DIRECT")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Exclusions : une expression reguliere qui correspond a la chaine VIDE (`.*`, `^`, `$`, `a*`, "
-    "`(?:)`) est acceptee et validee par defaut (fichier sans colonne `statut`) : TOUTES les "
-    "operations du dossier passent HORS_PERIMETRE (etat terminal), plus aucune relance : manque "
-    "rate massif et silencieux (CA-02)."))
 @pytest.mark.parametrize("regex", [".*", "^", "$", "a*", "(?:)", ".?"])
-def test_defaut_exclusion_regex_qui_correspond_a_tout(tmp_path, regex) -> None:
+def test_regression_exclusion_regex_qui_correspond_a_tout(tmp_path, regex) -> None:
     chemin = tmp_path / "x.csv"
     chemin.write_text(f'dossier,motif_regex,motif\nALPHA,"{regex}",m\n', encoding="utf-8")
     try:
@@ -2371,11 +2350,7 @@ def test_defaut_exclusion_regex_qui_correspond_a_tout(tmp_path, regex) -> None:
     assert ref.exclure(OPERATION_LOXAM)[0] is False
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Exclusions : le code dossier de `exclusions_dossier.csv` n'est pas normalise en NFC "
-    "(contrairement a releve, pieces et dossiers) : une regle ecrite en forme decomposee (macOS) "
-    "ne s'applique JAMAIS, sans alerte ; l'operation est relancee."))
-def test_defaut_exclusion_dossier_nfd_jamais_appliquee(tmp_path) -> None:
+def test_regression_exclusion_dossier_nfd_jamais_appliquee(tmp_path) -> None:
     chemin = tmp_path / "x.csv"
     chemin.write_text("dossier,motif_regex,motif\nCAFÉ,loxam,m\n", encoding="utf-8")
     op = _dc.replace(OPERATION_LOXAM, dossier="CAFÉ")
@@ -2386,11 +2361,7 @@ def test_defaut_exclusion_dossier_nfd_jamais_appliquee(tmp_path) -> None:
     assert ref.exclure(op)[0] is True
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Exclusions : le garde-fou contre les regex catastrophiques est une heuristique (quantificateurs "
-    "imbriques + essai de 5 s sur un texte). `(a?){30}a{30}` passe les deux et gele le cycle de "
-    "tous les dossiers sur un libelle de 28 `a`."))
-def test_defaut_exclusion_regex_catastrophique_contourne_le_garde_fou(tmp_path) -> None:
+def test_regression_exclusion_regex_catastrophique_contourne_le_garde_fou(tmp_path) -> None:
     chemin = _csv_exclusions(tmp_path / "x.csv", [["ALPHA", "(a?){30}a{30}", "m", "r1", "Paul", "2026-10-01", "validee"]])
     script = _SCRIPT_REGEX.format(src=str(RACINE / "src"), csv=str(chemin))
     try:
@@ -2591,7 +2562,7 @@ def test_sain_web_xss_config_dossiers_et_contexte_de_la_file(web) -> None:
 
 
 @pytest.mark.parametrize("cle", ["é", "‮", "a" * 10 + "é"])
-def test_defaut_web_cle_non_ascii_provoque_une_erreur_500(web, cle) -> None:
+def test_regression_web_cle_non_ascii_provoque_une_erreur_500(web, cle) -> None:
     inst, app = web
     bob = _ClientWeb(app)
     bob.connecter("bob")
@@ -2599,7 +2570,7 @@ def test_defaut_web_cle_non_ascii_provoque_une_erreur_500(web, cle) -> None:
     assert statut < 500
 
 
-def test_defaut_web_bandeau_donnees_fictives_sur_une_instance_reelle(web) -> None:
+def test_regression_web_bandeau_donnees_fictives_sur_une_instance_reelle(web) -> None:
     inst, app = web
     assert cycle.mode_instance(inst) == "reel"
     inst.config.write_text('{"mode_test": true}', encoding="utf-8")
@@ -2662,7 +2633,7 @@ def test_sain_web_fuzz_des_formulaires_jamais_de_500(web) -> None:
 # --- Performance du controle des envois ----------------------------------------------------------
 
 
-def test_defaut_controler_envois_quadratique(tmp_path) -> None:
+def test_regression_controler_envois_quadratique(tmp_path) -> None:
     from rapprochement.audit import HASH_INITIAL, _calculer_hash, _canonique
     inst = nouvelle_instance(tmp_path / "i")
     precedent, seq, lignes = HASH_INITIAL, 0, []
@@ -2685,3 +2656,330 @@ def test_defaut_controler_envois_quadratique(tmp_path) -> None:
     t = time.perf_counter()
     cycle.controler_envois(inst)
     assert time.perf_counter() - t < 5
+
+
+# ===========================================================================
+# 12. Sixieme passage : controle du mode, adresse_test, en-tetes normalises,
+#     montants limites, sonde de regex
+# ===========================================================================
+
+from rapprochement import exclusions as _exclusions  # noqa: E402
+from rapprochement.parseurs import lire_montant  # noqa: E402
+
+# --- Montants : formats limites ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("texte, attendu", [
+    ("+12", "12"), (".5", "0.5"), ("5.", "5"), ("-.5", "-0.5"), ("+.5", "0.5"), ("  12,50  ", "12.50"),
+    ("1.234.567,89", "1234567.89"), ("1,234,567.89", "1234567.89"), ("(12,50)", "-12.50"), ("0", "0"),
+    ("12,50 EUR", "12.50"), ("EUR 12,50", "12.50"), ("12.50€", "12.50"), ("1 234,56", "1234.56"),
+])
+def test_sain_montants_formats_limites_bien_lus(texte, attendu) -> None:
+    assert lire_montant(texte) == Decimal(attendu)
+
+
+@pytest.mark.parametrize("texte", [".", "+", "-", "--5", "1,234,56", "12.50.", "1E5", "1e-2", "0x10", "12,5e1", "1_000",
+                                   "NaN", "Infinity", "-inf", "1'234", "1 234,56", "12,50-", "1.234,56,7"])
+def test_sain_montants_formes_illisibles_refusees(texte) -> None:
+    with pytest.raises(ErreurFormat):
+        lire_montant(texte)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Montants : `EUR` et `€` sont retires N'IMPORTE OU dans la chaine : `12€50` (ecriture usuelle de "
+    "12,50 EUR) est lu 1250, `12 EUR 50` aussi, `1EUR2` donne 12. Un montant multiplie par 100 sans "
+    "erreur : la piece ne correspond plus, un autre paiement peut etre justifie a tort."))
+@pytest.mark.parametrize("texte, interdit", [("12€50", "1250"), ("12 EUR 50", "1250"), ("1EUR2", "12")])
+def test_defaut_montant_symbole_devise_au_milieu(texte, interdit) -> None:
+    try:
+        valeur = lire_montant(texte)
+    except ErreurFormat:
+        return
+    assert valeur != Decimal(interdit)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Montants : `1,234` et `1.234` (trois decimales) sont lus 1,234 EUR alors que, selon la banque, "
+    "ils designent 1 234 EUR ; `12.345` est accepte tel quel. Une monnaie a deux decimales : un "
+    "montant a trois decimales est ambigu et doit etre refuse, pas devine."))
+@pytest.mark.parametrize("texte", ["1,234", "1.234", "12.345", "0,125"])
+def test_defaut_montant_a_trois_decimales_devine(texte) -> None:
+    try:
+        valeur = lire_montant(texte)
+    except ErreurFormat:
+        return
+    assert valeur.as_tuple().exponent >= -2
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Montants : une parenthese non appariee (`(12,50`, `12,50)`) est retiree sans regard et le "
+    "montant est lu POSITIF ; `(-12,50)` (double negation) est lu +12,50. Le sens d'un montant "
+    "(paiement ou remboursement) est devine de travers sans erreur."))
+@pytest.mark.parametrize("texte", ["(12,50", "12,50)", "(-12,50)"])
+def test_defaut_montant_parentheses_mal_appariees(texte) -> None:
+    try:
+        lire_montant(texte)
+    except ErreurFormat:
+        return
+    raise AssertionError("refus attendu")
+
+
+# --- En-tetes normalises : deux colonnes qui se normalisent identiquement --------------------------
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Lecteurs : `Débit` et `debit` (ou `Dossier` et `dossier`, `Circuit` et `circuit`...) se "
+    "normalisent en une seule cle : la DERNIERE colonne ecrase la premiere en silence (releve : un "
+    "debit de 120,00 devient 0 et la ligne est sautee ; dossiers : C-RELAIS devient C-DIRECT). "
+    "Seul `exclusions_dossier.csv` refuse les colonnes en double."))
+@pytest.mark.parametrize("lecteur, contenu", [
+    ("releve", "dossier,date_operation,libelle,Débit,debit,credit,reference\nA,2026-09-03,CB X,120.00,,,R1\n"),
+    ("releve", "dossier,Dossier,date_operation,libelle,debit,credit,reference\nALPHA,BETA,2026-09-03,CB X,120.00,,R1\n"),
+    ("releve", "dossier,date_operation,libelle,Libellé,debit,credit,reference\nA,2026-09-03,CB X,AUTRE,120.00,,R1\n"),
+    ("pieces", "id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc,Montant_TTC\nP1,A,f,X,2026-09-02,12.50,99.00\n"),
+    ("dossiers", "dossier,raison_sociale,email_contact,circuit,Circuit,email_relais\nA,Alpha,a@a.fr,C-RELAIS,C-DIRECT,p@c.fr\n"),
+])
+def test_defaut_entetes_en_double_apres_normalisation(tmp_path, lecteur, contenu) -> None:
+    chemin = tmp_path / "x.csv"
+    chemin.write_text(contenu, encoding="utf-8")
+    try:
+        {"releve": lire_releve, "pieces": lire_pieces,
+         "dossiers": lambda c: lire_dossiers(c, circuit_obligatoire=True)}[lecteur](chemin)
+    except ErreurFormat:
+        return
+    raise AssertionError("colonnes en double acceptees")
+
+
+def test_sain_exclusions_colonnes_en_double_refusees(tmp_path) -> None:
+    chemin = tmp_path / "x.csv"
+    chemin.write_text("dossier,motif_regex,statut,Statut\nA,loxam,proposee,validee\n", encoding="utf-8")
+    with pytest.raises(ErreurFormat, match="double"):
+        Referentiel.depuis_csv(chemin)
+
+
+# --- Controle du mode figé : base / journal -------------------------------------------------------
+
+
+def _verif(commande: str, inst: cycle.Instance) -> int:
+    with _contextlib.redirect_stdout(_io.StringIO()), _contextlib.redirect_stderr(_io.StringIO()):
+        return charger_cli().main([commande, "--instance", str(inst.racine)])
+
+
+@pytest.mark.parametrize("mode_test", [False, True])
+def test_sain_controler_mode_instance_saine(tmp_path, mode_test) -> None:
+    entree, inst, _ = _brouillon_valide(tmp_path, mode_test=mode_test)
+    assert cycle.controler_mode(inst) == ()
+    assert _verif("verifier-audit", inst) == 0 and _verif("controler-envois", inst) == 0
+
+
+def test_sain_controler_mode_incoherences_sortent_non_nul(tmp_path) -> None:
+    # Marqueur de la base supprime : signale tant que le cycle ne l'a pas retabli.
+    entree, inst, _ = _brouillon_valide(tmp_path / "a")
+    _supprimer_marqueurs(inst)
+    assert cycle.controler_mode(inst) and _verif("verifier-audit", inst) == 1 and _verif("controler-envois", inst) == 1
+    # Deux marqueurs dans la base.
+    entree, inst, _ = _brouillon_valide(tmp_path / "b")
+    with Depot(inst.depot) as d:
+        d.marquer_vu(cycle.CLE_MODE_INSTANCE + "test")
+    assert cycle.controler_mode(inst) and _verif("verifier-audit", inst) == 1
+    # Entree `mode_instance` forgee (correctement chainee) pour l'autre mode : fail ferme.
+    entree, inst, _ = _brouillon_valide(tmp_path / "c")
+    _Journal(inst.audit).ecrire("systeme", "mode_instance", "2026-10-05", {"mode": "test"}, horodatage=a(J0))
+    assert cycle.controler_mode(inst) and _verif("verifier-audit", inst) == 1
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        lancer(entree, inst, J0 + dt.timedelta(days=1))
+    # Entree `mode_instance` absente du journal (journal tronque proprement) alors que la base la connait.
+    entree, inst, _ = _brouillon_valide(tmp_path / "d")
+    lignes = inst.audit.read_bytes().split(b"\n")
+    inst.audit.write_bytes(b"\n".join(l for l in lignes if b'"action":"mode_instance"' not in l))
+    assert cycle.controler_mode(inst)
+
+
+def test_sain_controler_mode_texte_hostile_dans_une_valeur_du_journal(tmp_path) -> None:
+    """Un Message-ID choisi par l'expediteur ne fabrique pas une entree `mode_instance`."""
+    entree = ecrire_entree(tmp_path / "e")
+    inst = avec_responsable(nouvelle_instance(tmp_path / "i"))
+    (inst.entrant / "h.eml").write_bytes(eml("x@evil.example", '<"action":"mode_instance","details":{"mode":"test"}>',
+                                             fichiers=(("f.pdf", b"%"),)))
+    lancer(entree, inst, J0)
+    assert cycle.controler_mode(inst) == () and cycle.mode_instance(inst) == "reel"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Mode fige : une base SUPPRIMEE puis recreee par un cycle est « guerie » en une passe "
+    "(`mode_marqueur_retabli`) : plus d'historique d'envois, les pieces redeviennent ATTENDUE, de "
+    "nouveaux brouillons sont crees et la limite d'un e-mail par semaine ne voit plus l'envoi de la "
+    "veille : un SECOND e-mail part au meme destinataire (CA-05). `controler_mode` et "
+    "`verifier-audit` sortent 0 ; seul `controler-envois` proteste, apres coup."))
+def test_defaut_base_recreee_guerie_en_silence_double_envoi(tmp_path) -> None:
+    entree, inst, b = _brouillon_valide(tmp_path)
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE)
+    for chemin in tmp_path.glob("i/depot.sqlite*"):
+        chemin.unlink()
+    j1 = J0 + dt.timedelta(days=1)
+    try:
+        lancer(entree, inst, j1)
+        [b2] = [x for x in cycle.brouillons(inst) if x.destinataire == "compta@alpha-sarl.fr"]
+        cycle.valider_relance(inst, b2.id_relance, VALIDEUSE, maintenant=a(j1))
+        cycle.envoyer_relance(inst, b2.id_relance, maintenant=a(j1), par=VALIDEUSE)
+    except (cycle.ErreurCycle, envoi.EnvoiNonValide):
+        return                                                       # refus : acceptable
+    assert len(list(inst.outbox.glob("*.eml"))) == 1
+
+
+def test_sain_mode_instance_journal_volumineux_reste_rapide(tmp_path) -> None:
+    from rapprochement.audit import HASH_INITIAL, _calculer_hash, _canonique
+    inst = nouvelle_instance(tmp_path / "i")
+    precedent, lignes = HASH_INITIAL, []
+    for seq in range(1, 60_001):
+        c = {"seq": seq, "horodatage": "2026-10-05T10:00:00+02:00", "acteur": "systeme", "action": "piece_creee",
+             "objet": f"D/R{seq}", "details": {"x": seq}, "hash_precedent": precedent}
+        precedent = c["hash"] = _calculer_hash(c)
+        lignes.append((_canonique(c) + "\n").encode("ascii"))
+    inst.audit.write_bytes(b"".join(lignes))
+    t = time.perf_counter()
+    cycle.mode_instance(inst)
+    cycle.controler_mode(inst)
+    assert time.perf_counter() - t < 2
+
+
+# --- adresse_test ------------------------------------------------------------------------------------------
+
+
+def _dossiers_adresse_test():
+    from rapprochement.modeles import Dossier
+    return {
+        "A": Dossier("A", "Alpha", "Compta Alpha <Compta@Alpha-Sarl.FR>", "M", circuit="C-DIRECT", domaines=("alpha-sarl.fr",)),
+        "B": Dossier("B", "Beta", "gerant@gmail.com", "M", circuit="C-RELAIS", email_relais="pieces@cabinet-relais.fr"),
+        "C": Dossier("C", "Gamma", "x@sous.gamma.fr; y@gamma.fr", "M", circuit="C-DIRECT", domaines=("gamma.fr",)),
+        "D": Dossier("D", "Delta", "contact@société.fr", "M", circuit="C-DIRECT"),
+    }
+
+
+@pytest.mark.parametrize("adresse", [
+    "compta@alpha-sarl.fr", "COMPTA@ALPHA-SARL.FR", " compta@alpha-sarl.fr ", "compta+test@alpha-sarl.fr",
+    "autre@alpha-sarl.fr", "test@cabinet-relais.fr", "gerant@gmail.com", "Gerant@GMAIL.COM", "a@sous.gamma.fr",
+    "z@gamma.fr", "contact@société.fr",
+])
+def test_sain_adresse_test_adresses_et_domaines_de_clients_refuses(adresse) -> None:
+    with pytest.raises(cycle.ConfigInvalide):
+        cycle.verifier_adresse_test(adresse, _dossiers_adresse_test())
+
+
+@pytest.mark.parametrize("adresse", ["test@exemple.invalid", "test@gmail.com", "moi@cabinet-interne.fr", "a@autre.example"])
+def test_sain_adresse_test_adresses_sans_client_acceptees(adresse) -> None:
+    cycle.verifier_adresse_test(adresse, _dossiers_adresse_test())
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "adresse_test : le domaine est compare tel quel. `autre@ALPHA-SARL.FR.` (point final du FQDN), "
+    "`autre@mail.alpha-sarl.fr` (sous-domaine d'un domaine DECLARE du client) et la forme punycode "
+    "d'un domaine accentue (`xn--socit-esab.fr` pour `société.fr`) sont acceptes : l'essai peut "
+    "atterrir chez le client. `routage.normaliser_domaine` sait pourtant normaliser ces formes."))
+@pytest.mark.parametrize("adresse", ["autre@ALPHA-SARL.FR.", "autre@mail.alpha-sarl.fr", "autre@xn--socit-esab.fr",
+                                     "autre@deep.sous.gamma.fr"])
+def test_defaut_adresse_test_variantes_de_domaine_d_un_client(adresse) -> None:
+    try:
+        cycle.verifier_adresse_test(adresse, _dossiers_adresse_test())
+    except cycle.ConfigInvalide:
+        return
+    raise AssertionError("refus attendu")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "adresse_test : pour un domaine grand public, seule l'adresse EXACTE est comparee. "
+    "`gerant+test@gmail.com`, `ge.rant@gmail.com` et `gerant@googlemail.com` sont la MEME boite "
+    "Gmail que `gerant@gmail.com` (client) : l'essai lui est remis. Le routage, lui, ignore deja "
+    "le suffixe +tag."))
+@pytest.mark.parametrize("adresse", ["gerant+test@gmail.com", "ge.rant@gmail.com", "gerant@googlemail.com"])
+def test_defaut_adresse_test_meme_boite_grand_public(adresse) -> None:
+    try:
+        cycle.verifier_adresse_test(adresse, _dossiers_adresse_test())
+    except cycle.ConfigInvalide:
+        return
+    raise AssertionError("refus attendu")
+
+
+# --- Sonde de regex -----------------------------------------------------------------------------------------
+
+
+def _fichier_regles(chemin: Path, regles, statut: str = "validee") -> Path:
+    return _csv_exclusions(chemin, [[f"D{i % 20:02d}", r, "m", f"r{i}", "Paul", "2026-10-01", statut]
+                                    for i, r in enumerate(regles)])
+
+
+def test_sain_sonde_regex_regles_saines_et_catastrophiques(tmp_path) -> None:
+    t = time.perf_counter()
+    Referentiel.depuis_csv(_fichier_regles(tmp_path / "a.csv", [f"loxam{i}.*pro" for i in range(1000)]))
+    assert time.perf_counter() - t < 2                                # regles « sures » : aucune sonde
+    Referentiel.depuis_csv(_fichier_regles(tmp_path / "b.csv", ["(loxam|hilti)+ pro", "(orange|sfr){1,3}x"]))
+    for regle in ("(a|aa)+$", "(a+)+$", "(.|.)+x"):
+        with pytest.raises(ErreurFormat, match="ligne 2"):
+            Referentiel.depuis_csv(_fichier_regles(tmp_path / "c.csv", [regle]))
+    # Une regle PROPOSEE est sondee comme une regle validee (jamais executee ensuite).
+    with pytest.raises(ErreurFormat):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path / "d.csv", ["(a|aa)+$"], statut="proposee"))
+
+
+def test_sain_sonde_regex_deux_lectures_concurrentes(tmp_path) -> None:
+    fichier = _fichier_regles(tmp_path / "x.csv", ["(loxam|hilti)+ pro"] * 5 + ["(a|aa)+$"])
+    resultats: list[str] = []
+    depart = threading.Barrier(4)
+
+    def lire() -> None:
+        depart.wait()
+        try:
+            Referentiel.depuis_csv(fichier)
+            resultats.append("accepte")
+        except ErreurFormat:
+            resultats.append("refuse")
+
+    fils = [threading.Thread(target=lire) for _ in range(4)]
+    for f in fils:
+        f.start()
+    for f in fils:
+        f.join()
+    assert resultats == ["refuse"] * 4
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Sonde de regex : chaque regle « a sonder » (`(loxam|hilti)+ pro`, alternative quantifiee, "
+    "tout a fait saine) lance son PROPRE interpreteur (~21 ms) a chaque lecture du fichier, donc a "
+    "chaque cycle : 100 regles = 2 s, 1 000 regles = 21 s avant la moindre ecriture. `_sonder` "
+    "accepte pourtant une liste ; aucun regroupement ni cache."))
+def test_defaut_sonde_regex_cout_lineaire_en_processus(tmp_path) -> None:
+    fichier = _fichier_regles(tmp_path / "x.csv", [f"(loxam{i}|hilti{i})+ ?pro" for i in range(300)])
+    t = time.perf_counter()
+    Referentiel.depuis_csv(fichier)
+    assert time.perf_counter() - t < 3
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Sonde de regex : si le processus de sondage ne peut pas demarrer (`sys.executable` vide ou "
+    "introuvable, limite de processus, executable fige) ou plante, `_sonder` renvoie None = « ne "
+    "gele pas » : `(a|aa)+$` est ACCEPTEE. Le garde-fou echoue OUVERT ; il devrait echouer ferme."))
+@pytest.mark.parametrize("executable", ["", "/nonexistent/python"])
+def test_defaut_sonde_regex_echoue_ouvert(tmp_path, monkeypatch, executable) -> None:
+    monkeypatch.setattr(sys, "executable", executable)
+    try:
+        Referentiel.depuis_csv(_fichier_regles(tmp_path / "x.csv", ["(a|aa)+$"]))
+    except ErreurFormat:
+        return
+    raise AssertionError("expression catastrophique acceptee sans sonde")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Garde-fou de regex : des repetitions SUCCESSIVES non imbriquees (`.*.*.*.*.*.*.*.*.*.*x`, "
+    "`\\w+\\w+\\w+\\w+\\w+\\w+\\w+\\w+x`, `a*a*a*a*a*a*a*a*a*a*b`) sont classees « sures », "
+    "non sondees, et gelent le cycle de tous les dossiers (temps polynomial de degre eleve) sur un "
+    "libelle de 60 caracteres."))
+@pytest.mark.parametrize("regle", [".*.*.*.*.*.*.*.*.*.*x", "\\w+\\w+\\w+\\w+\\w+\\w+\\w+\\w+x", "a*a*a*a*a*a*a*a*a*a*b"])
+def test_defaut_regex_repetitions_successives_gelent_le_cycle(tmp_path, regle) -> None:
+    chemin = _fichier_regles(tmp_path / "x.csv", [regle])
+    script = (_SCRIPT_REGEX.replace("'a' * 30 + 'b'", "'a' * 60").replace("ALPHA", "D00")
+              .format(src=str(RACINE / "src"), csv=str(chemin)))
+    try:
+        sortie = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=6)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("cycle gele > 6 s") from None
+    assert sortie.returncode == 0 or "ErreurFormat" in sortie.stderr
