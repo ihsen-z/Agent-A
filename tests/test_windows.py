@@ -222,7 +222,10 @@ def test_a_b_interpreteur_sans_resource_ni_fcntl_cycle_et_audit(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("strategie", ["fork", "spawn"])
+@pytest.mark.parametrize("strategie", [
+    pytest.param("fork", marks=pytest.mark.skipif(sys.platform == "win32", reason="fork : POSIX seulement")),
+    "spawn",
+])
 def test_c_chemins_avec_espaces_et_accents(tmp_path, strategie):
     entree = ecrire_entree(tmp_path / "Données fictives é" / "entrée", fin_de_ligne="\n")
     inst = nouvelle_instance(tmp_path / "Mon Cabinet é" / "instance n°1")
@@ -469,7 +472,11 @@ def sans_base_de_fuseaux(tmp_path, monkeypatch):
     anciens = list(zoneinfo.TZPATH)
     vide = tmp_path / "tz_vide"
     vide.mkdir()
-    monkeypatch.setitem(sys.modules, "tzdata", None)
+    # Sous Windows `tzdata` est installe ET deja importe : masquer le seul paquet racine ne
+    # suffit pas, les sous-paquets en cache (`tzdata.zoneinfo.Europe`) restent resolus.
+    for nom in [n for n in list(sys.modules) if n == "tzdata" or n.startswith("tzdata.")] + [
+            "tzdata", "tzdata.zoneinfo", "tzdata.zoneinfo.Europe"]:
+        monkeypatch.setitem(sys.modules, nom, None)
     monkeypatch.setattr(cycle, "_FUSEAUX_VERIFIES", False)
     zoneinfo.reset_tzpath(to=[str(vide)])
     zoneinfo.ZoneInfo.clear_cache()

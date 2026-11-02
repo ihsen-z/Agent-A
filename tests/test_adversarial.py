@@ -1395,6 +1395,7 @@ def test_sain_isolation_parent_deja_gros(entree, inst) -> None:
     assert (r.quarantaine, r.propositions) == (0, 1)
 
 
+@pytest.mark.isolation_reelle
 def test_sain_isolation_indisponible_refus_avant_toute_ecriture(entree, tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(cycle, "resource", None)
     racine = tmp_path / "jamais"

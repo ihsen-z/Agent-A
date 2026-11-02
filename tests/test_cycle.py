@@ -1754,6 +1754,7 @@ def test_lecture_isolee_chaque_echec_devient_une_quarantaine(entree, inst, monke
     assert _enfants_vivants() == []
 
 
+@pytest.mark.isolation_reelle
 def test_sans_module_resource_refus_explicite(entree, inst, monkeypatch, capsys):
     monkeypatch.setattr(cycle, "resource", None)
     with pytest.raises(cycle.IsolationIndisponible, match="Linux ou macOS"):
@@ -1879,6 +1880,7 @@ def test_mode_test_drapeau_cli_et_config_invalide_refusee_sans_rien_ecrire(entre
     (False, True, "directe", "directe"),
     (True, True, "bidon", cycle.ErreurCycle),
 ])
+@pytest.mark.isolation_reelle
 def test_choix_de_la_strategie_d_isolation(monkeypatch, fork_dispo, mode_test, demandee, attendu):
     if not fork_dispo:
         faire_plateforme_sans_fork(monkeypatch)
@@ -1893,6 +1895,7 @@ def test_choix_de_la_strategie_d_isolation(monkeypatch, fork_dispo, mode_test, d
             assert "Linux ou macOS" in str(exc.value)
 
 
+@pytest.mark.isolation_reelle
 def test_windows_hors_mode_test_refus_avant_toute_ecriture(entree, tmp_path, monkeypatch, capsys):
     faire_plateforme_sans_fork(monkeypatch)
     racine = tmp_path / "jamais"
@@ -1928,6 +1931,7 @@ def test_windows_en_mode_test_spawn_avec_avertissement_visible_partout(entree, t
     assert _enfants_vivants() == []
 
 
+@pytest.mark.isolation_reelle
 def test_sans_isolation_mode_test_seulement_et_annonce(entree, inst, monkeypatch, capsys):
     deposer_emls(inst)
     rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree), "--sans-isolation")
