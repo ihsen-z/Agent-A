@@ -16,7 +16,10 @@ Deux niveaux :
 from __future__ import annotations
 
 import csv
+import json
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -171,6 +174,88 @@ def _contre_exemple(operation: OperationBancaire) -> bool:
 
 
 STATUTS_REGLE = ("validee", "proposee")
+COLONNES_REGLE = ("dossier", "motif_regex", "motif", "nom", "auteur", "date_activation", "statut")
+LONGUEUR_MAX_REGEX = 300
+DELAI_SONDE_REGEX = 5.0   # secondes, pour l'ensemble des expressions a sonder
+
+
+def _analyser_regex(motif: str) -> str:
+    """Classe une expression reguliere : "sure", "risquee" (refusee) ou "a_sonder".
+
+    Une expression a quantificateurs imbriques (`(a+)+$`, `(.*)*x`, `(\\w+\\s?)+$`) a un temps
+    d'execution exponentiel : UNE seule, dans exclusions_dossier.csv, gele le cycle de tous
+    les dossiers (le module `re` ne peut pas etre interrompu). Une alternative quantifiee
+    (`(a|aa)+`) peut l'etre aussi : elle est sondee dans un processus a part, avec un delai.
+    """
+    pile: list[list[bool]] = []          # [contient un quantificateur, contient une alternative]
+    a_sonder = False
+    i, n = 0, len(motif)
+    while i < n:
+        c = motif[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "[":
+            i += 1
+            if i < n and motif[i] == "^":
+                i += 1
+            if i < n and motif[i] == "]":
+                i += 1
+            while i < n and motif[i] != "]":
+                i += 2 if motif[i] == "\\" else 1
+            i += 1
+            if i < n and motif[i] in "+*{" and pile:
+                pile[-1][0] = True
+            continue
+        if c == "(":
+            pile.append([False, False])
+        elif c == "|" and pile:
+            pile[-1][1] = True
+        elif c in "+*{" and pile:
+            pile[-1][0] = True
+        elif c == ")" and pile:
+            contient_quantificateur, contient_alternative = pile.pop()
+            suivant = motif[i + 1] if i + 1 < n else ""
+            if suivant in ("+", "*", "{"):
+                if contient_quantificateur:
+                    return "risquee"
+                if contient_alternative:
+                    a_sonder = True
+                if pile:
+                    pile[-1][0] = True       # un groupe quantifie compte comme quantificateur du parent
+            elif contient_quantificateur and pile:
+                pile[-1][0] = True
+        i += 1
+    return "a_sonder" if a_sonder else "sure"
+
+
+_CODE_SONDE = (
+    "import re, sys, json\n"
+    "motifs = json.loads(sys.stdin.read())\n"
+    "essais = ['a' * 40 + '!', 'ab' * 30 + '!', ' ' * 50 + 'x', '1' * 40 + 'X', 'x' * 80]\n"
+    "for i, m in enumerate(motifs):\n"
+    "    r = re.compile(m)\n"
+    "    for t in essais:\n"
+    "        r.search(t)\n"
+    "    print(i, flush=True)\n"
+)
+
+
+def _sonder(motifs: list[str]) -> int | None:
+    """Rang de la premiere expression qui ne termine pas dans le delai, ou None."""
+    try:
+        subprocess.run(
+            [sys.executable, "-I", "-c", _CODE_SONDE], input=json.dumps(motifs), text=True,
+            capture_output=True, timeout=DELAI_SONDE_REGEX, check=True,
+        )
+    except subprocess.TimeoutExpired as depassement:
+        sortie = depassement.stdout or ""
+        if isinstance(sortie, bytes):
+            sortie = sortie.decode("utf-8", "replace")
+        return len(sortie.split())
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return None
 
 
 class Referentiel:
@@ -197,52 +282,108 @@ class Referentiel:
     def depuis_csv(cls, chemin: Path | str | None) -> "Referentiel":
         """Charge exclusions_dossier.csv : dossier,motif_regex[,motif,nom,auteur,date_activation,statut].
 
-        Les trois premieres colonnes suffisent (format historique : toutes les regles
-        sont alors validees). `statut` vaut `validee` (defaut) ou `proposee`. Une
-        expression reguliere invalide est refusee ICI, avec le numero de ligne : elle
-        ferait sinon planter le cycle de tous les dossiers au moment de l'appliquer.
+        Les deux premieres colonnes suffisent (format historique : toutes les regles sont
+        alors VALIDEES). Lecture STRICTE : une regle PROPOSEE ne s'applique jamais, donc une
+        colonne `statut` mal ecrite (`status`, `etat`) qui serait ignoree en silence ferait
+        appliquer en etat terminal des regles que personne n'a validees. Toute colonne
+        inconnue est donc refusee, la casse et les espaces des en-tetes sont tolerees, un
+        `statut` vide est refuse, et une expression reguliere invalide ou susceptible de
+        geler le cycle est refusee ICI, avec son numero de ligne.
         """
         apprises: dict[str, list[tuple[str, ...]]] = {}
         provisoires: list[dict[str, str]] = []
-        if chemin and Path(chemin).exists():
-            nom_fichier = Path(chemin).name
-            with open(chemin, newline="", encoding="utf-8-sig") as f:
-                lecteur = csv.DictReader(f)
-                manquantes = {"dossier", "motif_regex"} - set(lecteur.fieldnames or [])
-                if manquantes:
+        if not (chemin and Path(chemin).exists()):
+            return cls(apprises, provisoires)
+        nom_fichier = Path(chemin).name
+        with open(chemin, newline="", encoding="utf-8-sig") as f:
+            lecteur = csv.reader(f)
+            try:
+                entete_brut = next(lecteur)
+            except StopIteration:
+                return cls(apprises, provisoires)
+            entete = [c.strip().lower() for c in entete_brut]
+            inconnues = [brut.strip() for brut, c in zip(entete_brut, entete) if c not in COLONNES_REGLE]
+            if inconnues:
+                raise ErreurFormat(
+                    f"{nom_fichier} : colonne(s) inconnue(s) : {', '.join(repr(c) for c in inconnues)}. "
+                    f"Colonnes attendues : {', '.join(COLONNES_REGLE)}. Une colonne mal nommee serait "
+                    "ignoree et pourrait faire appliquer des regles non validees"
+                )
+            doublons = sorted({c for c in entete if entete.count(c) > 1})
+            if doublons:
+                raise ErreurFormat(f"{nom_fichier} : colonne(s) en double : {', '.join(doublons)}")
+            manquantes = {"dossier", "motif_regex"} - set(entete)
+            if manquantes:
+                raise ErreurFormat(
+                    f"{nom_fichier} : colonne(s) manquante(s) : {', '.join(sorted(manquantes))}"
+                )
+            a_sonder: list[tuple[int, str]] = []
+            for numero, cellules in enumerate(lecteur, start=2):
+                if not any(c.strip() for c in cellules):
+                    continue
+                if len(cellules) > len(entete):
+                    raise ErreurFormat(f"{nom_fichier} ligne {numero} : plus de cellules que de colonnes")
+                ligne = dict(zip(entete, cellules + [""] * (len(entete) - len(cellules))))
+                dossier = ligne["dossier"].strip()
+                motif_regex = ligne["motif_regex"].strip()
+                if not dossier or not motif_regex:
                     raise ErreurFormat(
-                        f"{nom_fichier} : colonne(s) manquante(s) : {', '.join(sorted(manquantes))}"
+                        f"{nom_fichier} ligne {numero} : `dossier` et `motif_regex` sont obligatoires"
                     )
-                for numero, ligne in enumerate(lecteur, start=2):
-                    dossier = (ligne.get("dossier") or "").strip()
-                    motif_regex = (ligne.get("motif_regex") or "").strip()
-                    if not dossier or not motif_regex:
+                if len(motif_regex) > LONGUEUR_MAX_REGEX:
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : expression trop longue "
+                        f"({len(motif_regex)} caracteres, maximum {LONGUEUR_MAX_REGEX})"
+                    )
+                try:
+                    re.compile(motif_regex)
+                except re.error as erreur:
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : expression reguliere invalide "
+                        f"« {motif_regex} » ({erreur})"
+                    ) from None
+                classe = _analyser_regex(motif_regex)
+                if classe == "risquee":
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » contient des "
+                        "quantificateurs imbriques : son temps d'execution est exponentiel et elle "
+                        "gelerait le cycle de TOUS les dossiers. Reecrivez-la plus simplement"
+                    )
+                if classe == "a_sonder":
+                    a_sonder.append((numero, motif_regex))
+                if "statut" in entete:
+                    statut = ligne["statut"].strip().lower()
+                    if not statut:
                         raise ErreurFormat(
-                            f"{nom_fichier} ligne {numero} : `dossier` et `motif_regex` sont obligatoires"
+                            f"{nom_fichier} ligne {numero} : `statut` est vide. Indiquez "
+                            f"{' ou '.join(STATUTS_REGLE)} : une cellule vide ne vaut pas validation"
                         )
-                    try:
-                        re.compile(motif_regex)
-                    except re.error as erreur:
-                        raise ErreurFormat(
-                            f"{nom_fichier} ligne {numero} : expression reguliere invalide "
-                            f"« {motif_regex} » ({erreur})"
-                        ) from None
-                    statut = (ligne.get("statut") or "validee").strip().lower()
-                    if statut not in STATUTS_REGLE:
-                        raise ErreurFormat(
-                            f"{nom_fichier} ligne {numero} : statut « {statut} » inconnu "
-                            f"(attendu : {', '.join(STATUTS_REGLE)})"
-                        )
-                    motif = (ligne.get("motif") or "Exclu par le cabinet").strip()
-                    nom = (ligne.get("nom") or "").strip()
-                    if statut == "proposee":
-                        provisoires.append({
-                            "dossier": dossier, "motif_regex": motif_regex, "motif": motif, "nom": nom,
-                            "auteur": (ligne.get("auteur") or "").strip(),
-                            "date_activation": (ligne.get("date_activation") or "").strip(),
-                        })
-                        continue
-                    apprises.setdefault(dossier, []).append((motif_regex, motif, nom))
+                else:
+                    statut = "validee"
+                if statut not in STATUTS_REGLE:
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : statut « {statut} » inconnu "
+                        f"(attendu : {', '.join(STATUTS_REGLE)})"
+                    )
+                motif = ligne.get("motif", "").strip() or "Exclu par le cabinet"
+                nom = ligne.get("nom", "").strip()
+                if statut == "proposee":
+                    provisoires.append({
+                        "dossier": dossier, "motif_regex": motif_regex, "motif": motif, "nom": nom,
+                        "auteur": ligne.get("auteur", "").strip(),
+                        "date_activation": ligne.get("date_activation", "").strip(),
+                    })
+                    continue
+                apprises.setdefault(dossier, []).append((motif_regex, motif, nom))
+            if a_sonder:
+                rang = _sonder([m for _, m in a_sonder])
+                if rang is not None:
+                    numero, motif_regex = a_sonder[rang]
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » ne termine pas "
+                        f"en {DELAI_SONDE_REGEX:g} s sur un texte d'essai : elle gelerait le cycle de "
+                        "TOUS les dossiers. Reecrivez-la plus simplement"
+                    )
         return cls(apprises, provisoires)
 
     def exclure(self, operation: OperationBancaire) -> tuple[bool, str, str]:

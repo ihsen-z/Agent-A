@@ -314,3 +314,111 @@ def test_un_alias_vide_une_fois_normalise_est_refuse(tmp_path, vide_une_fois_nor
     with pytest.raises(ErreurFormat, match="vide une fois normalise"):
         lire_alias(_alias(tmp_path, [f"{vide_une_fois_normalise},Amazon EU Sarl"]))
 
+
+
+# ------------------------------------------- 4e passage : lecture stricte des fichiers
+
+
+def _fichier_regles(tmp_path, contenu: str) -> Path:
+    chemin = tmp_path / "exclusions_dossier.csv"
+    chemin.write_text(contenu, encoding="utf-8")
+    return chemin
+
+
+@pytest.mark.parametrize("entete", ["Statut", "STATUT", " statut ", "status", "etat", "statut2"])
+def test_colonne_statut_mal_nommee_ou_inconnue_est_refusee(tmp_path, entete):
+    """Une colonne ignoree en silence ferait appliquer des regles non validees."""
+    if entete.strip().lower() == "statut":
+        # casse et espaces des en-tetes toleres : la colonne EST reconnue
+        chemin = _fichier_regles(tmp_path, f"dossier,motif_regex,{entete}\nD1,loyer,proposee\n")
+        ref = Referentiel.depuis_csv(chemin)
+        assert ref.apprises == {} and len(ref.provisoires) == 1
+        return
+    chemin = _fichier_regles(tmp_path, f"dossier,motif_regex,{entete}\nD1,loyer,proposee\n")
+    with pytest.raises(ErreurFormat, match="inconnue"):
+        Referentiel.depuis_csv(chemin)
+
+
+def test_statut_vide_n_est_pas_une_validation(tmp_path):
+    chemin = _fichier_regles(tmp_path, "dossier,motif_regex,statut\nD1,loyer,\n")
+    with pytest.raises(ErreurFormat, match="statut.*vide"):
+        Referentiel.depuis_csv(chemin)
+
+
+def test_ancien_format_a_deux_colonnes_reste_valide(tmp_path):
+    chemin = _fichier_regles(tmp_path, "dossier,motif_regex\nD1,loyer\n")
+    assert Referentiel.depuis_csv(chemin).apprises["D1"][0][0] == "loyer"
+
+
+def test_colonne_en_double_et_colonne_obligatoire_manquante(tmp_path):
+    with pytest.raises(ErreurFormat, match="double"):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path, "dossier,motif_regex,statut,statut\nD1,x,validee,validee\n"))
+    with pytest.raises(ErreurFormat, match="manquante"):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path, "dossier,statut\nD1,validee\n"))
+
+
+@pytest.mark.parametrize("motif", ["(a+)+$", "(.*)*x", r"(\w+\s?)+$", "((a+))+b", "(x*)*"])
+def test_expression_a_quantificateurs_imbriques_est_refusee(tmp_path, motif):
+    with pytest.raises(ErreurFormat, match="ligne 2.*imbriques"):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path, f'dossier,motif_regex\nD1,"{motif}"\n'))
+
+
+def test_alternative_quantifiee_qui_ne_termine_pas_est_refusee(tmp_path):
+    chemin = _fichier_regles(tmp_path, 'dossier,motif_regex\nD1,"(a|aa)+$"\n')
+    with pytest.raises(ErreurFormat, match="ne termine pas"):
+        Referentiel.depuis_csv(chemin)
+
+
+def test_expressions_usuelles_restent_acceptees(tmp_path):
+    chemin = _fichier_regles(
+        tmp_path,
+        'dossier,motif_regex\nD1,syndic copropriete\nD1,credit[\\s-]?bail\nD2,"(loyer|bail) \\d+"\n'
+        'D2,"(a|b)+x"\n',
+    )
+    ref = Referentiel.depuis_csv(chemin)
+    assert len(ref.apprises["D1"]) == 2 and len(ref.apprises["D2"]) == 2
+
+
+def test_expression_trop_longue_est_refusee(tmp_path):
+    chemin = _fichier_regles(tmp_path, f"dossier,motif_regex\nD1,{'a' * 301}\n")
+    with pytest.raises(ErreurFormat, match="trop longue"):
+        Referentiel.depuis_csv(chemin)
+
+
+def test_un_avoir_n_est_pas_lu_comme_une_facture(tmp_path):
+    chemin = tmp_path / "pieces.csv"
+    chemin.write_text(
+        "id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc\n"
+        'AV1,D1,avoir.pdf,LOXAM,2026-09-02,"-120,00"\n', encoding="utf-8")
+    with pytest.raises(ErreurFormat, match="ligne 2.*negatif.*AV1"):
+        lire_pieces(chemin)
+
+
+def test_debit_negatif_est_un_remboursement_recu(tmp_path):
+    chemin = tmp_path / "releve.csv"
+    chemin.write_text(
+        "dossier,date_operation,libelle,debit,credit,reference\n"
+        'D1,2026-09-02,REMBOURSEMENT LOXAM,"-120,00",,R1\n'
+        'D1,2026-09-03,VIREMENT CLIENT,,"-50,00",R2\n', encoding="utf-8")
+    ops = {o.reference: o for o in lire_releve(chemin)}
+    assert (ops["R1"].sens, ops["R1"].montant) == (Sens.CREDIT, Decimal("120.00"))
+    assert (ops["R2"].sens, ops["R2"].montant) == (Sens.DEBIT, Decimal("50.00"))
+
+
+def test_debit_et_credit_sur_la_meme_ligne_sont_refuses(tmp_path):
+    chemin = tmp_path / "releve.csv"
+    chemin.write_text(
+        "dossier,date_operation,libelle,debit,credit,reference\n"
+        "D1,2026-09-02,X,10.00,5.00,R1\n", encoding="utf-8")
+    with pytest.raises(ErreurFormat, match="ligne 2.*debit ET credit"):
+        lire_releve(chemin)
+
+
+def test_dossier_declare_deux_fois_est_refuse(tmp_path):
+    chemin = tmp_path / "dossiers.csv"
+    chemin.write_text(
+        "dossier,raison_sociale,email_contact,circuit,email_relais\n"
+        "D1,Alpha,a@alpha.fr,C-RELAIS,cabinet@exemple.fr\n"
+        "D1,Alpha,a@alpha.fr,C-DIRECT,\n", encoding="utf-8")
+    with pytest.raises(ErreurFormat, match="ligne 3.*D1.*deux fois"):
+        lire_dossiers(chemin)

@@ -110,8 +110,17 @@ def lire_releve(chemin: Path | str, dossier_defaut: str | None = None) -> list[O
             credit = lire_montant(ligne.get("credit", ""))
             if debit == 0 and credit == 0:
                 continue
-            sens = Sens.DEBIT if debit != 0 else Sens.CREDIT
-            montant = abs(debit) if sens is Sens.DEBIT else abs(credit)
+            if debit != 0 and credit != 0:
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : debit ET credit renseignes sur la meme "
+                    "ligne. Une operation n'a qu'un sens : separez-la en deux lignes"
+                )
+            # Un debit NEGATIF est un remboursement recu (donc un credit), et inversement :
+            # l'ancienne lecture par valeur absolue le comptait comme une depense a justifier.
+            if debit != 0:
+                sens, montant = (Sens.DEBIT, debit) if debit > 0 else (Sens.CREDIT, -debit)
+            else:
+                sens, montant = (Sens.CREDIT, credit) if credit > 0 else (Sens.DEBIT, -credit)
             dossier = _nfc(ligne.get("dossier") or dossier_defaut or "")
             if not dossier:
                 raise ErreurFormat(
@@ -153,8 +162,16 @@ def lire_pieces(chemin: Path | str) -> list[Piece]:
             {"id_piece", "dossier", "fournisseur", "date_facture", "montant_ttc"},
             chemin.name,
         )
-        for ligne in lecteur:
+        for numero, ligne in enumerate(lecteur, start=2):
             reception = (ligne.get("date_reception") or "").strip()
+            montant_piece = lire_montant(ligne["montant_ttc"])
+            if montant_piece < 0:
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : montant_ttc negatif ({montant_piece}) pour "
+                    f"la piece {ligne['id_piece'].strip()}. Un avoir ne justifie pas un paiement : "
+                    "il ne doit pas etre lu comme une facture. Retirez-le de ce fichier ou "
+                    "traitez-le a part"
+                )
             pieces.append(
                 Piece(
                     id_piece=ligne["id_piece"].strip(),
@@ -162,7 +179,7 @@ def lire_pieces(chemin: Path | str) -> list[Piece]:
                     fichier=(ligne.get("fichier") or "").strip(),
                     fournisseur=(ligne["fournisseur"] or "").strip(),
                     date_facture=lire_date(ligne["date_facture"]),
-                    montant_ttc=abs(lire_montant(ligne["montant_ttc"])),
+                    montant_ttc=montant_piece,
                     devise=(ligne.get("devise") or "EUR").strip() or "EUR",
                     date_reception=lire_date(reception) if reception else None,
                     canal=(ligne.get("canal") or "email").strip(),
@@ -230,8 +247,14 @@ def lire_dossiers(
             {"dossier", "raison_sociale", "email_contact"},
             chemin.name,
         )
-        for ligne in lecteur:
+        for numero, ligne in enumerate(lecteur, start=2):
             code = _nfc(ligne["dossier"])
+            if code in dossiers:
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : le dossier {code} est declare deux fois. "
+                    "La derniere ligne ecraserait la premiere en silence (circuit, adresse "
+                    "relais, domaines) : gardez une seule ligne par dossier"
+                )
             circuit_saisi = (ligne.get("circuit") or "").strip().upper()
             if circuit_obligatoire and not circuit_saisi:
                 raise ErreurFormat(
