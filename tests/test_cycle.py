@@ -3547,12 +3547,26 @@ def test_adresse_test_cli_refus_lisible_code_1(entree, tmp_path, capsys):
 def test_controler_envois_lineaire_journal_de_66000_entrees(tmp_path):
     import time as _t
     inst = nouvelle_instance(tmp_path / "i")
-    j = JournalAudit(inst.audit)
+    # Journal construit en memoire puis ecrit d'un bloc : 66 000 appels a `ecrire` (un fsync et un
+    # fichier de verrou chacun) prennent plusieurs minutes sous Windows, sans rapport avec ce
+    # qu'on mesure ici, la duree de `controler_envois`.
+    from rapprochement.audit import HASH_INITIAL, _calculer_hash, _canonique
+    precedent, seq, lignes = HASH_INITIAL, 0, []
+
+    def ajouter(acteur, action, objet, details):
+        nonlocal precedent, seq
+        seq += 1
+        c = {"seq": seq, "horodatage": "2026-10-05T10:00:00+02:00", "acteur": acteur, "action": action,
+             "objet": objet, "details": details, "hash_precedent": precedent}
+        precedent = c["hash"] = _calculer_hash(c)
+        lignes.append((_canonique(c) + "\n").encode("ascii"))
+
     for i in range(60000):
-        j.ecrire("systeme", "piece_creee", f"p{i}", {})
+        ajouter("systeme", "piece_creee", f"p{i}", {})
     for i in range(3000):
-        j.ecrire(VALIDEUSE, "valide", f"r{i}", {"par": VALIDEUSE})
-        j.ecrire("systeme", "envoi_effectue", f"r{i}", {"envoye_par": VALIDEUSE})
+        ajouter(VALIDEUSE, "valide", f"r{i}", {"par": VALIDEUSE})
+        ajouter("systeme", "envoi_effectue", f"r{i}", {"envoye_par": VALIDEUSE})
+    inst.audit.write_bytes(b"".join(lignes))
     debut = _t.perf_counter()
     controle = cycle.controler_envois(inst)
     duree = _t.perf_counter() - debut
