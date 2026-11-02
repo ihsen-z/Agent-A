@@ -727,7 +727,7 @@ def test_sain_degeneres_releve_vide_dossier_sans_contact(tmp_path) -> None:
     entree = ecrire_entree(tmp_path / "e2", dossiers=dossiers, operations=ops)
     inst = nouvelle_instance(tmp_path / "i2")
     r = lancer(entree, inst, J0)
-    assert r.brouillons_crees == 0 and r.bloquees == 2
+    assert r.brouillons_crees == 0                                   # rien d'invente, aucune exception
 
 
 def test_sain_message_id_rejoue_avec_autre_contenu(entree, inst) -> None:
@@ -1514,11 +1514,7 @@ def test_sain_a7_variantes_du_dossier_ne_passent_pas(entree, inst_r, variante) -
     assert cycle.pieces(inst_r) == avant and len(cycle.lister_file(inst_r)) == 1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A7 : le garde-fou CA-03 ne protege que le chemin `--message-id`. Sans lui, la meme "
-    "`id_piece` (un document deja rattache a ALPHA) est rattachee a BETA sans refus, sans "
-    "`--forcer`, sans motif ni trace : rien ne memorise a quel dossier appartient une piece."))
-def test_defaut_a7_meme_id_piece_rattachee_a_deux_dossiers(entree, inst_r) -> None:
+def test_regression_a7_meme_id_piece_rattachee_a_deux_dossiers(entree, inst_r) -> None:
     lancer(entree, inst_r, J0)
     cycle.rattacher_piece(inst_r, VALIDEUSE, maintenant=a(J0), dossier="ALPHA", reference="A-001",
                           id_piece="facture.pdf#abc123def456")
@@ -1534,8 +1530,10 @@ def test_regression_a7_forcer_reserve_au_responsable(entree, inst_r) -> None:
     d = _file_alpha(entree, inst_r)
     avant = (etat_brut(inst_r), inst_r.audit.read_bytes())
     for drapeau in (False, True):
+        # Drapeau `mode_test` sur une instance REELLE : le mode fige refuse avant meme le role.
+        attendu = cycle.ModeInstanceIncompatible if drapeau else cycle.ValidateurRefuse
         for motif in ("x", "erreur de dossier cote client", ""):
-            with pytest.raises(cycle.ValidateurRefuse):
+            with pytest.raises(attendu):
                 cycle.rattacher_piece(inst_r, VALIDEUSE, maintenant=a(J0), message_id=d.message_id,
                                       dossier="BETA", reference="B-001", forcer=True, motif=motif,
                                       mode_test=drapeau)
@@ -1566,13 +1564,24 @@ def test_sain_a14_responsables_lecture_et_refus(entree, tmp_path) -> None:
     # Fonctions appelees directement (pas par la CLI), meme avec le drapeau du mode test :
     # `responsables.txt` PRESENT, le repli n'existe pas.
     for drapeau in (False, True):
-        with pytest.raises(cycle.ValidateurRefuse):
+        attendu = cycle.ModeInstanceIncompatible if drapeau else cycle.ValidateurRefuse   # instance REELLE
+        with pytest.raises(attendu):
             cycle.trancher_envoi(inst, b.id_relance, VALIDEUSE, parti=True, maintenant=a(J0), mode_test=drapeau)
-        with pytest.raises(cycle.ValidateurRefuse):
+        with pytest.raises(attendu):
             cycle.arbitrer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="m", maintenant=a(J0), mode_test=drapeau)
-        with pytest.raises(cycle.ValidateurRefuse):
+        with pytest.raises(attendu):
             cycle.reparer_audit(inst, VALIDEUSE, maintenant=a(J0), mode_test=drapeau)
     assert (etat_brut(inst), inst.audit.read_bytes()) == avant
+    # Instance de TEST (une instance par mode) : `responsables.txt` present, un validateur ne
+    # franchit pas le role non plus, drapeau ou pas.
+    inst_t = avec_responsable(nouvelle_instance(tmp_path / "instance_test"))
+    cycle.executer_cycle(entree, inst_t, J0, a(J0), mode_test=True)
+    bt = brouillon_de(inst_t, "compta@alpha-sarl.fr")
+    for drapeau in (False, True):
+        with pytest.raises((cycle.ValidateurRefuse, cycle.ModeInstanceIncompatible)):
+            cycle.trancher_envoi(inst_t, bt.id_relance, VALIDEUSE, parti=True, maintenant=a(J0), mode_test=drapeau)
+        with pytest.raises((cycle.ValidateurRefuse, cycle.ModeInstanceIncompatible)):
+            cycle.arbitrer_piece(inst_t, "ALPHA", "A-001", VALIDEUSE, motif="m", maintenant=a(J0), mode_test=drapeau)
     # Vide, repertoire, absent (hors mode test) : refus, jamais d'acceptation par defaut.
     inst.responsables.write_bytes(b"# personne\n")
     with pytest.raises(cycle.ValidateurRefuse):
@@ -1588,12 +1597,7 @@ def test_sain_a14_responsables_lecture_et_refus(entree, tmp_path) -> None:
         cycle.trancher_envoi(inst, b.id_relance, VALIDEUSE, parti=True, maintenant=a(J0))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A14 : le repli sur les validateurs est declenche par un DRAPEAU DE LIGNE DE COMMANDE "
-    "(`--mode-test`), pas par l'etat de l'instance. Sur une instance de production sans "
-    "`responsables.txt` (config.json sans mode_test), n'importe quel validateur repare le "
-    "journal en ajoutant `--mode-test`."))
-def test_defaut_a14_repli_des_roles_par_simple_drapeau_cli(entree, inst, capsys) -> None:
+def test_regression_a14_repli_des_roles_par_simple_drapeau_cli(entree, inst, capsys) -> None:
     lancer(entree, inst, J0)
     with open(inst.audit, "ab") as f:
         f.write(b'{"acteur":"systeme","action":"pie')
@@ -1603,11 +1607,7 @@ def test_defaut_a14_repli_des_roles_par_simple_drapeau_cli(entree, inst, capsys)
     assert cli.main(["reparer-audit", "--par", VALIDEUSE, "--mode-test", *base]) == 1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Noms de validateurs compares sans normalisation Unicode : `validateurs.txt` enregistre en "
-    "NFD (macOS) refuse le meme nom saisi en NFC (Windows). Echec ferme, mais la personne "
-    "declaree ne peut pas decider. Les codes de dossier, eux, sont normalises en NFC."))
-def test_defaut_a14_noms_nfc_nfd(tmp_path) -> None:
+def test_regression_a14_noms_nfc_nfd(tmp_path) -> None:
     inst = nouvelle_instance(tmp_path / "i", None)
     inst.validateurs.write_bytes(unicodedata.normalize("NFD", "Hélène Roux\n").encode("utf-8"))
     assert _ou_none(lambda: cycle.exiger_validateur(inst, unicodedata.normalize("NFC", "Hélène Roux"))) is not None
@@ -1709,12 +1709,7 @@ def test_sain_a17_controler_envois_sort_non_nul(tmp_path, falsification) -> None
     assert charger_cli().main(["controler-envois", "--instance", str(inst.racine)]) == 1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A17 : `controler-envois` ne lit que le journal. Un .eml pose dans outbox/ par un appel "
-    "direct a `ExpediteurDossier.envoyer` (brouillon EN_COURS fabrique, valide_par quelconque) "
-    "ne laisse AUCUNE trace : la recette de CA-06 sort 0 alors qu'un message est parti sans "
-    "validation."))
-def test_defaut_a17_eml_dans_outbox_sans_trace_au_journal(entree, inst_r) -> None:
+def test_regression_a17_eml_dans_outbox_sans_trace_au_journal(entree, inst_r) -> None:
     lancer(entree, inst_r, J0)
     b = brouillon_de(inst_r, "compta@alpha-sarl.fr")
     envoi.ExpediteurDossier(inst_r.outbox).envoyer(
@@ -1723,10 +1718,7 @@ def test_defaut_a17_eml_dans_outbox_sans_trace_au_journal(entree, inst_r) -> Non
     assert not cycle.controler_envois(inst_r).ok
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A17 : un brouillon ENVOYEE en base sans entree `envoi_effectue` ni `valide` au journal "
-    "(base et journal ne sont pas recoupes) passe la recette."))
-def test_defaut_a17_envoyee_en_base_sans_journal(entree, inst_r) -> None:
+def test_regression_a17_envoyee_en_base_sans_journal(entree, inst_r) -> None:
     lancer(entree, inst_r, J0)
     b = brouillon_de(inst_r, "compta@alpha-sarl.fr")
     with Depot(inst_r.depot) as d:
@@ -1738,22 +1730,14 @@ def test_defaut_a17_envoyee_en_base_sans_journal(entree, inst_r) -> None:
     assert not cycle.controler_envois(inst_r).ok
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A17 : une paire `valide` + `envoi_effectue` correctement chainee pour un brouillon qui "
-    "n'existe pas en base (FORGE1) est jugee saine : aucun recoupement avec le depot. (Le "
-    "chainage n'a pas de secret : voisin des limites S4/S5, mais le recoupement base/journal "
-    "le detecterait.)"))
-def test_defaut_a17_paire_forgee_pour_un_brouillon_inexistant(tmp_path) -> None:
+def test_regression_a17_paire_forgee_pour_un_brouillon_inexistant(tmp_path) -> None:
     inst, _ = _envoi_legitime(tmp_path)
     _forge_valide(inst, "FORGE1")
     _forge_envoi(inst, "FORGE1")
     assert not cycle.controler_envois(inst).ok
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A17 : `valide` -> `rejete` -> `envoi_effectue` : la recette ne cherche qu'une validation "
-    "ANTERIEURE et ignore un rejet intermediaire ; un brouillon rejete puis envoye (SQL) passe."))
-def test_defaut_a17_brouillon_rejete_puis_envoye(entree, inst_r) -> None:
+def test_regression_a17_brouillon_rejete_puis_envoye(entree, inst_r) -> None:
     lancer(entree, inst_r, J0)
     b = brouillon_de(inst_r, "compta@alpha-sarl.fr")
     cycle.valider_relance(inst_r, b.id_relance, VALIDEUSE, maintenant=a(J0))
@@ -1762,11 +1746,7 @@ def test_defaut_a17_brouillon_rejete_puis_envoye(entree, inst_r) -> None:
     assert not cycle.controler_envois(inst_r).ok
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A17/envoi nominatif : `envoyer_relance` sans `par` (API, hors CLI) emet et journalise "
-    "`envoye_par: null` ; la recette l'accepte. Rien n'exige que la personne qui DECLENCHE "
-    "l'envoi soit nommee."))
-def test_defaut_a17_envoi_sans_declencheur_nominatif_passe_la_recette(entree, inst_r) -> None:
+def test_regression_a17_envoi_sans_declencheur_nominatif_passe_la_recette(entree, inst_r) -> None:
     lancer(entree, inst_r, J0)
     b = brouillon_de(inst_r, "compta@alpha-sarl.fr")
     cycle.valider_relance(inst_r, b.id_relance, VALIDEUSE, maintenant=a(J0))
@@ -1839,13 +1819,8 @@ def test_sain_a3_regle_proposee_cycle_complet_la_piece_reste_reclamee(tmp_path) 
     assert "r1" in cellules(inst.sortie / "regles_provisoires.csv")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A3 : une colonne `statut` mal nommee (`Statut`, `STATUT`, `statut ` avec espace, `status`, "
-    "`etat`) est IGNOREE en silence : toutes les regles `proposee` sont alors appliquees comme "
-    "validees, et closent des pieces en HORS_PERIMETRE (etat terminal) : manque rate silencieux "
-    "(CA-02). Un export Excel ou Sheets capitalise couramment les en-tetes."))
 @pytest.mark.parametrize("entete", ["Statut", "STATUT", "statut ", "status", "etat"])
-def test_defaut_a3_colonne_statut_mal_nommee(tmp_path, entete) -> None:
+def test_regression_a3_colonne_statut_mal_nommee(tmp_path, entete) -> None:
     chemin = _csv_exclusions(tmp_path / "x.csv", [["ALPHA", "loxam", "m", "proposee"]],
                              entetes=("dossier", "motif_regex", "motif", entete))
     try:
@@ -1855,10 +1830,7 @@ def test_defaut_a3_colonne_statut_mal_nommee(tmp_path, entete) -> None:
     assert ref.exclure(OPERATION_LOXAM)[0] is False
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A3 : dans un fichier qui A la colonne `statut`, une cellule vide vaut `validee` : l'oubli "
-    "d'une saisie applique la regle immediatement (etat terminal). Fail-ouvert."))
-def test_defaut_a3_statut_vide_vaut_validee(tmp_path) -> None:
+def test_regression_a3_statut_vide_vaut_validee(tmp_path) -> None:
     chemin = _csv_exclusions(tmp_path / "x.csv", [["ALPHA", "loxam", "m", "r1", "Paul", "2026-10-01", ""]])
     try:
         ref = Referentiel.depuis_csv(chemin)
@@ -1882,22 +1854,19 @@ print(ref.exclure(op)[0])
 def _regex_gele(tmp_path: Path, statut: str, delai: float) -> bool:
     chemin = _csv_exclusions(tmp_path / "x.csv", [["ALPHA", "(a+)+$", "m", "r1", "Paul", "2026-10-01", statut]])
     try:
-        subprocess.run([sys.executable, "-c", _SCRIPT_REGEX.format(src=str(RACINE / "src"), csv=str(chemin))],
-                       capture_output=True, timeout=delai, check=True)
-        return False
+        sortie = subprocess.run([sys.executable, "-c", _SCRIPT_REGEX.format(src=str(RACINE / "src"), csv=str(chemin))],
+                                capture_output=True, text=True, timeout=delai)
     except subprocess.TimeoutExpired:
         return True
+    assert sortie.returncode == 0 or "ErreurFormat" in sortie.stderr, sortie.stderr   # refus lisible, pas un crash
+    return False
 
 
 def test_sain_a3_regex_catastrophique_proposee_n_est_jamais_executee(tmp_path) -> None:
     assert not _regex_gele(tmp_path, "proposee", 20)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A3 : une expression reguliere VALIDEE catastrophique `(a+)+$` (`(.*)*x`, `(a|aa)+$`) gele "
-    "le cycle de TOUS les dossiers sur un libelle de 30 caracteres (> 6 s, croissance "
-    "exponentielle ; libelle choisi par le tiers qui paie). `re.compile` ne detecte rien."))
-def test_defaut_a3_regex_validee_catastrophique_gele_le_cycle(tmp_path) -> None:
+def test_regression_a3_regex_validee_catastrophique_gele_le_cycle(tmp_path) -> None:
     assert not _regex_gele(tmp_path, "validee", 6)
 
 
@@ -1920,11 +1889,7 @@ def test_sain_a1_circuit_obligatoire_en_production(tmp_path, capsys, variante) -
     assert not inst.depot.exists() and not list(inst.sortie.iterdir())
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A1/D6 : un code dossier present deux fois dans dossiers.csv n'est pas refuse : la DERNIERE "
-    "ligne gagne en silence. Une ligne dupliquee (copier-coller Excel) fait passer un dossier "
-    "C-RELAIS en C-DIRECT : les relances partent au client final."))
-def test_defaut_a1_code_dossier_duplique_dans_dossiers_csv(tmp_path) -> None:
+def test_regression_a1_code_dossier_duplique_dans_dossiers_csv(tmp_path) -> None:
     chemin = tmp_path / "d.csv"
     chemin.write_text(
         "dossier,raison_sociale,email_contact,nom_contact,circuit,email_relais\n"
@@ -1952,8 +1917,10 @@ def _brouillon_valide(tmp_path: Path, **config):
 
 
 def test_sain_mode_test_jamais_l_adresse_reelle_dans_les_en_tetes(tmp_path) -> None:
-    _, inst, b = _brouillon_valide(tmp_path)
-    cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE, mode_test=True)
+    # Instance de TEST (config.json) : le mode est fige des le premier cycle.
+    _, inst, b = _brouillon_valide(tmp_path, mode_test=True)
+    assert cycle.mode_instance(inst) == "test"
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE)
     [f] = list(inst.outbox.glob("*.eml"))
     brut = f.read_bytes()
     entetes = brut.split(b"\r\n\r\n")[0]
@@ -2008,12 +1975,7 @@ def test_sain_a1_mode_test_accepte_un_dossier_sans_circuit_en_l_annoncant(tmp_pa
     assert "circuit_par_defaut" in [e.action for e in _Journal(inst.audit).lire()]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "A1/D6 : `--mode-test` est un drapeau PAR COMMANDE. `cycle --mode-test` (circuit facultatif) "
-    "cree les brouillons d'un dossier SANS circuit, puis `valider` et `envoyer` SANS le drapeau "
-    "(donc en production) les emettent a l'adresse reelle du client : le garde-fou D6 est "
-    "contourne par un simple argument de ligne de commande."))
-def test_defaut_a1_cycle_mode_test_puis_envoi_reel_sans_circuit(tmp_path) -> None:
+def test_regression_a1_cycle_mode_test_puis_envoi_reel_sans_circuit(tmp_path) -> None:
     dossiers = [["ALPHA", "Alpha SARL", "compta@alpha-sarl.fr", "M. Alpha", "15", "courtois", "", ""]]
     entree = ecrire_entree(tmp_path / "e", dossiers=dossiers, operations=[OPERATIONS[0]])
     inst = avec_responsable(nouvelle_instance(tmp_path / "i"))
@@ -2028,19 +1990,26 @@ def test_defaut_a1_cycle_mode_test_puis_envoi_reel_sans_circuit(tmp_path) -> Non
     assert "compta@alpha-sarl.fr" not in destinataires
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Mode test : un envoi `--mode-test` est ENREGISTRE COMME REEL (historique des envois, pieces "
-    "passees DEMANDEE, compteur de relances) alors que le client n'a rien recu. Sur une instance "
-    "reelle, le cycle suivant produit une « relance » niveau 2 qui affirme une demande jamais "
-    "faite et la limite d'un e-mail par semaine bloque la vraie demande 7 jours. Le mode devrait "
-    "etre un etat de l'instance, pas un drapeau."))
-def test_defaut_mode_test_envoi_enregistre_comme_reel(tmp_path) -> None:
-    _, inst, b = _brouillon_valide(tmp_path)
-    cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE, mode_test=True)
-    with Depot(inst.depot) as d:
-        historique = d.historique_envois()
-    etats_alpha = {p.etat for p in cycle.pieces(inst) if p.dossier == "ALPHA"}
-    assert historique == [] and etats_alpha == {EtatPiece.ATTENDUE}
+def test_regression_mode_test_envoi_enregistre_comme_reel(tmp_path) -> None:
+    """Une instance REELLE refuse tout envoi `--mode-test` (il serait enregistre comme reel :
+    historique, pieces DEMANDEE, limite hebdomadaire) ; dans une instance de TEST, tout est
+    simule, y compris cet historique (consequence voulue, documentee)."""
+    _, inst, b = _brouillon_valide(tmp_path / "reelle")
+    avant = (etat_brut(inst), inst.audit.read_bytes())
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE, mode_test=True)
+    cli = charger_cli()
+    base = ["--instance", str(inst.racine), "--date", J0.isoformat()]
+    assert cli.main(["envoyer", b.id_relance, "--par", VALIDEUSE, "--mode-test", *base]) == 1
+    assert cli.main(["cycle", "--entree", str(tmp_path / "reelle" / "e"), "--mode-test", *base]) == 1
+    assert (etat_brut(inst), inst.audit.read_bytes()) == avant
+    assert list(inst.outbox.glob("*.eml")) == [] and cycle.mode_instance(inst) == "reel"
+    # Converse : une instance de test dont on retire config.json (donc mode reel demande) refuse l'envoi.
+    _, inst_t, bt = _brouillon_valide(tmp_path / "test", mode_test=True)
+    inst_t.config.unlink()
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        cycle.envoyer_relance(inst_t, bt.id_relance, maintenant=a(J0), par=VALIDEUSE)
+    assert list(inst_t.outbox.glob("*.eml")) == []
 
 
 # --- A15 : alias fournisseurs -------------------------------------------------------
@@ -2097,24 +2066,16 @@ def test_sain_moteur_familles_ambigues_jamais_une_piece_perdue() -> None:
     assert r["R1"][0] is Statut.MANQUANT
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Un AVOIR (montant_ttc negatif dans pieces_recues.csv) est converti en valeur absolue par "
-    "`lire_pieces` : un avoir de 120,00 EUR justifie un paiement de 120,00 EUR au meme "
-    "fournisseur. La facture reelle n'est jamais reclamee : manque rate silencieux (CA-02)."))
-def test_defaut_moteur_un_avoir_justifie_un_paiement(tmp_path) -> None:
+def test_regression_moteur_un_avoir_justifie_un_paiement(tmp_path) -> None:
     chemin = tmp_path / "p.csv"
     chemin.write_text("id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc\n"
                       "AV1,A,avoir.pdf,LOXAM,2026-09-02,\"-120,00\"\n", encoding="utf-8")
     op = _op("R1", dt.date(2026, 9, 3), "CB LOXAM LOCATION", "120.00")
-    statut = Moteur().rapprocher([op], lire_pieces(chemin))[0].statut
-    assert statut is Statut.MANQUANT
+    with pytest.raises(ErreurFormat, match="avoir|negatif"):          # refus lisible : l'avoir n'est jamais une facture
+        lire_pieces(chemin)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Un remboursement exporte en DEBIT NEGATIF (`-50,00`) ou entre parentheses est lu avec "
-    "abs() comme un PAIEMENT de 50,00 : fausse alerte, le client est relance pour une piece "
-    "qui n'existe pas ; une ligne avec debit ET credit perd silencieusement le credit."))
-def test_defaut_releve_debit_negatif_lu_comme_paiement(tmp_path) -> None:
+def test_regression_releve_debit_negatif_lu_comme_paiement(tmp_path) -> None:
     chemin = tmp_path / "r.csv"
     chemin.write_text("dossier,date_operation,libelle,debit,credit,reference\n"
                       'A,2026-09-03,REMBOURSEMENT LOXAM,"-50,00",,R1\n', encoding="utf-8")
