@@ -797,6 +797,7 @@ def test_verifier_audit_detecte_une_alteration(entree, inst):
     assert cli.main(base) == 1
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="lecture isolee par fork : la strategie directe imposee sous Windows par conftest change la trace attendue")
 def test_audit_apres_la_transaction(entree, inst, monkeypatch):
     """Une transaction annulee ne laisse aucune trace d'audit (jamais l'inverse)."""
     original = Depot.sauver_pieces
@@ -1424,6 +1425,7 @@ def test_journal_tronque_refus_avant_toute_ecriture_puis_reparation(entree, tmp_
     assert lancer(entree, inst, jour(1)).pieces_creees == 4
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="lecture isolee par fork : la strategie directe imposee sous Windows par conftest change la trace attendue")
 def test_journal_altere_au_milieu_reparation_refusee(entree, inst, capsys):
     lancer(entree, inst, J0)
     lignes = inst.audit.read_bytes().split(b"\n")
@@ -1531,6 +1533,7 @@ def test_eml_gros_corps_en_tetes_normaux_passe(entree, inst):
     assert (r.propositions, r.quarantaine) == (1, 0)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="lecture isolee par fork : la strategie directe imposee sous Windows par conftest change la trace attendue")
 def test_bloc_d_en_tetes_de_70_kio_en_quarantaine_sans_analyse(entree, inst, monkeypatch):
     brut = _eml_avec_from(70 * 1024, "lourd@x")
     assert brut.index(b"\r\n\r\n") > cycle.TAILLE_MAX_EN_TETES_EML
@@ -1820,6 +1823,7 @@ def test_charger_config_defauts_et_validation(tmp_path):
         assert "Traceback" not in str(exc.value) and "\n" not in str(exc.value)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="lecture isolee par fork : la strategie directe imposee sous Windows par conftest change la trace attendue")
 def test_mode_normal_aucune_trace_du_mode_test(entree, inst):
     r = lancer(entree, inst, J0)
     assert not r.mode_test and r.avertissements == [] and r.strategie_isolation == "fork"
@@ -1828,6 +1832,7 @@ def test_mode_normal_aucune_trace_du_mode_test(entree, inst):
     assert "mode_test_actif" not in actions_audit(inst) and "isolation_degradee" not in actions_audit(inst)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="lecture isolee par fork : la strategie directe imposee sous Windows par conftest change la trace attendue")
 def test_mode_test_config_visible_partout_et_journalise_une_fois_par_cycle(entree, inst):
     ecrire_config(inst, mode_test=True)
     r = lancer(entree, inst, J0)
@@ -1882,6 +1887,8 @@ def test_mode_test_drapeau_cli_et_config_invalide_refusee_sans_rien_ecrire(entre
 ])
 @pytest.mark.isolation_reelle
 def test_choix_de_la_strategie_d_isolation(monkeypatch, fork_dispo, mode_test, demandee, attendu):
+    if fork_dispo and sys.platform == "win32":
+        pytest.skip("cas « fork disponible » : plateforme POSIX seulement")
     if not fork_dispo:
         faire_plateforme_sans_fork(monkeypatch)
     if isinstance(attendu, str):

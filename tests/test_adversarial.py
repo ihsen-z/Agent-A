@@ -609,6 +609,7 @@ def test_regression_formule_csv_file_humaine_nom_de_piece_jointe(tmp_path) -> No
     assert "'" + FORMULE_FICHIER in cel             # neutralise, pas efface
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX seulement : /proc, fcntl, fork ou noms de fichier illegaux sous Windows")
 def test_regression_formules_neutralisees_sans_perte_dans_tous_les_csv(tmp_path) -> None:
     """Chaque CSV de sortie : aucune cellule declencheuse, et le texte d'origine survit."""
     inst = _sorties_piegees(tmp_path)
@@ -768,6 +769,7 @@ def _empreintes(racine: Path) -> dict[str, str]:
             and not p.name.startswith("depot.sqlite")}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX seulement : /proc, fcntl, fork ou noms de fichier illegaux sous Windows")
 def test_sain_ca08_independant_du_fuseau_de_la_locale_et_du_hash(tmp_path) -> None:
     entree = ecrire_entree(tmp_path / "e")
     instances = []
@@ -972,6 +974,7 @@ def test_regression_en_tete_from_quadratique_ralentit_tout_le_cycle(entree, inst
     assert "bloc d'en-tetes" in cellules(inst.sortie / "quarantaine.csv")[2]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX seulement : /proc, fcntl, fork ou noms de fichier illegaux sous Windows")
 def test_sain_quarantaine_fichiers_pathologiques(entree, inst, capsys) -> None:
     """Octets nuls, charset inconnu, 8 bits bruts, boucle de frontieres, nom piege :
     le cycle va au bout, les autres messages sont traites, rien ne pilote le terminal."""
@@ -1247,6 +1250,7 @@ def test_sain_isolation_gros_messages_legitimes_passent(entree, inst) -> None:
     assert r.propositions == 1 and r.non_routees == 200
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX seulement : /proc, fcntl, fork ou noms de fichier illegaux sous Windows")
 def test_sain_isolation_mille_fichiers_sans_fuite(entree, inst) -> None:
     for i in range(1000):
         brut = _imbrique(1000) if i % 10 == 0 else eml("x@inconnu.fr", f"<{i}@x>", fichiers=((f"f{i}.pdf", b"%"),))
@@ -1285,6 +1289,7 @@ def _bloque(chemin) -> None:
 
 
 @pytest.mark.parametrize("comportement", [_boucle_sourde, _bloque], ids=["ignore_SIGXCPU", "bloque"])
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX seulement : /proc, fcntl, fork ou noms de fichier illegaux sous Windows")
 def test_sain_isolation_enfant_tue_sans_survivant(entree, tmp_path, monkeypatch, comportement) -> None:
     inst = nouvelle_instance(tmp_path / "i")
     (inst.racine / "parking").mkdir()
@@ -1300,6 +1305,7 @@ def test_sain_isolation_enfant_tue_sans_survivant(entree, tmp_path, monkeypatch,
     assert "SIGKILL" in raison or "plus de" in raison, raison
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX seulement : /proc, fcntl, fork ou noms de fichier illegaux sous Windows")
 def test_sain_isolation_aucune_transaction_ni_verrou_tenus_au_fork(entree, inst, monkeypatch) -> None:
     """Au moment de chaque fork, ni la base (BEGIN IMMEDIATE) ni le journal (flock) ne sont
     verrouilles par le parent : l'enfant ne peut ni bloquer ni heriter d'un verrou."""
