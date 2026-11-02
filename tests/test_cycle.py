@@ -3352,3 +3352,211 @@ def test_a17_envoi_sans_declencheur_nominatif(entree, inst, capsys):
     assert ligne.anomalies == ("envoi non nominatif (`envoye_par` absent : qui l'a declenche ?)",)
     rc, out, _ = cli(capsys, inst, "controler-envois")
     assert rc == 1 and "envoi non nominatif" in out
+
+
+# --- 5e passage : mode recoupe avec le journal, adresse_test jamais un client, controle lineaire ---
+
+
+def _supprimer_marqueurs_de_mode(inst: cycle.Instance) -> None:
+    with sqlite3.connect(inst.depot) as c:
+        c.execute("DELETE FROM vus WHERE cle LIKE 'mode-instance:%'")
+
+
+@pytest.mark.parametrize("cree_en, demande", [("test", False), ("reel", True)])
+def test_mode_journal_marqueur_supprime_le_journal_tient_le_mode(entree, tmp_path, cree_en, demande):
+    inst, ident = _instance_figee(tmp_path, entree, cree_en)
+    _supprimer_marqueurs_de_mode(inst)
+    assert cycle.mode_instance(inst) == cree_en                       # la base ne dit plus rien, le journal si
+    avant = (etat_depot(inst), emls(inst))
+    for appel in (lambda: lancer(entree, inst, jour(1), mode_test=demande),
+                  lambda: cycle.valider_relance(inst, ident, VALIDEUSE, maintenant=a_10h(J0), mode_test=demande)):
+        with pytest.raises(cycle.ModeInstanceIncompatible, match=f"creee en mode {cree_en}"):
+            appel()
+    assert (etat_depot(inst), emls(inst)) == avant                    # rien n'a ete refige dans l'autre mode
+    assert [e for e in _entrees_audit(inst, "mode_instance")] == _entrees_audit(inst, "mode_instance")[:1]
+
+
+@pytest.mark.parametrize("mode_test", [True, False])
+def test_mode_journal_marqueur_supprime_meme_mode_le_marqueur_est_retabli(entree, tmp_path, mode_test):
+    inst, _ = _instance_figee(tmp_path, entree, "test" if mode_test else "reel")
+    _supprimer_marqueurs_de_mode(inst)
+    lancer(entree, inst, jour(1), mode_test=mode_test)
+    assert cycle.mode_instance(inst) == ("test" if mode_test else "reel")
+    with Depot(inst.depot) as d:
+        assert d.est_vu(f"mode-instance:{'test' if mode_test else 'reel'}")
+    assert len(_entrees_audit(inst, "mode_instance")) == 1            # pas de seconde entree contradictoire
+    (retabli,) = _entrees_audit(inst, "mode_marqueur_retabli")
+    assert retabli.details["mode"] == ("test" if mode_test else "reel")
+    assert cycle.controler_mode(inst) == ()
+
+
+@pytest.mark.parametrize("cree_en, demande", [("test", False), ("reel", True)])
+def test_mode_journal_base_recreee_dans_l_autre_mode_refus(entree, tmp_path, cree_en, demande):
+    inst, _ = _instance_figee(tmp_path, entree, cree_en)
+    for f in inst.racine.glob("depot.sqlite*"):
+        f.unlink()
+    with pytest.raises(cycle.ModeInstanceIncompatible, match=f"creee en mode {cree_en}"):
+        lancer(entree, inst, J0, mode_test=demande)
+    assert len(_entrees_audit(inst, "mode_instance")) == 1
+
+
+def test_mode_journal_contradiction_base_contre_journal_signalee_partout(entree, tmp_path, capsys):
+    inst, ident = _instance_figee(tmp_path, entree, "test")
+    with sqlite3.connect(inst.depot) as c:                            # base ALTEREE : le marqueur dit « reel »
+        c.execute("DELETE FROM vus WHERE cle LIKE 'mode-instance:%'")
+    with Depot(inst.depot) as d:
+        d.marquer_vu("mode-instance:reel")
+    (probleme,) = cycle.controler_mode(inst)
+    assert "la base dit reel" in probleme and "le journal dit test" in probleme
+    for mode in (True, False):
+        with pytest.raises(cycle.ModeInstanceIncompatible, match="contradictoire"):
+            cycle.valider_relance(inst, ident, VALIDEUSE, maintenant=a_10h(J0), mode_test=mode)
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        cycle.mode_instance(inst)
+    assert any("mode de l'instance" in e for e in cycle.controler_envois(inst).ecarts)
+    rc, out, _ = cli(capsys, inst, "verifier-audit")
+    assert rc == 1 and "MODE INCOHERENT" in out and "le journal dit test" in out
+    rc, out, _ = cli(capsys, inst, "controler-envois")
+    assert rc == 1 and "mode de l'instance" in out
+
+
+def test_mode_journal_deux_modes_au_journal_est_une_incoherence(entree, tmp_path):
+    inst, _ = _instance_figee(tmp_path, entree, "test")
+    JournalAudit(inst.audit).ecrire("systeme", "mode_instance", "instance", {"mode": "reel", "source": "forge"})
+    assert any("a la fois le mode test et le mode reel" in p for p in cycle.controler_mode(inst))
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        lancer(entree, inst, jour(1), mode_test=True)
+
+
+def test_mode_journal_instance_saine_verifier_audit_reste_ok(entree, tmp_path, capsys):
+    inst, _ = _instance_figee(tmp_path, entree, "test")
+    assert cycle.controler_mode(inst) == ()
+    rc, out, _ = cli(capsys, inst, "verifier-audit")
+    assert rc == 0 and "MODE" not in out
+
+
+# adresse_test : jamais celle d'un client
+
+
+def _entree_avec_domaines(tmp_path: Path, domaines: str) -> Path:
+    dossiers = [DOSSIERS[0][:8] + [domaines]] + [d + [""] for d in DOSSIERS[1:]]
+    entree = ecrire_entree(tmp_path / "e-dom", dossiers=dossiers)
+    texte = (entree / "dossiers.csv").read_text(encoding="utf-8").splitlines()
+    texte[0] += ",domaines"
+    (entree / "dossiers.csv").write_text("\n".join(texte) + "\n", encoding="utf-8")
+    return entree
+
+
+@pytest.mark.parametrize("adresse, motif", [
+    ("compta@alpha-sarl.fr", "adresse d'un client"),
+    ("COMPTA@Alpha-SARL.fr", "adresse d'un client"),               # casse sans effet
+    ("autre@alpha-sarl.fr", "domaine d'un client"),               # meme domaine
+    ("moi@beta-sas.fr", "domaine d'un client"),
+    ("pieces@cabinet-relais.fr", "adresse d'un client"),          # relais : adresse exacte
+    ("x@cabinet-relais.fr", "domaine d'un client"),
+])
+def test_adresse_test_client_refusee_avant_toute_ecriture(entree, tmp_path, adresse, motif):
+    inst = nouvelle_instance(tmp_path / "i")
+    ecrire_config(inst, mode_test=True, adresse_test=adresse)
+    with pytest.raises(cycle.ConfigInvalide, match=motif):
+        lancer(entree, inst, J0)
+    assert cycle.brouillons(inst) == [] and emls(inst) == [] and cycle.mode_instance(inst) is None
+
+
+def test_adresse_test_domaine_declare_d_un_client_refusee(tmp_path):
+    entree = _entree_avec_domaines(tmp_path, "alpha-conseil.fr")
+    inst = nouvelle_instance(tmp_path / "i")
+    ecrire_config(inst, mode_test=True, adresse_test="moi@alpha-conseil.fr")
+    with pytest.raises(cycle.ConfigInvalide, match="domaine declare d'un client"):
+        lancer(entree, inst, J0)
+    assert cycle.brouillons(inst) == []
+
+
+@pytest.mark.parametrize("adresse", [ADRESSE_TEST, "cabinet.test@gmail.com", "moi@exemple.org"])
+def test_adresse_test_sans_client_acceptee(entree, tmp_path, adresse):
+    inst = nouvelle_instance(tmp_path / "i")
+    ecrire_config(inst, mode_test=True, adresse_test=adresse)
+    lancer(entree, inst, J0)
+    assert cycle.brouillons(inst)
+
+
+def test_adresse_test_gmail_d_un_client_refusee_seule_l_adresse_exacte_compte(tmp_path):
+    dossiers = [["ALPHA", "Alpha SARL", "alpha.compta@gmail.com", "M. Alpha", "15", "courtois", "C-DIRECT", ""]]
+    entree = ecrire_entree(tmp_path / "e", dossiers=dossiers, operations=[OPERATIONS[0]])
+    inst = nouvelle_instance(tmp_path / "i")
+    ecrire_config(inst, mode_test=True, adresse_test="Alpha.Compta@gmail.com")
+    with pytest.raises(cycle.ConfigInvalide, match="adresse d'un client"):
+        lancer(entree, inst, J0)
+    ecrire_config(inst, mode_test=True, adresse_test="cabinet@gmail.com")           # autre boite gmail : sans client
+    lancer(entree, inst, J0)
+    assert cycle.brouillons(inst)
+
+
+def test_adresse_test_changee_apres_coup_envoi_refuse_rien_ne_part(entree, tmp_path):
+    inst = nouvelle_instance(tmp_path / "i")
+    ecrire_config(inst, mode_test=True, adresse_test=ADRESSE_TEST)
+    lancer(entree, inst, J0)
+    ident = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE).id_relance
+    cycle.valider_relance(inst, ident, VALIDEUSE, maintenant=a_10h(J0))
+    ecrire_config(inst, mode_test=True, adresse_test="compta@alpha-sarl.fr")
+    with pytest.raises(cycle.ConfigInvalide, match="adresse d'un client"):
+        cycle.envoyer_relance(inst, ident, maintenant=a_10h(J0), par=VALIDEUSE)
+    assert emls(inst) == []
+
+
+def test_expediteur_test_defense_en_profondeur_adresse_test_client(tmp_path):
+    class Spy:
+        envoyes: list = []
+
+        def envoyer(self, brouillon):
+            self.envoyes.append(brouillon)
+            return "id"
+
+    spy = Spy()
+    b = Brouillon(id_relance="r1", destinataire="compta@alpha-sarl.fr", objet="o", corps="c", dossiers=("ALPHA",),
+                  references=("A-001",), niveau=1, cree_le=J0, statut=StatutBrouillon.VALIDEE)
+    with pytest.raises(envoi.ErreurEnvoiCertaine, match="adresse d'un client"):
+        cycle.ExpediteurTest(spy, "COMPTA@alpha-sarl.fr").envoyer(b)
+    assert spy.envoyes == []
+
+
+def test_adresse_test_cli_refus_lisible_code_1(entree, tmp_path, capsys):
+    inst = nouvelle_instance(tmp_path / "i")
+    ecrire_config(inst, mode_test=True, adresse_test="compta@alpha-sarl.fr")
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1 and "adresse d'un client" in err
+
+
+# controler_envois : une passe, pas de balayage par envoi
+
+
+def test_controler_envois_lineaire_journal_de_66000_entrees(tmp_path):
+    import time as _t
+    inst = nouvelle_instance(tmp_path / "i")
+    j = JournalAudit(inst.audit)
+    for i in range(60000):
+        j.ecrire("systeme", "piece_creee", f"p{i}", {})
+    for i in range(3000):
+        j.ecrire(VALIDEUSE, "valide", f"r{i}", {"par": VALIDEUSE})
+        j.ecrire("systeme", "envoi_effectue", f"r{i}", {"envoye_par": VALIDEUSE})
+    debut = _t.perf_counter()
+    controle = cycle.controler_envois(inst)
+    duree = _t.perf_counter() - debut
+    assert controle.nb_entrees == 66000 and len(controle.lignes) == 3000
+    assert duree < 5, f"controler_envois : {duree:.1f} s pour 66 000 entrees"
+
+
+def test_controler_envois_indexe_valide_et_rejete_par_objet_resultats_inchanges(entree, inst):
+    _envoi_sain(inst, entree)
+    (ligne,) = cycle.controler_envois(inst).lignes
+    assert ligne.anomalies == ()
+
+
+def test_mode_journal_marqueur_absent_est_signale_par_controler_mode_et_verifier_audit(entree, tmp_path, capsys):
+    inst, _ = _instance_figee(tmp_path, entree, "test")
+    _supprimer_marqueurs_de_mode(inst)
+    (probleme,) = cycle.controler_mode(inst)
+    assert "le journal dit test" in probleme and "marqueur du depot est absent" in probleme
+    rc, out, _ = cli(capsys, inst, "verifier-audit")
+    assert rc == 1 and "MODE INCOHERENT" in out
+    assert any("mode de l'instance" in e for e in cycle.controler_envois(inst).ecarts)

@@ -2183,11 +2183,6 @@ def _supprimer_marqueurs(inst: cycle.Instance) -> None:
     con.close()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Mode fige : sa seule source de verite est une LIGNE de la base (`vus: mode-instance:test`). "
-    "Une fois supprimee, le cycle suivant refige l'instance dans l'AUTRE mode sans la moindre "
-    "alerte (le journal garde pourtant `mode_instance: test`, jamais recoupe) : une instance de "
-    "test, ses envois simules et ses pieces DEMANDEE deviennent une instance reelle."))
 def test_defaut_mode_fige_marqueur_supprime_test_devient_reelle(tmp_path) -> None:
     entree, inst, _ = _instance_test(tmp_path)
     _supprimer_marqueurs(inst)
@@ -2196,11 +2191,6 @@ def test_defaut_mode_fige_marqueur_supprime_test_devient_reelle(tmp_path) -> Non
     assert cycle.mode_instance(inst) != "reel"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Mode fige : base supprimee (ou restauree d'une sauvegarde plus ancienne) mais journal "
-    "conserve (`mode_instance: reel`) : un cycle `--mode-test` refige la nouvelle base en mode "
-    "test et ajoute une seconde entree contradictoire au journal ; le cycle ne compare jamais le "
-    "mode demande au mode DEJA ECRIT au journal."))
 def test_defaut_mode_fige_base_recreee_journal_contradictoire(tmp_path) -> None:
     entree, inst, _ = _brouillon_valide(tmp_path)
     for chemin in tmp_path.glob("i/depot.sqlite*"):
@@ -2208,10 +2198,6 @@ def test_defaut_mode_fige_base_recreee_journal_contradictoire(tmp_path) -> None:
     assert _refuse(lambda: cycle.executer_cycle(entree, inst, J0, a(J0), mode_test=True))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Mode test : `adresse_test` n'est jamais confrontee aux adresses des dossiers. Avec "
-    "`adresse_test` = l'adresse REELLE d'un client, un « envoi de test » est expedie a ce client "
-    "(prefixe [TEST] seulement), alors que la garantie annoncee est « jamais vers un client »."))
 def test_defaut_mode_test_adresse_test_egale_adresse_client(tmp_path) -> None:
     entree = ecrire_entree(tmp_path / "e")
     inst = avec_responsable(nouvelle_instance(tmp_path / "i"))
@@ -2676,11 +2662,6 @@ def test_sain_web_fuzz_des_formulaires_jamais_de_500(web) -> None:
 # --- Performance du controle des envois ----------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "`controler_envois` est quadratique (pour chaque envoi, un balayage de tout le journal) : "
-    "3 000 envois dans un journal de 66 000 entrees demandent ~8 s ; la page /audit et la recette "
-    "de CA-06 deviennent inutilisables apres quelques annees d'exploitation (20 destinataires, "
-    "un envoi par semaine = 1 000 envois par an, mais 300 000 entrees)."))
 def test_defaut_controler_envois_quadratique(tmp_path) -> None:
     from rapprochement.audit import HASH_INITIAL, _calculer_hash, _canonique
     inst = nouvelle_instance(tmp_path / "i")
