@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rapprochement.modeles import OperationBancaire, Piece, Rapprochement, Sens, Statut  # noqa: E402
 from rapprochement.moteur import Moteur  # noqa: E402
 from rapprochement.exclusions import Referentiel  # noqa: E402
-from rapprochement.parseurs import ErreurFormat, lire_alias, lire_dossiers, lire_pieces, lire_releve  # noqa: E402
+from rapprochement.parseurs import ErreurFormat, lire_alias, lire_dossiers, lire_montant, lire_pieces, lire_releve  # noqa: E402
 from rapprochement.rapport import ecrire_suivi, ligne_sure, neutraliser_formule  # noqa: E402
 
 
@@ -422,3 +422,86 @@ def test_dossier_declare_deux_fois_est_refuse(tmp_path):
         "D1,Alpha,a@alpha.fr,C-DIRECT,\n", encoding="utf-8")
     with pytest.raises(ErreurFormat, match="ligne 3.*D1.*deux fois"):
         lire_dossiers(chemin)
+
+
+# ------------------------------------------- 5e passage : lecteurs sans perte silencieuse
+
+ENTETE = "dossier,date_operation,libelle,debit,credit,reference\n"
+
+
+def _releve(tmp_path, contenu: str) -> Path:
+    chemin = tmp_path / "releve.csv"
+    chemin.write_text(contenu, encoding="utf-8")
+    return chemin
+
+
+@pytest.mark.parametrize("entetes", ["Débit,Crédit", "Debit,Credit", " DEBIT , CREDIT "])
+def test_entetes_accentues_ou_capitalises_sont_reconnus(tmp_path, entetes):
+    chemin = _releve(tmp_path, f"dossier,date_operation,libelle,{entetes},reference\n"
+                               "D1,2026-09-03,CB X,120.00,,R1\n")
+    [operation] = lire_releve(chemin)
+    assert (operation.sens, operation.montant) == (Sens.DEBIT, Decimal("120.00"))
+
+
+def test_releve_sans_colonnes_debit_credit_est_refuse(tmp_path):
+    chemin = _releve(tmp_path, "dossier,date_operation,libelle,montant,sens,reference\n"
+                               "D1,2026-09-03,CB X,120.00,D,R1\n")
+    with pytest.raises(ErreurFormat, match="debit"):
+        lire_releve(chemin)
+
+
+def test_ligne_trop_courte_ou_trop_longue_est_refusee(tmp_path):
+    with pytest.raises(ErreurFormat, match="ligne 3.*moins de cellules"):
+        lire_releve(_releve(tmp_path, ENTETE + "D1,2026-09-03,CB X,120.00,,R1\nD1,2026-09-04,CB Y\n"))
+    with pytest.raises(ErreurFormat, match="ligne 2.*plus de cellules"):
+        lire_releve(_releve(tmp_path, ENTETE + "D1,2026-09-03,CB X,120.00,,R1,en trop\n"))
+
+
+@pytest.mark.parametrize("valeur", ["NaN", "Infinity", "-Infinity", "1E5", "1e400", "0x10", "12.3.4", "1.234.567,89,1"])
+def test_montants_non_finis_ou_exotiques_sont_refuses(valeur):
+    with pytest.raises(ErreurFormat):
+        lire_montant(valeur)
+
+
+@pytest.mark.parametrize("valeur, attendu", [
+    ("1 234,56", "1234.56"), ("1.234,56", "1234.56"), ("1,234.56", "1234.56"),
+    ("1234.56", "1234.56"), ("(120,00)", "-120.00"), ("-1 234,56", "-1234.56"), ("12 EUR", "12"),
+])
+def test_formats_de_montant_usuels_lus_correctement(valeur, attendu):
+    assert lire_montant(valeur) == Decimal(attendu)
+
+
+def test_montant_a_separateurs_melanges_dans_le_mauvais_ordre_est_refuse():
+    with pytest.raises(ErreurFormat, match="ambigu"):
+        lire_montant("1.234,567.8")
+
+
+def test_champ_geant_donne_un_refus_lisible(tmp_path):
+    with pytest.raises(ErreurFormat, match="illisible"):
+        lire_releve(_releve(tmp_path, ENTETE + "D1,2026-09-03," + "X" * 200_000 + ",1.00,,R1\n"))
+
+
+@pytest.mark.parametrize("contact", ["", "pas-un-email", "a@b.fr, c@d.fr", "a@b", "a b@c.fr"])
+def test_dossier_direct_exige_une_adresse_valide(tmp_path, contact):
+    chemin = tmp_path / "dossiers.csv"
+    chemin.write_text("dossier,raison_sociale,email_contact,circuit\n"
+                      f'D1,Alpha,"{contact}",C-DIRECT\n', encoding="utf-8")
+    with pytest.raises(ErreurFormat, match="C-DIRECT"):
+        lire_dossiers(chemin)
+
+
+@pytest.mark.parametrize("motif", [".*", "^", "$", "a*", "(?:)", ".?", r"[\s\S]", r"\w|\W", "."])
+def test_expression_qui_correspond_a_tout_est_refusee(tmp_path, motif):
+    with pytest.raises(ErreurFormat, match="n'importe quel libelle"):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path, f'dossier,motif_regex\nD1,"{motif}"\n'))
+
+
+def test_code_dossier_des_regles_est_normalise_en_nfc(tmp_path):
+    decompose = unicodedata.normalize("NFD", "CAFÉ")
+    ref = Referentiel.depuis_csv(_fichier_regles(tmp_path, f"dossier,motif_regex\n{decompose},loxam\n"))
+    assert list(ref.apprises) == [unicodedata.normalize("NFC", "CAFÉ")]
+
+
+def test_expression_optionnelle_repetee_est_sondee_et_refusee(tmp_path):
+    with pytest.raises(ErreurFormat, match="ne termine pas"):
+        Referentiel.depuis_csv(_fichier_regles(tmp_path, 'dossier,motif_regex\nD1,"(a?){30}a{30}"\n'))

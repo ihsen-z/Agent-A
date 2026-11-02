@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import hashlib
+import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 from .normalisation import normaliser
 from .modeles import CIRCUITS, Dossier, OperationBancaire, Piece, Sens
 
+_ADRESSE = re.compile(r"[^@\s,;<>()]+@[^@\s,;<>()]+\.[^@\s,;<>()]+")
 _FORMATS_DATE = ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y/%m/%d")
 
 
@@ -34,17 +36,33 @@ def lire_date(valeur: str) -> dt.date:
     raise ErreurFormat(f"Date illisible : {valeur!r}")
 
 
+_MONTANT_BRUT = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)")
+_MILLIERS_VIRGULE = re.compile(r"\d{1,3}(,\d{3})+\.\d+")
+
+
 def lire_montant(valeur: str) -> Decimal:
-    """Accepte 1 234,56 / 1.234,56 / 1234.56 / (1234,56) / -1 234,56."""
-    brut = (valeur or "").strip().replace(" ", "").replace(" ", "")
+    """Accepte 1 234,56 / 1.234,56 / 1,234.56 / 1234.56 / (1234,56) / -1 234,56.
+
+    Refuse `NaN`, `Infinity`, la notation scientifique (`1E5`) et tout melange de
+    separateurs ambigu : un montant mal lu est PIRE qu'un refus (il justifierait ou
+    manquerait a tort un paiement, sans aucune alerte).
+    """
+    brut = (valeur or "").strip().replace(" ", "").replace(" ", "")
     if not brut:
         return Decimal("0")
     negatif = brut.startswith("(") and brut.endswith(")")
     brut = brut.strip("()").replace("EUR", "").replace("€", "")
     if "," in brut and "." in brut:
-        brut = brut.replace(".", "").replace(",", ".")   # 1.234,56
+        if _MILLIERS_VIRGULE.fullmatch(brut.lstrip("+-")):
+            brut = brut.replace(",", "")                       # 1,234.56
+        elif brut.rfind(",") > brut.rfind("."):
+            brut = brut.replace(".", "").replace(",", ".")     # 1.234,56
+        else:
+            raise ErreurFormat(f"Montant ambigu : {valeur!r} (separateurs melanges)")
     else:
         brut = brut.replace(",", ".")
+    if not _MONTANT_BRUT.fullmatch(brut):
+        raise ErreurFormat(f"Montant illisible : {valeur!r}")
     try:
         montant = Decimal(brut)
     except InvalidOperation as exc:
@@ -59,6 +77,44 @@ def _exiger(entetes: set[str], attendues: set[str], fichier: str) -> None:
             f"{fichier} : colonnes manquantes {sorted(manquantes)}. "
             f"Colonnes trouvees : {sorted(entetes)}"
         )
+
+
+def _entete(nom: str) -> str:
+    """`Débit`, ` DEBIT ` et `debit` designent la meme colonne."""
+    sans_accent = unicodedata.normalize("NFKD", nom).encode("ascii", "ignore").decode("ascii")
+    return sans_accent.strip().lower().replace(" ", "_")
+
+
+def _lignes(f, fichier: str):
+    """Lit un CSV : renvoie (en-tetes normalises, iterateur de (numero, ligne)). Refuse tout ce
+    qui serait sinon lu de travers en silence (ligne trop courte ou trop longue, champ geant)."""
+    lecteur = csv.DictReader(f)
+    try:
+        entetes = [_entete(c) for c in (lecteur.fieldnames or [])]
+    except csv.Error as erreur:
+        raise ErreurFormat(f"{fichier} : en-tete illisible ({erreur})") from None
+    lecteur.fieldnames = entetes
+
+    def iterer():
+        numero = 1
+        while True:
+            try:
+                ligne = next(lecteur)
+            except StopIteration:
+                return
+            except csv.Error as erreur:
+                raise ErreurFormat(f"{fichier} ligne {numero + 1} : fichier illisible ({erreur})") from None
+            numero += 1
+            if None in ligne:
+                raise ErreurFormat(f"{fichier} ligne {numero} : plus de cellules que de colonnes")
+            if any(v is None for v in ligne.values()):
+                raise ErreurFormat(
+                    f"{fichier} ligne {numero} : moins de cellules que de colonnes (export tronque ?). "
+                    "Une ligne sautee en silence serait une operation jamais justifiee"
+                )
+            yield numero, ligne
+
+    return entetes, iterer()
 
 
 def _nfc(texte: str) -> str:
@@ -99,13 +155,9 @@ def lire_releve(chemin: Path | str, dossier_defaut: str | None = None) -> list[O
     operations: list[OperationBancaire] = []
     rangs: dict[str, int] = {}
     with open(chemin, newline="", encoding="utf-8-sig") as f:
-        lecteur = csv.DictReader(f)
-        _exiger(
-            set(lecteur.fieldnames or []),
-            {"date_operation", "libelle", "reference"},
-            chemin.name,
-        )
-        for numero, ligne in enumerate(lecteur, start=2):
+        entetes, lignes = _lignes(f, chemin.name)
+        _exiger(set(entetes), {"date_operation", "libelle", "reference", "debit", "credit"}, chemin.name)
+        for numero, ligne in lignes:
             debit = lire_montant(ligne.get("debit", ""))
             credit = lire_montant(ligne.get("credit", ""))
             if debit == 0 and credit == 0:
@@ -156,13 +208,9 @@ def lire_pieces(chemin: Path | str) -> list[Piece]:
     chemin = Path(chemin)
     pieces: list[Piece] = []
     with open(chemin, newline="", encoding="utf-8-sig") as f:
-        lecteur = csv.DictReader(f)
-        _exiger(
-            set(lecteur.fieldnames or []),
-            {"id_piece", "dossier", "fournisseur", "date_facture", "montant_ttc"},
-            chemin.name,
-        )
-        for numero, ligne in enumerate(lecteur, start=2):
+        entetes, lignes = _lignes(f, chemin.name)
+        _exiger(set(entetes), {"id_piece", "dossier", "fournisseur", "date_facture", "montant_ttc"}, chemin.name)
+        for numero, ligne in lignes:
             reception = (ligne.get("date_reception") or "").strip()
             montant_piece = lire_montant(ligne["montant_ttc"])
             if montant_piece < 0:
@@ -201,9 +249,9 @@ def lire_alias(chemin: Path | str | None) -> dict[str, str]:
     alias: dict[str, str] = {}
     vus: dict[str, tuple[str, int]] = {}      # alias normalise -> (fournisseur, ligne)
     with open(chemin, newline="", encoding="utf-8-sig") as f:
-        lecteur = csv.DictReader(f)
-        _exiger(set(lecteur.fieldnames or []), {"alias", "fournisseur"}, chemin.name)
-        for numero, ligne in enumerate(lecteur, start=2):
+        entetes, lignes = _lignes(f, chemin.name)
+        _exiger(set(entetes), {"alias", "fournisseur"}, chemin.name)
+        for numero, ligne in lignes:
             cle = (ligne.get("alias") or "").strip()
             valeur = (ligne.get("fournisseur") or "").strip()
             if not cle or not valeur:
@@ -241,13 +289,9 @@ def lire_dossiers(
     chemin = Path(chemin)
     dossiers: dict[str, Dossier] = {}
     with open(chemin, newline="", encoding="utf-8-sig") as f:
-        lecteur = csv.DictReader(f)
-        _exiger(
-            set(lecteur.fieldnames or []),
-            {"dossier", "raison_sociale", "email_contact"},
-            chemin.name,
-        )
-        for numero, ligne in enumerate(lecteur, start=2):
+        entetes, lignes = _lignes(f, chemin.name)
+        _exiger(set(entetes), {"dossier", "raison_sociale", "email_contact"}, chemin.name)
+        for numero, ligne in lignes:
             code = _nfc(ligne["dossier"])
             if code in dossiers:
                 raise ErreurFormat(
@@ -269,10 +313,20 @@ def lire_dossiers(
                     f"{chemin.name} : circuit '{circuit}' inconnu pour {code} "
                     f"(attendu : {', '.join(CIRCUITS)})"
                 )
+            if circuit == "C-DIRECT" and not _ADRESSE.fullmatch((ligne["email_contact"] or "").strip()):
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : dossier {code} en C-DIRECT sans adresse "
+                    f"email_contact valide ({(ligne['email_contact'] or '').strip()!r}) : une seule "
+                    "adresse du type nom@domaine.fr est attendue"
+                )
             if circuit == "C-RELAIS" and not email_relais:
                 raise ErreurFormat(
                     f"{chemin.name} : le dossier {code} est en C-RELAIS "
                     "mais email_relais est vide"
+                )
+            if email_relais and not _ADRESSE.fullmatch(email_relais):
+                raise ErreurFormat(
+                    f"{chemin.name} ligne {numero} : email_relais invalide pour {code} ({email_relais!r})"
                 )
             domaines = tuple(
                 d for d in (x.strip().lower() for x in (ligne.get("domaines") or "").split(";")) if d

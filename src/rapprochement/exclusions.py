@@ -20,6 +20,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,7 +177,7 @@ def _contre_exemple(operation: OperationBancaire) -> bool:
 STATUTS_REGLE = ("validee", "proposee")
 COLONNES_REGLE = ("dossier", "motif_regex", "motif", "nom", "auteur", "date_activation", "statut")
 LONGUEUR_MAX_REGEX = 300
-DELAI_SONDE_REGEX = 5.0   # secondes, pour l'ensemble des expressions a sonder
+DELAI_SONDE_REGEX = 2.0   # secondes, pour l'ensemble des expressions a sonder
 
 
 def _analyser_regex(motif: str) -> str:
@@ -187,7 +188,7 @@ def _analyser_regex(motif: str) -> str:
     les dossiers (le module `re` ne peut pas etre interrompu). Une alternative quantifiee
     (`(a|aa)+`) peut l'etre aussi : elle est sondee dans un processus a part, avec un delai.
     """
-    pile: list[list[bool]] = []          # [contient un quantificateur, contient une alternative]
+    pile: list[list[bool]] = []          # [quantificateur, alternative, optionnel]
     a_sonder = False
     i, n = 0, len(motif)
     while i < n:
@@ -206,20 +207,27 @@ def _analyser_regex(motif: str) -> str:
             i += 1
             if i < n and motif[i] in "+*{" and pile:
                 pile[-1][0] = True
+            elif i < n and motif[i] == "?" and pile:
+                pile[-1][2] = True
             continue
         if c == "(":
-            pile.append([False, False])
+            pile.append([False, False, False])
+            if motif.startswith("?", i + 1):
+                i += 2                            # (?:  (?i)  (?P<n>  : pas un quantificateur
+                continue
         elif c == "|" and pile:
             pile[-1][1] = True
         elif c in "+*{" and pile:
             pile[-1][0] = True
+        elif c == "?" and pile:
+            pile[-1][2] = True
         elif c == ")" and pile:
-            contient_quantificateur, contient_alternative = pile.pop()
+            contient_quantificateur, contient_alternative, contient_optionnel = pile.pop()
             suivant = motif[i + 1] if i + 1 < n else ""
             if suivant in ("+", "*", "{"):
                 if contient_quantificateur:
                     return "risquee"
-                if contient_alternative:
+                if contient_alternative or contient_optionnel:
                     a_sonder = True
                 if pile:
                     pile[-1][0] = True       # un groupe quantifie compte comme quantificateur du parent
@@ -232,7 +240,7 @@ def _analyser_regex(motif: str) -> str:
 _CODE_SONDE = (
     "import re, sys, json\n"
     "motifs = json.loads(sys.stdin.read())\n"
-    "essais = ['a' * 40 + '!', 'ab' * 30 + '!', ' ' * 50 + 'x', '1' * 40 + 'X', 'x' * 80]\n"
+    "essais = ['a' * k for k in (22, 26, 28, 29, 31, 40)] + ['a' * 40 + '!', 'ab' * 30 + '!', ' ' * 50 + 'x', '1' * 40 + 'X', 'x' * 80]\n"
     "for i, m in enumerate(motifs):\n"
     "    r = re.compile(m)\n"
     "    for t in essais:\n"
@@ -317,14 +325,13 @@ class Referentiel:
                 raise ErreurFormat(
                     f"{nom_fichier} : colonne(s) manquante(s) : {', '.join(sorted(manquantes))}"
                 )
-            a_sonder: list[tuple[int, str]] = []
             for numero, cellules in enumerate(lecteur, start=2):
                 if not any(c.strip() for c in cellules):
                     continue
                 if len(cellules) > len(entete):
                     raise ErreurFormat(f"{nom_fichier} ligne {numero} : plus de cellules que de colonnes")
                 ligne = dict(zip(entete, cellules + [""] * (len(entete) - len(cellules))))
-                dossier = ligne["dossier"].strip()
+                dossier = unicodedata.normalize("NFC", ligne["dossier"].strip())
                 motif_regex = ligne["motif_regex"].strip()
                 if not dossier or not motif_regex:
                     raise ErreurFormat(
@@ -342,15 +349,6 @@ class Referentiel:
                         f"{nom_fichier} ligne {numero} : expression reguliere invalide "
                         f"« {motif_regex} » ({erreur})"
                     ) from None
-                classe = _analyser_regex(motif_regex)
-                if classe == "risquee":
-                    raise ErreurFormat(
-                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » contient des "
-                        "quantificateurs imbriques : son temps d'execution est exponentiel et elle "
-                        "gelerait le cycle de TOUS les dossiers. Reecrivez-la plus simplement"
-                    )
-                if classe == "a_sonder":
-                    a_sonder.append((numero, motif_regex))
                 if "statut" in entete:
                     statut = ligne["statut"].strip().lower()
                     if not statut:
@@ -360,10 +358,32 @@ class Referentiel:
                         )
                 else:
                     statut = "validee"
+                classe = _analyser_regex(motif_regex)
+                if classe == "risquee":
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » contient des "
+                        "quantificateurs imbriques : son temps d'execution est exponentiel et elle "
+                        "gelerait le cycle de TOUS les dossiers. Reecrivez-la plus simplement"
+                    )
+                if classe == "a_sonder" and _sonder([motif_regex]) is not None:
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » ne termine pas "
+                        f"en {DELAI_SONDE_REGEX:g} s sur un texte d'essai : elle gelerait le cycle de "
+                        "TOUS les dossiers. Reecrivez-la plus simplement"
+                    )
                 if statut not in STATUTS_REGLE:
                     raise ErreurFormat(
                         f"{nom_fichier} ligne {numero} : statut « {statut} » inconnu "
                         f"(attendu : {', '.join(STATUTS_REGLE)})"
+                    )
+                motif_compile = re.compile(motif_regex)
+                if statut == "validee" and (motif_compile.search("") or all(
+                    motif_compile.search(t) for t in ("a", "1", "x y", "ZZ-9", "PRLV SEPA")
+                )):
+                    raise ErreurFormat(
+                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » correspond a "
+                        "(presque) n'importe quel libelle : elle exclurait TOUTES les operations du "
+                        "dossier, qui ne seraient plus jamais relancees. Precisez un mot ou un motif"
                     )
                 motif = ligne.get("motif", "").strip() or "Exclu par le cabinet"
                 nom = ligne.get("nom", "").strip()
@@ -375,15 +395,6 @@ class Referentiel:
                     })
                     continue
                 apprises.setdefault(dossier, []).append((motif_regex, motif, nom))
-            if a_sonder:
-                rang = _sonder([m for _, m in a_sonder])
-                if rang is not None:
-                    numero, motif_regex = a_sonder[rang]
-                    raise ErreurFormat(
-                        f"{nom_fichier} ligne {numero} : l'expression « {motif_regex} » ne termine pas "
-                        f"en {DELAI_SONDE_REGEX:g} s sur un texte d'essai : elle gelerait le cycle de "
-                        "TOUS les dossiers. Reecrivez-la plus simplement"
-                    )
         return cls(apprises, provisoires)
 
     def exclure(self, operation: OperationBancaire) -> tuple[bool, str, str]:
