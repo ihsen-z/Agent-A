@@ -1265,3 +1265,91 @@ def test_plusieurs_incertains_il_faut_tous_les_trancher(depot, journal) -> None:
     trancher_envoi_incertain(depot, journal, "cccc", "Alice", parti=False, maintenant=MAINTENANT)
     envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT, creneau_ok=lambda _: True)
     assert exp.n == 1 and statut(depot, second) is S.ENVOYEE
+
+
+# ---------------------------------------------------------------------------
+# limite_hebdomadaire=False : mode test explicite, ne coupe QUE ce garde-fou
+# ---------------------------------------------------------------------------
+
+
+def ignorees(journal: FauxJournal) -> list[FausseEntree]:
+    return [e for e in journal.entrees if e.action == "limite_hebdomadaire_ignoree"]
+
+
+def test_limite_hebdo_vraie_par_defaut_refuse_a_6_jours(depot, journal, valide) -> None:
+    deja_parti(depot, "client@exemple.fr", JOUR0 - dt.timedelta(days=6))
+    exp = Espion()
+    with pytest.raises(EnvoiLimiteHebdomadaire):
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True)
+    with pytest.raises(EnvoiLimiteHebdomadaire):  # explicite : meme comportement
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=True)
+    assert exp.n == 0 and ignorees(journal) == []
+
+
+def test_limite_hebdo_desactivee_autorise_et_journalise(depot, journal, valide) -> None:
+    deja_parti(depot, "client@exemple.fr", JOUR0 - dt.timedelta(days=6))
+    exp = Espion()
+    r = envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=False)
+    assert r.statut is S.ENVOYEE and exp.n == 1
+    (e,) = ignorees(journal)
+    assert (e.acteur, e.objet) == ("systeme", valide.id_relance)
+    assert e.details["destinataire"] == "client@exemple.fr" and e.details["envoi_recent_ignore"] is True
+    acts = journal.actions()
+    assert acts.index("limite_hebdomadaire_ignoree") < acts.index("envoi_demarre") < acts.index("envoi_effectue")
+
+
+def test_limite_hebdo_desactivee_enchaine_les_essais_meme_jour(depot, journal) -> None:
+    exp = Espion()
+    for ident in ("aaaa", "bbbb", "cccc"):
+        valider_un_autre(depot, journal, ident)
+        envoyer(depot, journal, exp, ident, maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=False)
+    assert exp.n == 3 and len(ignorees(journal)) == 3
+    assert [e.details["envoi_recent_ignore"] for e in ignorees(journal)] == [False, True, True]
+
+
+def test_limite_hebdo_desactivee_ne_contourne_pas_la_validation(depot, journal, b) -> None:
+    exp = Espion()
+    deja_parti(depot, "client@exemple.fr", JOUR0)
+    with pytest.raises(EnvoiNonValide):  # BROUILLON
+        envoyer(depot, journal, exp, b.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=False)
+    forge = faire_brouillon(id_relance="forge", statut=S.VALIDEE, valide_par="systeme")
+    depot.sauver_brouillon(forge)
+    with pytest.raises(EnvoiNonValide):  # VALIDEE forgee sans humain
+        envoyer(depot, journal, exp, "forge", maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=False)
+    assert exp.n == 0 and ignorees(journal) == []
+    assert statut(depot, b) is S.BROUILLON and statut(depot, forge) is S.VALIDEE
+
+
+def test_limite_hebdo_desactivee_ne_contourne_pas_un_incertain_en_attente(depot, journal) -> None:
+    mettre_en_incertain(depot, journal, "aaaa")
+    second = valider_un_autre(depot, journal, "bbbb")
+    exp = Espion()
+    with pytest.raises(EnvoiIncertainEnAttente):
+        envoyer(depot, journal, exp, "bbbb", maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=False)
+    assert exp.n == 0 and statut(depot, second) is S.VALIDEE and ignorees(journal) == []
+
+
+def test_limite_hebdo_desactivee_ne_contourne_pas_le_creneau(depot, journal, valide) -> None:
+    exp = Espion()
+    with pytest.raises(EnvoiHorsCreneau):
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: False,
+                limite_hebdomadaire=False)
+    assert exp.n == 0 and statut(depot, valide) is S.VALIDEE and ignorees(journal) == []
+
+
+def test_limite_hebdo_desactivee_garde_les_issues_et_le_zero_doublon(depot, journal, valide) -> None:
+    exp = Espion(leve=TimeoutError("t"))
+    with pytest.raises(TimeoutError):
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=False)
+    exp.leve = None
+    with pytest.raises(EnvoiNonValide):
+        envoyer(depot, journal, exp, valide.id_relance, maintenant=MAINTENANT, creneau_ok=lambda _: True,
+                limite_hebdomadaire=False)
+    assert exp.n == 1 and statut(depot, valide) is S.EN_COURS

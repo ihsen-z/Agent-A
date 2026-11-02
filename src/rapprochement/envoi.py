@@ -278,6 +278,7 @@ def _preparer_envoi(
     jour_envoi: dt.date,
     fuseau: str,
     creneau_ok: Callable[[dt.datetime], bool] | None,
+    limite_hebdomadaire: bool,
 ) -> Brouillon:
     """Etapes 1 a 3 : controles, creneau, limite hebdomadaire, puis VALIDEE -> EN_COURS. N'emet rien."""
     # 1. Statut et validation humaine.
@@ -307,7 +308,7 @@ def _preparer_envoi(
         # donc 6 jours ecoules = refuse, 7 = autorise. Dates locales du fuseau de l'appel.
         depuis = jour_envoi - dt.timedelta(days=FENETRE_HEBDO_JOURS - 1)
         deja = depot.historique_envois(destinataire=courant.destinataire, depuis=depuis)
-        if deja:
+        if deja and limite_hebdomadaire:
             dernier = max(deja, key=lambda e: e.date_envoi)
             raise EnvoiLimiteHebdomadaire(
                 f"un message est deja parti vers ce destinataire le {dernier.date_envoi.isoformat()} "
@@ -325,6 +326,19 @@ def _preparer_envoi(
                 )
         en_cours = dataclasses.replace(courant, statut=StatutBrouillon.EN_COURS)
         _maj(depot, en_cours)
+        if not limite_hebdomadaire:
+            # Mode test explicite : la trace d'audit montre que ce garde-fou-la etait coupe.
+            journal.ecrire(
+                ACTEUR_SYSTEME,
+                "limite_hebdomadaire_ignoree",
+                id_relance,
+                {
+                    "destinataire": courant.destinataire,
+                    "valide_par": courant.valide_par,
+                    "envoi_recent_ignore": bool(deja),
+                },
+                horodatage=maintenant,
+            )
         journal.ecrire(
             ACTEUR_SYSTEME,
             "envoi_demarre",
@@ -344,16 +358,23 @@ def envoyer(
     maintenant: dt.datetime,
     fuseau: str = "Europe/Paris",
     creneau_ok: Callable[[dt.datetime], bool] | None = None,
+    limite_hebdomadaire: bool = True,
 ) -> Brouillon:
     """Emet un brouillon VALIDEE. UNIQUE chemin d'emission du module.
 
     Un brouillon dont l'envoi a ete tente (EN_COURS, ENVOYEE) est refuse :
     c'est la garantie de zero doublon. Tout refus est journalise (`envoi_refuse`).
+
+    `limite_hebdomadaire=False` (mode test, explicite) saute UNIQUEMENT la limite d'un
+    e-mail par destinataire sur 7 jours, et le journalise (`limite_hebdomadaire_ignoree`).
+    Validation humaine, envoi incertain en attente, creneau et transitions restent actifs.
     """
     _exiger_horodatage(maintenant)
     jour_envoi = maintenant.astimezone(ZoneInfo(fuseau)).date()  # avant tout effet : echec = rien ne part
     try:
-        en_cours = _preparer_envoi(depot, journal, id_relance, maintenant, jour_envoi, fuseau, creneau_ok)
+        en_cours = _preparer_envoi(
+            depot, journal, id_relance, maintenant, jour_envoi, fuseau, creneau_ok, limite_hebdomadaire
+        )
     except (EnvoiNonValide, EnvoiHorsCreneau) as exc:
         _refus(journal, "envoyer", id_relance, exc, maintenant)
         raise
