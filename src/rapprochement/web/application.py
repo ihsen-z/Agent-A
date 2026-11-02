@@ -383,7 +383,7 @@ class Application:
         else:
             attendu = req.session.csrf if req.session else ""
         if not attendu or not recu or not hmac.compare_digest(recu.encode("utf-8", "surrogatepass"),
-                                                              attendu.encode("ascii")):
+                                                              attendu.encode("utf-8", "surrogatepass")):
             self.journal.warning("refus CSRF (jeton) %s", req.chemin)
             raise refus
 
@@ -430,8 +430,10 @@ class Application:
             alertes.append(f"{exc}. Toute écriture est refusée.")
         except Exception:  # noqa: BLE001 - le cadre ne doit jamais empecher d'afficher une page
             self.journal.warning("cadre : mode de l'instance illisible", exc_info=True)
-        if fige == "test":
-            mode = True                                         # une instance de test reste de test
+        if fige is not None:
+            # Le bandeau « DONNEES FICTIVES » suit le mode FIGE de l'instance, jamais config.json :
+            # une instance reelle ne l'affiche pas, une instance de test le garde.
+            mode = fige == "test"
         try:
             cycle.charger_config(self.instance)               # valide config.json (ConfigInvalide)
             demande = cycle.mode_demande(self.instance)
@@ -708,7 +710,11 @@ class Application:
         cle = req.f("cle", requis=True, max_=64)
         with self._lecture() as depot:
             file = depot.file_humaine(resolue=False) if depot else []
-        trouvees = [d for d in file if hmac.compare_digest(cle_entree(d.message_id, d.empreinte), cle)]
+        # Comparaison sur des OCTETS : `compare_digest` leve TypeError sur une chaine non ASCII
+        # (saisie forgee), ce qui donnerait une erreur 500.
+        recue = cle.encode("utf-8", "surrogatepass")
+        trouvees = [d for d in file
+                    if hmac.compare_digest(cle_entree(d.message_id, d.empreinte).encode("ascii"), recue)]
         if len(trouvees) != 1:
             raise ErreurHttp(409, "Action refusée", "Entrée introuvable ou déjà traitée.", retour="/non-rattaches")
         d = trouvees[0]

@@ -88,7 +88,10 @@ aucun effet.
 **Le mode est figé par instance.** Le premier cycle enregistre le mode (« test »
 ou « réel ») ; il ne change plus jamais. L'en-tête de chaque page affiche
 « Instance : mode test », « mode réel » ou « mode non figé (aucun cycle) » ; une
-instance de test garde le bandeau même si `config.json` ne dit plus `mode_test`.
+instance de test garde le bandeau même si `config.json` ne dit plus `mode_test`, et
+une instance réelle ne l'affiche **jamais**, même si `config.json` demande le mode
+test : le bandeau « DONNEES FICTIVES » suit le mode figé, pas le fichier (avant le
+premier cycle seulement, il suit `config.json`).
 Si `config.json` demande l'autre mode, un bandeau d'alerte le signale et toute
 décision est refusée par le cycle (`ModeInstanceIncompatible`), affichée comme un
 refus lisible (409), rien n'étant écrit. Pour changer de mode : créer une nouvelle
@@ -192,9 +195,10 @@ sans trace technique.
 
 Une action de responsable demandée par un comptable (formulaire forgé compris)
 reçoit `403`. **Défense en profondeur** : arbitrer, trancher et réparer sont
-refusés aussi par le cycle si le nom n'est pas dans `responsables.txt`. Exception
-assumée : `cycle.rattacher_piece` accepte `forcer` de tout validateur (comme la
-ligne de commande `--forcer`) ; seule l'interface le réserve au responsable.
+refusés aussi par le cycle si le nom n'est pas dans `responsables.txt` ; il en va
+de même du forçage d'un rattachement (`cycle.rattacher_piece` avec `forcer`, comme
+`--forcer` en ligne de commande) : l'interface le réserve au rôle responsable et le
+cycle le refuse à tout nom absent de `responsables.txt`.
 
 Un rattachement vers un dossier différent de celui de la décision de routage est
 refusé par le cycle (CA-03, journal `rattachement_refuse`) : la page l'explique et

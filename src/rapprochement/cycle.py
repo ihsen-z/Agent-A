@@ -122,6 +122,7 @@ from __future__ import annotations
 
 import atexit
 import csv
+import email.utils
 import dataclasses
 import datetime as dt
 import io
@@ -471,6 +472,55 @@ def _mode_enregistre(depot: Depot) -> str | None:
     return presents[0] if presents else None
 
 
+_MARQUE_MODE_JOURNAL = b'"action":"mode_instance"'
+
+
+def _modes_du_journal(inst: Instance) -> list[str]:
+    """Modes inscrits au journal d'audit par les entrees `mode_instance`, dans l'ordre. Une seule
+    passe sur les octets (la forme canonique des lignes rend la recherche fiable : un guillemet
+    dans une valeur est echappe). Journal absent : []. Une ligne illisible est ignoree ici ; la
+    chaine de hachage est l'affaire de `verifier_audit`."""
+    if not inst.audit.exists():
+        return []
+    modes = []
+    for ligne in inst.audit.read_bytes().split(b"\n"):
+        if _MARQUE_MODE_JOURNAL not in ligne:
+            continue
+        try:
+            entree = json.loads(ligne)
+        except ValueError:
+            continue
+        if isinstance(entree, dict) and entree.get("action") == "mode_instance":
+            details = entree.get("details")
+            mode = details.get("mode") if isinstance(details, dict) else None
+            if mode in MODES_INSTANCE:
+                modes.append(mode)
+    return modes
+
+
+def _mode_etabli(inst: Instance, depot: Depot | None) -> str | None:
+    """Mode de l'instance, recoupe BASE et JOURNAL : la base seule tient en une ligne SQL, qu'on peut
+    supprimer (ou toute la base recreee, restauree d'une vieille sauvegarde) pour refiger l'instance
+    dans l'autre mode. Le journal d'audit, chaine, garde l'entree `mode_instance`. Base et journal
+    qui se contredisent, ou un journal qui porte les deux modes : `ModeInstanceIncompatible`.
+    Un seul des deux connait le mode : c'est lui qui fait foi."""
+    base = _mode_enregistre(depot) if depot is not None else None
+    dans_le_journal = set(_modes_du_journal(inst))
+    if len(dans_le_journal) > 1:
+        raise ModeInstanceIncompatible(
+            "le journal d'audit enregistre a la fois le mode test et le mode reel pour cette instance : "
+            "journal contradictoire, instance a refuser (creer une nouvelle instance)"
+        )
+    journal = next(iter(dans_le_journal), None)
+    if base is not None and journal is not None and base != journal:
+        raise ModeInstanceIncompatible(
+            f"le mode de l'instance est contradictoire : la base dit {base}, le journal d'audit dit "
+            f"{journal} (base recreee ou restauree, marqueur modifie, journal remplace) : "
+            "instance a refuser, creer une nouvelle instance"
+        )
+    return base or journal
+
+
 def mode_instance(instance: Instance | Path | str) -> str | None:
     """Mode de l'instance, « test » ou « reel », tel que le premier cycle l'a FIGE ; None si
     aucun cycle n'a encore eu lieu. Lecture seule (ne cree rien) : pour le bandeau de
@@ -482,12 +532,48 @@ def mode_instance(instance: Instance | Path | str) -> str | None:
     refuse (`ModeInstanceIncompatible`) AVANT toute ecriture s'ils different. Une instance de
     test ne devient donc JAMAIS reelle, et inversement. Consequence voulue : dans une instance
     de test tout est simule, y compris l'historique des envois, le passage des pieces a
-    DEMANDEE et la limite hebdomadaire."""
+    DEMANDEE et la limite hebdomadaire. La base et le journal sont recoupes : s'ils se
+    contredisent (`ModeInstanceIncompatible`), aucune operation n'est possible ; voir
+    `controler_mode`."""
     inst = Instance.de(instance)
     if not inst.depot.exists():
-        return None
+        return _mode_etabli(inst, None)
     with Depot(inst.depot) as depot:
-        return _mode_enregistre(depot)
+        return _mode_etabli(inst, depot)
+
+
+def _marqueurs_de_mode(inst: Instance) -> list[str]:
+    """Marqueurs de mode presents dans la base (vide si la base n'existe pas)."""
+    if not inst.depot.exists():
+        return []
+    with Depot(inst.depot) as depot:
+        return [m for m in MODES_INSTANCE if depot.est_vu(CLE_MODE_INSTANCE + m)]
+
+
+def controler_mode(instance: Instance | Path | str) -> tuple[str, ...]:
+    """Incoherences du mode fige (lecture seule), pour `controler-envois` et `verifier-audit` :
+    deux marqueurs dans la base, journal portant les deux modes, base et journal en desaccord,
+    marqueur de la base absent alors que le journal le connait (base recreee), ou entree
+    `mode_instance` absente du journal alors que la base le connait. () si tout concorde ou si
+    aucun cycle n'a eu lieu."""
+    inst = Instance.de(instance)
+    problemes: list[str] = []
+    marqueurs = _marqueurs_de_mode(inst)
+    base = marqueurs[0] if len(marqueurs) == 1 else None
+    if len(marqueurs) > 1:
+        problemes.append("la base porte a la fois le marqueur test et le marqueur reel")
+    dans_le_journal = _modes_du_journal(inst)
+    distincts = sorted(set(dans_le_journal))
+    journal = distincts[0] if len(distincts) == 1 else None
+    if len(distincts) > 1:
+        problemes.append("le journal enregistre a la fois le mode test et le mode reel")
+    if base and journal and base != journal:
+        problemes.append(f"la base dit {base} et le journal dit {journal} (base recreee ou restauree ?)")
+    elif base and not dans_le_journal:
+        problemes.append(f"la base dit {base} mais le journal ne contient aucune entree mode_instance")
+    elif journal and not marqueurs:
+        problemes.append(f"le journal dit {journal} mais le marqueur du depot est absent (base recreee ?)")
+    return tuple(problemes)
 
 
 def mode_demande(instance: Instance | Path | str, mode_test: bool = False) -> str:
@@ -503,8 +589,8 @@ def _refus_mode(enregistre: str, demande: str) -> ModeInstanceIncompatible:
     )
 
 
-def _exiger_mode(depot: Depot, demande: str) -> str | None:
-    enregistre = _mode_enregistre(depot)
+def _exiger_mode(inst: Instance, depot: Depot, demande: str) -> str | None:
+    enregistre = _mode_etabli(inst, depot)
     if enregistre is not None and enregistre != demande:
         raise _refus_mode(enregistre, demande)
     return enregistre
@@ -518,14 +604,24 @@ def _exiger_mode_instance(inst: Instance, mode_test: bool) -> None:
         raise _refus_mode(enregistre, demande)
 
 
-def _figer_mode(depot: Depot, journal: JournalAudit, demande: str, source: str, aujourdhui: dt.date,
-                maintenant: dt.datetime) -> None:
-    """Premier cycle : enregistre le mode (transaction d'abord, journal ensuite)."""
-    if _mode_enregistre(depot) is not None:
-        return
+def _figer_mode(inst: Instance, depot: Depot, journal: JournalAudit, demande: str, source: str,
+                aujourdhui: dt.date, maintenant: dt.datetime) -> None:
+    """Premier cycle : enregistre le mode dans la base ET au journal (transaction d'abord, journal
+    ensuite). Base sans marqueur mais journal qui connait deja ce mode (base recreee) : le marqueur
+    est retabli et la reprise est journalisee (`mode_marqueur_retabli`). `_ouvrir` a deja verifie
+    que `demande` est le mode de l'instance, base et journal recoupes."""
+    base = _mode_enregistre(depot)
+    dans_le_journal = _modes_du_journal(inst)
+    if base is not None:
+        return                                        # deja fige ; un journal sans entree est signale par `controler_mode`
     existantes = len(depot.charger_pieces())
     with depot.transaction():
         depot.marquer_vu(CLE_MODE_INSTANCE + demande)
+    if dans_le_journal:
+        journal.ecrire(ACTEUR_SYSTEME, "mode_marqueur_retabli", aujourdhui.isoformat(), {
+            "mode": demande, "pieces_deja_presentes": existantes,
+        }, horodatage=maintenant)
+        return
     journal.ecrire(ACTEUR_SYSTEME, "mode_instance", aujourdhui.isoformat(), {
         "mode": demande, "source": source, "pieces_deja_presentes": existantes,
     }, horodatage=maintenant)
@@ -545,7 +641,7 @@ def _ouvrir(instance: Instance, *, ecriture: bool = False,
     depot = Depot(instance.depot)
     try:
         if mode is not None:
-            _exiger_mode(depot, mode)
+            _exiger_mode(instance, depot, mode)
         yield depot, journal
     finally:
         depot.fermer()
@@ -1059,6 +1155,8 @@ def executer_cycle(
     # D6 : hors mode test, un dossier sans circuit explicite est refuse (avant toute ecriture).
     entrees = lire_entrees(entree, circuit_obligatoire=not en_mode_test)
     sans_circuit = dossiers_sans_circuit(Path(entree) / "dossiers.csv") if en_mode_test else []
+    if en_mode_test:
+        verifier_adresse_test(config["adresse_test"], entrees.dossiers)         # jamais l'adresse d'un client
 
     # 2. Collisions dans le releve : refus AVANT toute ecriture.
     collisions = collisions_de_reference(entrees.operations)
@@ -1094,7 +1192,7 @@ def executer_cycle(
         notes = _Notes(journal, maintenant)
         # Le PREMIER cycle d'une instance fige son mode (test ou reel) ; les suivants, comme
         # toute operation, ont deja ete confrontes a lui par `_ouvrir`.
-        _figer_mode(depot, journal, mode_cycle,
+        _figer_mode(inst, depot, journal, mode_cycle,
                     "config.json et --mode-test" if mode_test and config["mode_test"]
                     else "--mode-test" if mode_test else "config.json" if config["mode_test"] else "defaut",
                     aujourdhui, maintenant)
@@ -1828,6 +1926,57 @@ def _controler_avant_envoi(depot: Depot, journal: JournalAudit, b: Brouillon,
         raise exc
 
 
+def _adresses_de(champ: str) -> list[str]:
+    """Adresses (minuscules) d'un champ libre : `a@x.fr`, `Nom <a@x.fr>`, `a@x.fr; b@y.fr`."""
+    trouvees = []
+    for _, spec in email.utils.getaddresses([(champ or "").replace(";", ",")]):
+        spec = spec.strip().lower()
+        if "@" in spec:
+            trouvees.append(spec)
+    return trouvees
+
+
+def _controle_adresse_test(adresse_test: str, clients: Iterable[tuple[str, str]],
+                           domaines_declares: Iterable[tuple[str, str]] = ()) -> None:
+    """Refuse (`ConfigInvalide`) une adresse de test qui est celle d'un client ou dont le domaine
+    est celui d'un client : un « envoi de test » partirait alors chez lui. `clients` : paires
+    (adresse, origine). Comparaison insensible a la casse. Le domaine d'un fournisseur de messagerie
+    GRAND PUBLIC (gmail.com...) ne prouve rien et n'est pas compare : seule l'adresse exacte l'est."""
+    test = adresse_test.strip().lower()
+    domaine_test = test.rpartition("@")[2]
+    commun = routage.est_domaine_grand_public(domaine_test)
+    for adresse, origine in clients:
+        for a in _adresses_de(adresse):
+            if a == test:
+                raise ConfigInvalide(
+                    f"adresse_test {adresse_test!r} est l'adresse d'un client ({affichable(origine)}) : un essai "
+                    "lui ecrirait, alors que le mode test promet de ne JAMAIS ecrire a un client. "
+                    f"Choisir une adresse sans client (par defaut {ADRESSE_TEST_DEFAUT})"
+                )
+            if not commun and a.rpartition("@")[2] == domaine_test:
+                raise ConfigInvalide(
+                    f"adresse_test {adresse_test!r} est dans le domaine d'un client ({affichable(origine)}, "
+                    f"{domaine_test}) : un essai risquerait d'atterrir chez lui. "
+                    f"Choisir une adresse sans client (par defaut {ADRESSE_TEST_DEFAUT})"
+                )
+    for domaine, origine in domaines_declares:
+        if not commun and domaine.strip().lower().rstrip(".") == domaine_test:
+            raise ConfigInvalide(
+                f"adresse_test {adresse_test!r} est dans le domaine declare d'un client ({affichable(origine)}, "
+                f"{domaine_test}). Choisir une adresse sans client (par defaut {ADRESSE_TEST_DEFAUT})"
+            )
+
+
+def verifier_adresse_test(adresse_test: str, dossiers: Mapping[str, Dossier]) -> None:
+    """`adresse_test` confrontee aux contacts, relais et domaines declares de TOUS les dossiers
+    (`ConfigInvalide` si elle en est une ou s'y trouve). Appelee par `executer_cycle` en mode test,
+    avant toute ecriture."""
+    clients = [(champ, f"dossier {code}") for code, d in dossiers.items()
+               for champ in (d.email_contact, d.email_relais) if champ]
+    declares = [(dom, f"dossier {code}") for code, d in dossiers.items() for dom in d.domaines]
+    _controle_adresse_test(adresse_test, clients, declares)
+
+
 class ExpediteurTest:
     """Expediteur du mode test : enveloppe un expediteur reel et lui remet une COPIE du
     brouillon dont l'objet est prefixe `[TEST] `, le destinataire remplace par
@@ -1846,6 +1995,10 @@ class ExpediteurTest:
 
     def envoyer(self, brouillon: Brouillon) -> str:
         origine = " ".join(str(brouillon.destinataire).split())
+        try:                                       # defense en profondeur, rien n'est encore parti
+            _controle_adresse_test(self.adresse_test, [(brouillon.destinataire, "destinataire du brouillon")])
+        except ConfigInvalide as exc:
+            raise envoi_mod.ErreurEnvoiCertaine(str(exc)) from None
         copie = dataclasses.replace(
             brouillon,
             objet=PREFIXE_TEST + brouillon.objet,
@@ -1895,6 +2048,8 @@ def envoyer_relance(
             _controler_avant_envoi(depot, journal, b, maintenant, limite_hebdomadaire=limite_hebdomadaire)
         exp = expediteur if expediteur is not None else envoi_mod.ExpediteurDossier(inst.outbox)
         if en_mode_test:
+            _controle_adresse_test(config["adresse_test"], [
+                (x.destinataire, f"brouillon {x.id_relance}") for x in depot.lister_brouillons()])
             exp = ExpediteurTest(exp, config["adresse_test"])
         if creneau_libre and creneau_ok is None:
             creneau_ok = lambda _instant: True   # noqa: E731 - mode test : creneau libre, annonce
@@ -2417,12 +2572,23 @@ def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
         with Depot(inst.depot) as depot:
             en_base = {b.id_relance: b for b in depot.lister_brouillons()}
     types_d_envoi = {"envoi_effectue": "effectue", "envoi_confirme_par_humain": "confirme"}
-    envois = [e for e in entrees if e.action in types_d_envoi]
+    # UNE passe sur le journal : envois, validations et rejets indexes par brouillon. Sans index,
+    # chaque envoi balayait tout le journal (quadratique : 3 000 envois dans 66 000 entrees = 15 s).
+    envois: list[Any] = []
+    valides_par_objet: dict[str, list[Any]] = {}
+    rejetes_par_objet: dict[str, list[Any]] = {}
+    for x in entrees:
+        if x.action in types_d_envoi:
+            envois.append(x)
+        elif x.action == "valide":
+            valides_par_objet.setdefault(x.objet, []).append(x)
+        elif x.action == "rejete":
+            rejetes_par_objet.setdefault(x.objet, []).append(x)
     nombre = Counter(e.objet for e in envois)
     lignes = []
     for e in envois:
         anomalies: list[str] = []
-        valides = [v for v in entrees if v.action == "valide" and v.objet == e.objet and v.seq < e.seq]
+        valides = [v for v in valides_par_objet.get(e.objet, ()) if v.seq < e.seq]
         valide_par = ""
         if not valides:
             anomalies.append("aucune entree `valide` anterieure pour ce brouillon")
@@ -2439,7 +2605,7 @@ def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
             if _cle_nom(str(e.details.get("valide_par", ""))) != _cle_nom(valide_par):
                 anomalies.append(f"`valide_par` de l'envoi ({e.details.get('valide_par')!r}) "
                                  f"different de la validation ({valide_par!r})")
-        rejetes = [x for x in entrees if x.action == "rejete" and x.objet == e.objet and x.seq < e.seq]
+        rejetes = [x for x in rejetes_par_objet.get(e.objet, ()) if x.seq < e.seq]
         if rejetes:
             anomalies.append(f"brouillon rejete (entree {rejetes[0].seq}) puis envoye")
         if nombre[e.objet] > 1:
@@ -2474,7 +2640,7 @@ def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
         else:
             ecarts.append(f"outbox/{fichier.name} : .eml sans trace dans le journal "
                           "(aucune entree d'envoi pour ce brouillon)")
-    validees = {e.objet for e in entrees if e.action == "valide"}
+    validees = set(valides_par_objet)
     for id_relance, b in sorted(en_base.items()):
         if b.statut is not StatutBrouillon.ENVOYEE:
             continue
@@ -2482,6 +2648,7 @@ def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
                                            ("envoi_effectue", id_relance in traces)) if not present]
         if manque:
             ecarts.append(f"brouillon {id_relance} ENVOYEE en base sans entree {' ni '.join(manque)} au journal")
+    ecarts += [f"mode de l'instance : {p}" for p in controler_mode(inst)]
     return ControleEnvois(verification.ok, verification.raison, len(entrees), tuple(lignes), tuple(ecarts))
 
 
@@ -2565,6 +2732,7 @@ __all__ = [
     "collisions_de_reference",
     "contexte_file",
     "controler_envois",
+    "controler_mode",
     "controler_piece",
     "debloquer_piece",
     "dossiers_sans_circuit",
@@ -2594,5 +2762,6 @@ __all__ = [
     "suivi_pieces",
     "trancher_envoi",
     "valider_relance",
+    "verifier_adresse_test",
     "verifier_audit",
 ]

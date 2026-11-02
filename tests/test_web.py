@@ -1397,6 +1397,44 @@ def test_mode_incompatible_refus_lisible_jamais_500(app, inst):
     assert etat[:4] == avant[0][:4]
 
 
+def test_instance_reelle_jamais_de_bandeau_donnees_fictives(app, inst):
+    _figer_mode(inst, "reel")
+    (inst.racine / "config.json").write_text(json.dumps({"mode_test": True}), encoding="utf-8")
+    alice = connecte(app, ALICE)
+    for r in (alice.get("/"), alice.get("/pieces"), alice.get("/inexistant"), Client(app).get("/connexion")):
+        assert "Instance : mode réel" in r.texte
+        assert "DONNEES FICTIVES" not in r.texte and "Garde-fous coupés" not in r.texte
+        assert "créée en mode reel mais config.json demande le mode test" in r.texte
+
+
+@pytest.mark.parametrize("cle", ["é", "\u202e", "a" * 10 + "é", "x" * 64])
+def test_cle_non_ascii_jamais_d_erreur_500(app, inst, cle):
+    bob = connecte(app, BOB)
+    r = bob.action("/non-rattaches/confirmer", {"cle": cle})
+    assert r.statut == 409 and "Erreur interne" not in r.texte
+    assert not (inst.racine / "logs" / "web.log").read_text(encoding="utf-8").count("Traceback")
+
+
+def test_octets_invalides_dans_le_formulaire_400(app, inst):
+    bob = connecte(app, BOB)
+    corps = f"csrf={bob.csrf()}&cle=%ED%A0%80%FF".encode("ascii")      # UTF-8 invalide, surrogat
+    r = bob.requete("POST", "/non-rattaches/confirmer", corps=corps,
+                    type_contenu="application/x-www-form-urlencoded")
+    assert r.statut == 400 and "Erreur interne" not in r.texte
+
+
+@pytest.mark.parametrize("jeton", ["é", "\u202e" * 3, "jeton-é-" + "a" * 40])
+def test_jeton_csrf_non_ascii_refuse_sans_erreur_500(app, inst, jeton):
+    bob = connecte(app, BOB)
+    assert bob.post(f"/brouillons/{ID_BROUILLON}/valider", {"csrf": jeton}).statut == 403
+    c = Client(app)
+    c.get("/connexion")
+    assert c.post("/connexion", {"identifiant": BOB, "mot_de_passe": MDP, "csrf": jeton}).statut == 403
+    c.cookies["session"] = jeton.encode("utf-8").hex() + "é"       # cookie de session non ASCII
+    assert c.get("/").statut == 303
+    assert brouillon(inst).statut is StatutBrouillon.BROUILLON
+
+
 def test_instance_de_test_garde_son_bandeau(app, inst):
     _figer_mode(inst, "test")
     alice = connecte(app, ALICE)

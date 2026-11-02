@@ -295,7 +295,10 @@ def _executer(args: argparse.Namespace) -> int:
     if c == "verifier-audit":
         r = cycle.verifier_audit(inst)
         _afficher(f"{'OK' if r.ok else 'ALTERE'} : {r.nb_entrees} entree(s) saine(s) ; {r.raison}")
-        return 0 if r.ok else 1
+        incoherences = cycle.controler_mode(inst)          # mode fige : base et journal doivent concorder
+        for incoherence in incoherences:
+            _afficher(f"MODE INCOHERENT : {incoherence}")
+        return 0 if r.ok and not incoherences else 1
     if c == "reparer-audit":
         _avertir_roles(inst, args)
         r = cycle.reparer_audit(inst, args.par, maintenant=maintenant, mode_test=args.mode_test)

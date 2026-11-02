@@ -2081,3 +2081,626 @@ def test_regression_releve_debit_negatif_lu_comme_paiement(tmp_path) -> None:
                       'A,2026-09-03,REMBOURSEMENT LOXAM,"-50,00",,R1\n', encoding="utf-8")
     [o] = lire_releve(chemin)
     assert o.sens is Sens.CREDIT
+
+
+# ===========================================================================
+# 11. Cinquieme passage : mode fige, lecteurs stricts, application web
+# ===========================================================================
+
+import contextlib as _contextlib  # noqa: E402
+import io as _io  # noqa: E402
+import re as _re  # noqa: E402
+import shutil as _shutil  # noqa: E402
+from urllib.parse import urlencode as _urlencode  # noqa: E402
+from wsgiref.util import setup_testing_defaults as _setup_wsgi  # noqa: E402
+from zoneinfo import ZoneInfo as _ZoneInfo  # noqa: E402
+
+
+def _refuse(appel) -> bool:
+    """Vrai si l'appel est refuse proprement par le cycle (jamais une trace Python)."""
+    try:
+        appel()
+    except (cycle.ErreurCycle, envoi.EnvoiNonValide, _etats.TransitionInterdite, ErreurFormat):
+        return True
+    return False
+
+
+def _instance_test(tmp_path: Path):
+    """Instance de TEST complete : un cycle, un brouillon valide et envoye (simule)."""
+    entree, inst, b = _brouillon_valide(tmp_path, mode_test=True)
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE)
+    return entree, inst, b
+
+
+# --- 1. Mode fige : contournements -------------------------------------------------------
+
+
+def _operations_ecriture(inst, b):
+    return {
+        "envoyer": lambda: cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE),
+        "rejeter": lambda: cycle.rejeter_relance(inst, b.id_relance, VALIDEUSE, "x", maintenant=a(J0)),
+        "valider": lambda: cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a(J0)),
+        "rattacher": lambda: cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a(J0), dossier="ALPHA",
+                                                   reference="A-001", id_piece="p"),
+        "controler": lambda: cycle.controler_piece(inst, "ALPHA", "A-001", VALIDEUSE, conforme=True, maintenant=a(J0)),
+        "bloquer": lambda: cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="m", maintenant=a(J0)),
+        "debloquer": lambda: cycle.debloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="m", maintenant=a(J0)),
+        "promesse": lambda: cycle.saisir_promesse(inst, "ALPHA", "A-001", VALIDEUSE, date_promesse=J0, maintenant=a(J0)),
+        "arbitrer": lambda: cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="m", maintenant=a(J0)),
+        "trancher": lambda: cycle.trancher_envoi(inst, b.id_relance, RESPONSABLE, parti=True, maintenant=a(J0)),
+        "reparer": lambda: cycle.reparer_audit(inst, RESPONSABLE, maintenant=a(J0)),
+    }
+
+
+@pytest.mark.parametrize("nom", ["envoyer", "rejeter", "valider", "rattacher", "controler", "bloquer", "debloquer",
+                                 "promesse", "arbitrer", "trancher", "reparer"])
+def test_sain_mode_fige_config_modifiee_entre_deux_appels(tmp_path, nom) -> None:
+    """Instance reelle + config.json passe en mode test (ou l'inverse) : AUCUNE ecriture."""
+    entree, inst, b = _brouillon_valide(tmp_path / "reelle")
+    inst.config.write_text('{"mode_test": true}', encoding="utf-8")
+    avant = (etat_brut(inst), inst.audit.read_bytes())
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        _operations_ecriture(inst, b)[nom]()
+    assert (etat_brut(inst), inst.audit.read_bytes()) == avant
+    _, inst_t, bt = _instance_test_sans_envoi(tmp_path / "test")
+    inst_t.config.unlink()
+    avant = (etat_brut(inst_t), inst_t.audit.read_bytes())
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        _operations_ecriture(inst_t, bt)[nom]()
+    assert (etat_brut(inst_t), inst_t.audit.read_bytes()) == avant
+
+
+def _instance_test_sans_envoi(tmp_path: Path):
+    return _brouillon_valide(tmp_path, mode_test=True)
+
+
+def test_sain_mode_fige_instance_copiee_garde_son_mode(tmp_path) -> None:
+    entree, inst, _ = _brouillon_valide(tmp_path / "reelle")
+    copie = cycle.Instance(tmp_path / "copie")
+    _shutil.copytree(inst.racine, copie.racine)
+    assert cycle.mode_instance(copie) == "reel"
+    copie.config.write_text('{"mode_test": true}', encoding="utf-8")
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        cycle.executer_cycle(entree, copie, J0, a(J0))
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        cycle.executer_cycle(entree, copie, J0, a(J0), mode_test=True)
+
+
+def test_sain_mode_fige_marqueurs_contradictoires_refus(tmp_path) -> None:
+    """Deux marqueurs a la fois (base alteree) : refus, jamais de choix arbitraire."""
+    entree, inst, b = _brouillon_valide(tmp_path)
+    with Depot(inst.depot) as d:
+        d.marquer_vu(cycle.CLE_MODE_INSTANCE + "test")
+    for mode in (False, True):
+        with pytest.raises(cycle.ModeInstanceIncompatible):
+            cycle.rejeter_relance(inst, b.id_relance, VALIDEUSE, "x", maintenant=a(J0), mode_test=mode)
+
+
+def _supprimer_marqueurs(inst: cycle.Instance) -> None:
+    con = sqlite3.connect(inst.depot)
+    with con:
+        con.execute("DELETE FROM vus WHERE cle LIKE 'mode-instance:%'")
+    con.close()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Mode fige : sa seule source de verite est une LIGNE de la base (`vus: mode-instance:test`). "
+    "Une fois supprimee, le cycle suivant refige l'instance dans l'AUTRE mode sans la moindre "
+    "alerte (le journal garde pourtant `mode_instance: test`, jamais recoupe) : une instance de "
+    "test, ses envois simules et ses pieces DEMANDEE deviennent une instance reelle."))
+def test_defaut_mode_fige_marqueur_supprime_test_devient_reelle(tmp_path) -> None:
+    entree, inst, _ = _instance_test(tmp_path)
+    _supprimer_marqueurs(inst)
+    inst.config.unlink()
+    assert _refuse(lambda: lancer(entree, inst, J0 + dt.timedelta(days=1)))
+    assert cycle.mode_instance(inst) != "reel"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Mode fige : base supprimee (ou restauree d'une sauvegarde plus ancienne) mais journal "
+    "conserve (`mode_instance: reel`) : un cycle `--mode-test` refige la nouvelle base en mode "
+    "test et ajoute une seconde entree contradictoire au journal ; le cycle ne compare jamais le "
+    "mode demande au mode DEJA ECRIT au journal."))
+def test_defaut_mode_fige_base_recreee_journal_contradictoire(tmp_path) -> None:
+    entree, inst, _ = _brouillon_valide(tmp_path)
+    for chemin in tmp_path.glob("i/depot.sqlite*"):
+        chemin.unlink()
+    assert _refuse(lambda: cycle.executer_cycle(entree, inst, J0, a(J0), mode_test=True))
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Mode test : `adresse_test` n'est jamais confrontee aux adresses des dossiers. Avec "
+    "`adresse_test` = l'adresse REELLE d'un client, un « envoi de test » est expedie a ce client "
+    "(prefixe [TEST] seulement), alors que la garantie annoncee est « jamais vers un client »."))
+def test_defaut_mode_test_adresse_test_egale_adresse_client(tmp_path) -> None:
+    entree = ecrire_entree(tmp_path / "e")
+    inst = avec_responsable(nouvelle_instance(tmp_path / "i"))
+    inst.config.write_text(_json.dumps({"mode_test": True, "adresse_test": "compta@alpha-sarl.fr"}), encoding="utf-8")
+    try:
+        lancer(entree, inst, J0)
+        b = brouillon_de(inst, "compta@alpha-sarl.fr")
+        cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a(J0))
+        cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE)
+    except cycle.ErreurCycle:
+        return                                                       # refus lisible : acceptable
+    [f] = list(inst.outbox.glob("*.eml"))
+    assert BytesParser(policy=policy.default).parsebytes(f.read_bytes())["To"] != "compta@alpha-sarl.fr"
+
+
+# --- 2. Lecteurs stricts -------------------------------------------------------------------
+
+ENTETE_RELEVE = "dossier,date_operation,libelle,debit,credit,reference\n"
+
+
+def _cli_cycle(tmp_path: Path, **fichiers) -> object:
+    """Code de sortie de `cycle` ou l'exception levee (une trace Python = defaut)."""
+    entree = ecrire_entree(tmp_path / "e", operations=[OPERATIONS[0]])
+    for nom, contenu in fichiers.items():
+        (entree / f"{nom}.csv").write_text(contenu, encoding="utf-8")
+    inst = nouvelle_instance(tmp_path / "i")
+    with _contextlib.redirect_stdout(_io.StringIO()), _contextlib.redirect_stderr(_io.StringIO()):
+        try:
+            return charger_cli().main(["cycle", "--entree", str(entree), "--instance", str(inst.racine),
+                                       "--date", J0.isoformat()])
+        except BaseException as exc:  # noqa: BLE001
+            return exc
+
+
+@pytest.mark.parametrize("fichier, contenu", [
+    ("releve_bancaire", "dossier,date_operation,libelle,debit,credit,reference\nALPHA,2026-09-03,CB X,12.50,,R1\n"),
+    ("releve_bancaire", "﻿dossier,date_operation,libelle,debit,credit,reference\r\nALPHA,2026-09-03,CB X,12.50,,R1\r\n"),
+    ("pieces_recues", "id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc\nP1,ALPHA,f.pdf,X,2026-09-02,12.50\n"),
+])
+def test_sain_lecteurs_variantes_bien_formees_acceptees(tmp_path, fichier, contenu) -> None:
+    assert _cli_cycle(tmp_path, **{fichier: contenu}) == 0
+
+
+@pytest.mark.parametrize("octets, motif", [
+    ("dossier;date_operation;libelle;debit;credit;reference\nALPHA;2026-09-03;CB X;12.50;;R1\n", "colonnes"),
+    ("Dossier,Date_operation,Libelle,Debit,Credit,Reference\nALPHA,2026-09-03,CB X,12.50,,R1\n", "colonnes"),
+    ("", "colonnes"),
+    (ENTETE_RELEVE + "ALPHA,0000-00-00,CB X,12.50,,R1\n", "Date"),
+    (ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,12.50 12.50,,R1\n", "Montant"),
+    (ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,12.50,5.00,R1\n", "debit ET credit"),
+    ("﻿﻿" + ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,12.50,,R1\n", ""),
+])
+def test_sain_lecteur_releve_refus_lisible(tmp_path, octets, motif, capsys) -> None:
+    entree = ecrire_entree(tmp_path / "e", operations=[OPERATIONS[0]])
+    (entree / "releve_bancaire.csv").write_text(octets, encoding="utf-8")
+    inst = nouvelle_instance(tmp_path / "i")
+    code = charger_cli().main(["cycle", "--entree", str(entree), "--instance", str(inst.racine), "--date", J0.isoformat()])
+    erreur = capsys.readouterr().err
+    assert code == 1 and "REFUS" in erreur and motif in erreur and "Traceback" not in erreur
+    assert not inst.depot.exists()
+
+
+@pytest.mark.parametrize("encodage", ["cp1252", "utf-16", "latin-1"])
+def test_sain_lecteurs_encodages_non_utf8_refus_lisible(tmp_path, encodage, capsys) -> None:
+    entree = ecrire_entree(tmp_path / "e", operations=[OPERATIONS[0]])
+    (entree / "releve_bancaire.csv").write_bytes((ENTETE_RELEVE + "ALPHA,2026-09-03,CB CAFÉ,12.50,,R1\n").encode(encodage))
+    inst = nouvelle_instance(tmp_path / "i")
+    code = charger_cli().main(["cycle", "--entree", str(entree), "--instance", str(inst.racine), "--date", J0.isoformat()])
+    assert code == 1 and "UnicodeDecodeError" in capsys.readouterr().err and not inst.depot.exists()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Lecteur du releve : les colonnes `debit` et `credit` ne sont pas exigees et un en-tete "
+    "accentue ou capitalise (`Débit`, `Crédit`, `Debit`) est ignore : toutes les lignes ont alors "
+    "un montant nul et sont SAUTEES en silence. Le cycle sort 0 avec 0 operation : aucune "
+    "relance, aucune alerte (manque rate total, CA-02). Les banques francaises exportent « Débit »."))
+@pytest.mark.parametrize("entetes", ["Débit,Crédit", "Debit,Credit", "DEBIT,CREDIT", "montant,sens"])
+def test_defaut_releve_colonnes_debit_credit_absentes_lignes_sautees(tmp_path, entetes) -> None:
+    chemin = tmp_path / "r.csv"
+    chemin.write_text(f"dossier,date_operation,libelle,{entetes},reference\n"
+                      "ALPHA,2026-09-03,CB X,120.00,,R1\nALPHA,2026-09-04,CB Y,50.00,,R2\n", encoding="utf-8")
+    try:
+        operations = lire_releve(chemin)
+    except ErreurFormat:
+        return
+    assert len(operations) == 2
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Lecteur du releve : une ligne plus courte que l'en-tete (export tronque, libelle multi-lignes "
+    "non guillemete) a `debit`/`credit` absents (None), lus comme zero : l'operation est SAUTEE en "
+    "silence au lieu d'etre refusee."))
+def test_defaut_releve_ligne_courte_sautee_en_silence(tmp_path) -> None:
+    chemin = tmp_path / "r.csv"
+    chemin.write_text(ENTETE_RELEVE + "ALPHA,2026-09-03,CB X,120.00,,R1\nALPHA,2026-09-04,CB Y\n", encoding="utf-8")
+    try:
+        operations = lire_releve(chemin)
+    except ErreurFormat:
+        return
+    assert len(operations) == 2
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Montants : `NaN`, `Infinity` et `-Infinity` sont acceptes par `lire_montant` (Decimal les "
+    "lit) ; dans le releve comme dans les pieces ils font lever decimal.InvalidOperation / "
+    "ValueError, que `cycle._lire` n'intercepte pas : trace Python au lieu d'un refus lisible."))
+@pytest.mark.parametrize("fichier, valeur", [
+    ("releve_bancaire", "NaN"), ("releve_bancaire", "Infinity"), ("releve_bancaire", "-Infinity"),
+    ("pieces_recues", "NaN"), ("pieces_recues", "Infinity"),
+])
+def test_defaut_montants_non_finis_trace_python(tmp_path, fichier, valeur) -> None:
+    contenu = {
+        "releve_bancaire": ENTETE_RELEVE + f"ALPHA,2026-09-03,CB X,{valeur},,R1\n",
+        "pieces_recues": "id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc\n"
+                         f"P1,ALPHA,f.pdf,LOXAM,2026-09-02,{valeur}\n",
+    }[fichier]
+    assert _cli_cycle(tmp_path, **{fichier: contenu}) == 1
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Montants : `1,234.56` (format anglo-saxon, entre guillemets) est lu 1,23456 : les points sont "
+    "retires puis la virgule devient decimale. Un montant faux de 1 233 EUR, sans erreur : la "
+    "piece ne correspond plus, ou un autre paiement est justifie a tort."))
+def test_defaut_montant_anglo_saxon_milliers_virgule_lu_faux(tmp_path) -> None:
+    chemin = tmp_path / "r.csv"
+    chemin.write_text(ENTETE_RELEVE + 'ALPHA,2026-09-03,CB X,"1,234.56",,R1\n', encoding="utf-8")
+    try:
+        [o] = lire_releve(chemin)
+    except ErreurFormat:
+        return
+    assert o.montant == Decimal("1234.56")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "csv.Error « field larger than field limit » (libelle de plus de 128 Ko, ou guillemet jamais "
+    "ferme qui avale le reste du fichier) n'est pas interceptee : trace Python au lieu d'un refus."))
+def test_defaut_champ_geant_trace_python(tmp_path) -> None:
+    contenu = ENTETE_RELEVE + "ALPHA,2026-09-03," + "X" * 200_000 + ",120.00,,R1\n"
+    assert _cli_cycle(tmp_path, releve_bancaire=contenu) == 1
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "dossiers.csv : un `email_contact` vide ou qui n'est pas une adresse (`pas-un-email`) est "
+    "accepte pour un dossier C-DIRECT ; le cycle sort 0, un brouillon est cree vers « pas-un-email » "
+    "et ne partira jamais (refus tardif a l'envoi). Aucune alerte a la lecture."))
+@pytest.mark.parametrize("contact", ["", "pas-un-email", "a@b.fr, c@d.fr"])
+def test_defaut_dossier_direct_sans_adresse_valide(tmp_path, contact) -> None:
+    chemin = tmp_path / "d.csv"
+    chemin.write_text("dossier,raison_sociale,email_contact,nom_contact,circuit,email_relais\n"
+                      f'ALPHA,Alpha,"{contact}",M,C-DIRECT,\n', encoding="utf-8")
+    try:
+        lire_dossiers(chemin, circuit_obligatoire=True)
+    except ErreurFormat:
+        return
+    raise AssertionError("adresse de contact invalide acceptee pour un dossier C-DIRECT")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Exclusions : une expression reguliere qui correspond a la chaine VIDE (`.*`, `^`, `$`, `a*`, "
+    "`(?:)`) est acceptee et validee par defaut (fichier sans colonne `statut`) : TOUTES les "
+    "operations du dossier passent HORS_PERIMETRE (etat terminal), plus aucune relance : manque "
+    "rate massif et silencieux (CA-02)."))
+@pytest.mark.parametrize("regex", [".*", "^", "$", "a*", "(?:)", ".?"])
+def test_defaut_exclusion_regex_qui_correspond_a_tout(tmp_path, regex) -> None:
+    chemin = tmp_path / "x.csv"
+    chemin.write_text(f'dossier,motif_regex,motif\nALPHA,"{regex}",m\n', encoding="utf-8")
+    try:
+        ref = Referentiel.depuis_csv(chemin)
+    except ErreurFormat:
+        return
+    assert ref.exclure(OPERATION_LOXAM)[0] is False
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Exclusions : le code dossier de `exclusions_dossier.csv` n'est pas normalise en NFC "
+    "(contrairement a releve, pieces et dossiers) : une regle ecrite en forme decomposee (macOS) "
+    "ne s'applique JAMAIS, sans alerte ; l'operation est relancee."))
+def test_defaut_exclusion_dossier_nfd_jamais_appliquee(tmp_path) -> None:
+    chemin = tmp_path / "x.csv"
+    chemin.write_text("dossier,motif_regex,motif\nCAFÉ,loxam,m\n", encoding="utf-8")
+    op = _dc.replace(OPERATION_LOXAM, dossier="CAFÉ")
+    try:
+        ref = Referentiel.depuis_csv(chemin)
+    except ErreurFormat:
+        return
+    assert ref.exclure(op)[0] is True
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Exclusions : le garde-fou contre les regex catastrophiques est une heuristique (quantificateurs "
+    "imbriques + essai de 5 s sur un texte). `(a?){30}a{30}` passe les deux et gele le cycle de "
+    "tous les dossiers sur un libelle de 28 `a`."))
+def test_defaut_exclusion_regex_catastrophique_contourne_le_garde_fou(tmp_path) -> None:
+    chemin = _csv_exclusions(tmp_path / "x.csv", [["ALPHA", "(a?){30}a{30}", "m", "r1", "Paul", "2026-10-01", "validee"]])
+    script = _SCRIPT_REGEX.format(src=str(RACINE / "src"), csv=str(chemin))
+    try:
+        sortie = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=6)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("cycle gele > 6 s") from None
+    assert sortie.returncode == 0 or "ErreurFormat" in sortie.stderr
+
+
+# --- 3. Application web -------------------------------------------------------------------
+
+from rapprochement.web import comptes as _comptes  # noqa: E402
+from rapprochement.web.application import Application as _Application  # noqa: E402
+
+_PARIS = _ZoneInfo("Europe/Paris")
+_MDP = "motdepasse-de-test-1"
+
+
+class _ClientWeb:
+    """Petit client WSGI (cookies, CSRF) : l'application est appelee sans reseau."""
+
+    def __init__(self, app, hote: str = "127.0.0.1:8000") -> None:
+        self.app, self.hote, self.cookies = app, hote, {}
+
+    def requete(self, methode, chemin, donnees=None, entetes=None, cookies=True):
+        chemin_seul, _, qs = chemin.partition("?")
+        corps = _urlencode(donnees or {}, errors="surrogatepass").encode("ascii") if donnees is not None else b""
+        environ = {"REQUEST_METHOD": methode, "SCRIPT_NAME": "", "PATH_INFO": chemin_seul, "QUERY_STRING": qs,
+                   "HTTP_HOST": self.hote, "REMOTE_ADDR": "127.0.0.1", "wsgi.input": _io.BytesIO(corps),
+                   "CONTENT_LENGTH": str(len(corps)) if corps else ""}
+        if donnees is not None:
+            environ["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+            environ["HTTP_ORIGIN"] = f"http://{self.hote}"
+        if self.cookies and cookies:
+            environ["HTTP_COOKIE"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        for k, v in (entetes or {}).items():
+            environ["HTTP_" + k.upper().replace("-", "_")] = v
+        _setup_wsgi(environ)
+        recu = {}
+
+        def start_response(statut, ent, exc_info=None):
+            recu["statut"], recu["entetes"] = statut, ent
+
+        corps_rep = b"".join(self.app(environ, start_response))
+        for k, v in recu["entetes"]:
+            if k.lower() == "set-cookie":
+                nom, _, reste = v.partition("=")
+                if "Max-Age=0" in v:
+                    self.cookies.pop(nom, None)
+                else:
+                    self.cookies[nom] = reste.split(";")[0]
+        return int(recu["statut"].split()[0]), dict(recu["entetes"]), corps_rep.decode("utf-8")
+
+    def csrf(self, chemin="/"):
+        _, _, texte = self.requete("GET", chemin)
+        m = _re.search(r'name="csrf" value="([^"]+)"', texte)
+        assert m, texte[:200]
+        return m.group(1)
+
+    def connecter(self, identifiant):
+        jeton = self.csrf("/connexion")
+        statut, _, texte = self.requete("POST", "/connexion", {"identifiant": identifiant, "mot_de_passe": _MDP, "csrf": jeton})
+        assert statut == 303, texte
+
+    def action(self, chemin, donnees=None, page="/"):
+        return self.requete("POST", chemin, {"csrf": self.csrf(page), **(donnees or {})})
+
+
+@pytest.fixture(scope="module")
+def _modele_comptes_web(tmp_path_factory) -> Path:
+    rep = tmp_path_factory.mktemp("comptes_web")
+    _comptes.creer_utilisateur(rep, "alice", "Alice Durand", _comptes.RESPONSABLE, _MDP)
+    _comptes.creer_utilisateur(rep, "bob", "Bob Martin", _comptes.COMPTABLE, _MDP)
+    return rep
+
+
+@pytest.fixture
+def web(tmp_path, _modele_comptes_web):
+    """(instance semee, application) : une file humaine, des brouillons, des pieces."""
+    entree = ecrire_entree(tmp_path / "e")
+    inst = nouvelle_instance(tmp_path / "instance", None)
+    for nom in ("utilisateurs.json", "validateurs.txt", "responsables.txt"):
+        _shutil.copy(_modele_comptes_web / nom, inst.racine / nom)
+    (inst.entrant / "1.eml").write_bytes(eml("compta@alpha-sarl.fr", "<m1@x>", objet="facture 120,00 EUR",
+                                             fichiers=(("f_2026-09.pdf", b"%PDF A"),)))
+    (inst.entrant / "2.eml").write_bytes(eml("inconnu@evil.example", "<m2@x>", fichiers=(("g.pdf", b"%PDF B"),)))
+    lancer(entree, inst, J0)
+    app = _Application(inst, horloge=lambda: dt.datetime(2026, 10, 5, 10, 0, tzinfo=_PARIS))
+    yield inst, app
+    app.fermer()
+
+
+ROUTES_RESPONSABLE = ["/audit", "/audit/exporter", "/audit/reparer", "/pieces/arbitrer"]
+ROUTES_ECRAN = ["/", "/brouillons", "/non-rattaches", "/pieces", "/escalades", "/audit"]
+
+
+def test_sain_web_acces_sans_compte_redirige_et_n_ecrit_rien(web) -> None:
+    inst, app = web
+    c = _ClientWeb(app)
+    avant = (etat_brut(inst), inst.audit.read_bytes())
+    for chemin in ROUTES_ECRAN + ["/brouillons/x", "/inexistant"]:
+        statut, ent, _ = c.requete("GET", chemin)
+        assert statut == 303 and ent["Location"] == "/connexion", chemin
+    for chemin in ["/pieces/bloquer", "/audit/reparer", "/non-rattaches/confirmer", "/brouillons/abc/valider"]:
+        statut, ent, _ = c.requete("POST", chemin, {"csrf": "x"})
+        assert statut == 303 and ent["Location"] == "/connexion", chemin
+    assert (etat_brut(inst), inst.audit.read_bytes()) == avant
+
+
+def test_sain_web_roles_comptable_ne_franchit_pas_les_routes_de_responsable(web) -> None:
+    inst, app = web
+    bob = _ClientWeb(app)
+    bob.connecter("bob")
+    avant = (etat_brut(inst), inst.audit.read_bytes())
+    for chemin in ROUTES_RESPONSABLE:
+        statut, _, _ = bob.requete("GET", chemin) if chemin == "/audit" else bob.action(chemin, {"dossier": "ALPHA",
+                                                                                              "reference": "A-001", "motif": "x"})
+        assert statut == 403, chemin
+    d = [x for x in cycle.lister_file(inst) if x.dossier == "ALPHA"][0]
+    cle = __import__("rapprochement.web.application", fromlist=["cle_entree"]).cle_entree(d.message_id, d.empreinte)
+    statut, _, _ = bob.action("/non-rattaches/confirmer", {"cle": cle, "forcer": "oui", "motif": "x",
+                                                           "dossier": "BETA", "reference": "B-001"}, page="/non-rattaches")
+    assert statut == 403
+    assert (etat_brut(inst), inst.audit.read_bytes()) == avant
+
+
+def test_sain_web_csrf_origine_hote_et_session(web) -> None:
+    inst, app = web
+    alice = _ClientWeb(app)
+    alice.connecter("alice")
+    jeton = alice.csrf("/")
+    avant = (etat_brut(inst), inst.audit.read_bytes())
+    chemin = "/audit/exporter"
+    assert alice.requete("POST", chemin, {})[0] == 403                                   # sans jeton
+    assert alice.requete("POST", chemin, {"csrf": "faux" * 10})[0] == 403
+    assert alice.requete("POST", chemin, {"csrf": jeton}, entetes={"Origin": "http://evil.example"})[0] == 403
+    assert alice.requete("POST", chemin, {"csrf": jeton}, entetes={"Sec-Fetch-Site": "cross-site"})[0] == 403
+    assert alice.requete("GET", "/", entetes={"Host": "evil.example"})[0] == 400          # rebinding DNS
+    pirate = _ClientWeb(app, hote="evil.example")
+    assert pirate.requete("GET", "/connexion")[0] == 400
+    assert alice.requete("PUT", "/", {})[0] == 405 and alice.requete("DELETE", "/")[0] == 405
+    assert alice.requete("GET", chemin)[0] in (404, 405)                                  # un GET n'ecrit jamais
+    autre = _ClientWeb(app)                                                               # jeton d'une AUTRE session
+    autre.connecter("bob")
+    assert alice.requete("POST", chemin, {"csrf": autre.csrf("/")})[0] == 403
+    assert not (inst.racine / "exports").exists() or not list((inst.racine / "exports").glob("*.json"))
+    assert (etat_brut(inst), inst.audit.read_bytes()) == avant
+
+
+def test_sain_web_session_detruite_a_la_deconnexion_et_au_changement_de_mot_de_passe(web) -> None:
+    inst, app = web
+    c = _ClientWeb(app)
+    c.connecter("bob")
+    jeton_cookie = c.cookies["session"]
+    assert c.requete("GET", "/")[0] == 200
+    _comptes.changer_mot_de_passe(inst, "bob", "un-autre-motdepasse-2")
+    assert c.requete("GET", "/")[0] == 303                                                # session morte
+    rejoue = _ClientWeb(app)
+    rejoue.cookies["session"] = jeton_cookie
+    assert rejoue.requete("GET", "/")[0] == 303
+    d = _ClientWeb(app)
+    d.connecter("alice")
+    ancien = d.cookies["session"]
+    d.action("/deconnexion")
+    rejoue2 = _ClientWeb(app)
+    rejoue2.cookies["session"] = ancien
+    assert rejoue2.requete("GET", "/")[0] == 303
+
+
+XSS_WEB = "<script>alert(9)</script>"
+
+
+def test_sain_web_xss_config_dossiers_et_contexte_de_la_file(web) -> None:
+    inst, app = web
+    alice = _ClientWeb(app)
+    alice.connecter("alice")
+    for config in (_json.dumps({"mode_test": XSS_WEB}), _json.dumps({"mode_test": False, "adresse_test": XSS_WEB}),
+                   '{"mode_test": "' + XSS_WEB):
+        inst.config.write_text(config, encoding="utf-8")
+        for chemin in ROUTES_ECRAN:
+            statut, _, texte = alice.requete("GET", chemin)
+            assert statut == 200 and "<script>alert(9)" not in texte, (chemin, config)
+    inst.config.unlink()
+    entree = inst.racine.parent / "entree_hostile"
+    entree.mkdir()
+    (entree / "dossiers.csv").write_text(f"dossier,raison_sociale,email_contact,circuit\n{XSS_WEB},A,a@a.fr,C-{XSS_WEB}\n", encoding="utf-8")
+    app.entree = entree
+    [b] = [x for x in cycle.brouillons(inst) if x.destinataire == "compta@alpha-sarl.fr"]
+    statut, _, texte = alice.requete("GET", f"/brouillons/{b.id_relance}")
+    assert statut == 200 and "<script>alert(9)" not in texte and "refus" in texte.lower()
+    # Expediteur, objet et nom de fichier hostiles venus d'un e-mail, puis les pages qui les affichent.
+    (inst.entrant / "3.eml").write_bytes(eml(f"{XSS_WEB}@evil.example", "<m3@x>", objet=f"{XSS_WEB} {{{{7*7}}}}",
+                                             fichiers=((f'"><img src=x onerror=alert(1)>.pdf', b"%PDF C"),)))
+    lancer(inst.racine.parent / "e", inst, J0)
+    for chemin in ("/non-rattaches", "/", "/audit"):
+        statut, _, texte = alice.requete("GET", chemin)
+        assert statut == 200 and "<script>alert" not in texte and "<img src=x" not in texte, chemin
+
+
+@pytest.mark.parametrize("cle", ["é", "‮", "a" * 10 + "é"])
+def test_defaut_web_cle_non_ascii_provoque_une_erreur_500(web, cle) -> None:
+    inst, app = web
+    bob = _ClientWeb(app)
+    bob.connecter("bob")
+    statut, _, _ = bob.action("/non-rattaches/confirmer", {"cle": cle}, page="/non-rattaches")
+    assert statut < 500
+
+
+def test_defaut_web_bandeau_donnees_fictives_sur_une_instance_reelle(web) -> None:
+    inst, app = web
+    assert cycle.mode_instance(inst) == "reel"
+    inst.config.write_text('{"mode_test": true}', encoding="utf-8")
+    alice = _ClientWeb(app)
+    alice.connecter("alice")
+    _, _, texte = alice.requete("GET", "/")
+    assert "Instance : mode réel" in texte
+    assert "DONNEES FICTIVES" not in texte
+
+
+def test_sain_web_bandeau_mode_test_fige_reste_meme_sans_config(tmp_path, _modele_comptes_web) -> None:
+    entree, inst, _ = _brouillon_valide(tmp_path, mode_test=True)
+    for nom in ("utilisateurs.json", "validateurs.txt", "responsables.txt"):
+        _shutil.copy(_modele_comptes_web / nom, inst.racine / nom)
+    inst.config.unlink()
+    app = _Application(inst, horloge=lambda: dt.datetime(2026, 10, 5, 10, 0, tzinfo=_PARIS))
+    try:
+        c = _ClientWeb(app)
+        c.connecter("alice")
+        _, _, texte = c.requete("GET", "/")
+        assert "MODE TEST" in texte and "Instance : mode test" in texte and "config.json" in texte
+    finally:
+        app.fermer()
+
+
+def test_sain_web_fuzz_des_formulaires_jamais_de_500(web) -> None:
+    import random
+    from urllib.parse import quote
+    inst, app = web
+    alice = _ClientWeb(app)
+    alice.connecter("alice")
+    jeton = alice.csrf("/")
+    charges = ["", " ", "\x00", "a" * 600, "%00", "' OR 1=1 --", "../../etc/passwd", "{{7*7}}", "{x}", "%s%s", XSS_WEB,
+               "‮", "2026-13-45", "-1", "NaN", "9" * 400, "\r\nSet-Cookie: x=1", "ALPHA", "A-001", "B-001", "oui"]
+    champs = ["dossier", "reference", "motif", "decision", "date", "parti", "forcer", "confirmation", "retour", "f_dossier"]
+    b = brouillon_de(inst, "compta@alpha-sarl.fr")
+    routes = ["/pieces/controler", "/pieces/promesse", "/pieces/bloquer", "/pieces/debloquer", "/pieces/arbitrer",
+              f"/brouillons/{b.id_relance}/valider", f"/brouillons/{b.id_relance}/rejeter",
+              f"/brouillons/{b.id_relance}/trancher", f"/brouillons/{b.id_relance}/envoyer", "/audit/exporter",
+              "/audit/reparer"]
+    hasard = random.Random(5)
+    for route in routes:
+        for _ in range(25):
+            donnees = {"csrf": jeton, **{c: hasard.choice(charges) for c in hasard.sample(champs, hasard.randint(0, 4))}}
+            corps = "&".join(f"{k}={quote(v, safe='')}" for k, v in donnees.items())
+            environ_corps = corps.encode("ascii")
+            environ = {"REQUEST_METHOD": "POST", "SCRIPT_NAME": "", "PATH_INFO": route, "QUERY_STRING": "",
+                       "HTTP_HOST": "127.0.0.1:8000", "REMOTE_ADDR": "127.0.0.1", "wsgi.input": _io.BytesIO(environ_corps),
+                       "CONTENT_LENGTH": str(len(environ_corps)), "CONTENT_TYPE": "application/x-www-form-urlencoded",
+                       "HTTP_COOKIE": "; ".join(f"{k}={v}" for k, v in alice.cookies.items())}
+            _setup_wsgi(environ)
+            recu = {}
+            texte = b"".join(app(environ, lambda s, h, e=None: recu.update(statut=s))).decode("utf-8")
+            assert int(recu["statut"].split()[0]) < 500, (route, donnees)
+            assert "Traceback" not in texte and "<script>alert" not in texte
+    # Le fuzz n'a jamais casse l'integrite du journal.
+    assert cycle.verifier_audit(inst).ok
+
+
+# --- Performance du controle des envois ----------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "`controler_envois` est quadratique (pour chaque envoi, un balayage de tout le journal) : "
+    "3 000 envois dans un journal de 66 000 entrees demandent ~8 s ; la page /audit et la recette "
+    "de CA-06 deviennent inutilisables apres quelques annees d'exploitation (20 destinataires, "
+    "un envoi par semaine = 1 000 envois par an, mais 300 000 entrees)."))
+def test_defaut_controler_envois_quadratique(tmp_path) -> None:
+    from rapprochement.audit import HASH_INITIAL, _calculer_hash, _canonique
+    inst = nouvelle_instance(tmp_path / "i")
+    precedent, seq, lignes = HASH_INITIAL, 0, []
+
+    def ajouter(acteur, action, objet, details):
+        nonlocal precedent, seq
+        seq += 1
+        c = {"seq": seq, "horodatage": "2026-10-05T10:00:00+02:00", "acteur": acteur, "action": action,
+             "objet": objet, "details": details, "hash_precedent": precedent}
+        precedent = c["hash"] = _calculer_hash(c)
+        lignes.append((_canonique(c) + "\n").encode("ascii"))
+
+    for i in range(60_000):
+        ajouter("systeme", "piece_creee", f"D/R{i}", {"x": i})
+    for i in range(3_000):
+        ajouter(VALIDEUSE, "valide", f"B{i}", {"par": VALIDEUSE, "destinataire": f"d{i}@x.fr", "niveau": 1})
+        ajouter("systeme", "envoi_effectue", f"B{i}", {"valide_par": VALIDEUSE, "destinataire": f"d{i}@x.fr",
+                                                       "envoye_par": VALIDEUSE})
+    inst.audit.write_bytes(b"".join(lignes))
+    t = time.perf_counter()
+    cycle.controler_envois(inst)
+    assert time.perf_counter() - t < 5
