@@ -807,7 +807,8 @@ def test_audit_apres_la_transaction(entree, inst, monkeypatch):
     monkeypatch.setattr(Depot, "sauver_pieces", en_panne)
     with pytest.raises(Panne):
         lancer(entree, inst, J0)
-    assert [e.action for e in JournalAudit(inst.audit).lire()] == []
+    # Rien de la transaction annulee n'est journalise ; seule trace : le mode fige par le premier cycle.
+    assert [e.action for e in JournalAudit(inst.audit).lire()] == ["mode_instance"]
     monkeypatch.setattr(Depot, "sauver_pieces", original)
 
 
@@ -2069,6 +2070,7 @@ def test_envoi_en_mode_test_ecrit_a_l_adresse_de_test_jamais_au_client(entree, i
 
 
 def test_envoi_mode_test_enveloppe_aussi_un_expediteur_fourni_et_le_drapeau_cli(entree, inst, capsys):
+    ecrire_config(inst, mode_test=True)          # le mode est fige par instance : celle-ci est une instance de test
     lancer(entree, inst, J0)
     b1, b2 = sorted(cycle.brouillons(inst), key=lambda x: x.destinataire)
     for b in (b1, b2):
@@ -2150,12 +2152,12 @@ def test_console_utf8_flux_sans_reconfigure_ou_ferme(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _proposition_alpha(inst: cycle.Instance, entree: Path):
+def _proposition_alpha(inst: cycle.Instance, entree: Path, **kw):
     """Un message d'ALPHA qui propose A-001 ; renvoie la decision de la file."""
-    lancer(entree, inst, J0)
+    lancer(entree, inst, J0, **kw)
     ecrire_eml(inst.entrant, "1.eml", expediteur=ORIGINE, message_id="<loxam@a>", corps="120,00 EUR",
                fichiers=(("loxam_2026-09-03.pdf", b"%PDF-loxam"),))
-    lancer(entree, inst, jour(1))
+    lancer(entree, inst, jour(1), **kw)
     (d,) = cycle.lister_file(inst)
     assert d.statut is StatutRoutage.PROPOSEE and d.dossier == "ALPHA" and d.reference_operation == "A-001"
     return d
@@ -2358,12 +2360,23 @@ def test_a14_sans_responsables_txt_refus_hors_mode_test_meme_pour_un_validateur(
     assert cycle.avertissement_roles(inst) is None
     # Fichier present mais vide : refus aussi, mode test compris (jamais d'acceptation par defaut).
     inst.responsables.write_text("\n# personne\n", encoding="utf-8")
+    with pytest.raises(cycle.ValidateurRefuse, match="aucun responsable declare"):
+        cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="x", maintenant=m)
+    # (le meme refus en mode test se prouve sur une instance de test : voir le test suivant)
+
+
+def test_a14_responsables_txt_vide_refuse_aussi_en_mode_test(entree, inst):
+    ecrire_config(inst, mode_test=True)
+    _pret_pour_arbitrage(entree, inst)
+    inst.responsables.write_text("\n# personne\n", encoding="utf-8")
     for mode in (False, True):
         with pytest.raises(cycle.ValidateurRefuse, match="aucun responsable declare"):
-            cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="x", maintenant=m, mode_test=mode)
+            cycle.arbitrer_piece(inst, "ALPHA", "A-001", RESPONSABLE, motif="x",
+                                 maintenant=a_10h(jour(18)), mode_test=mode)
 
 
 def test_a14_mode_test_sans_responsables_txt_repli_annonce_et_journalise(entree, inst, capsys):
+    ecrire_config(inst, mode_test=True)          # instance de test des le premier cycle (mode fige)
     _pret_pour_arbitrage(entree, inst)
     inst.responsables.unlink()
     m = a_10h(jour(18))
@@ -2651,7 +2664,9 @@ def test_a17_entree_valide_supprimee_avec_chaine_recalculee(entree, inst, capsys
     assert controle.chaine_ok and not controle.ok
     assert controle.lignes[0].anomalies == ("aucune entree `valide` anterieure pour ce brouillon",)
     rc, out, _ = cli(capsys, inst, "controler-envois")
-    assert rc == 1 and "1 envoi(s) controle(s), 1 anomalie(s)" in out
+    # 1 anomalie sur la ligne + 1 ecart : la base montre un brouillon ENVOYEE sans `valide` au journal.
+    assert rc == 1 and "1 envoi(s) controle(s), 2 anomalie(s)" in out
+    assert f"ECART : brouillon {controle.lignes[0].id_relance} ENVOYEE en base sans entree valide" in out
 
 
 @pytest.mark.parametrize("falsification, attendu", [
@@ -2910,6 +2925,7 @@ def test_forcer_sans_responsables_txt_refuse_hors_mode_test_meme_pour_un_validat
 
 
 def test_forcer_en_mode_test_sans_responsables_txt_repli_annonce_et_journalise(entree, inst, capsys):
+    ecrire_config(inst, mode_test=True)          # instance de test des le premier cycle (mode fige)
     d = _proposition_alpha(inst, entree)
     inst.responsables.unlink()
     with pytest.raises(cycle.ValidateurRefuse, match="Mallory"):
@@ -2933,11 +2949,405 @@ def test_cli_forcer_par_un_simple_validateur_refuse(entree, inst, capsys):
 
 
 def test_cli_forcer_option_mode_test_suffit_au_repli(entree, inst, capsys):
-    d = _proposition_alpha(inst, entree)
+    d = _proposition_alpha(inst, entree, mode_test=True)         # instance de test, creee par le drapeau
     inst.responsables.unlink()
     args = ["--message-id", d.message_id, "--par", VALIDEUSE, "--dossier", "BETA", "--reference", "B-001",
             "--forcer", "--motif", "verifie"]
-    rc, _, err = cli(capsys, inst, "rattacher", *args, date=jour(1))               # ni option ni config : refus
-    assert rc == 1 and "responsables.txt est absent" in err
+    rc, _, err = cli(capsys, inst, "rattacher", *args, date=jour(1))     # sans le drapeau : mode fige = test
+    assert rc == 1 and "creee en mode test" in err
     rc, out, _ = cli(capsys, inst, "rattacher", *args, "--mode-test", date=jour(1))
     assert rc == 0 and "AVERTISSEMENT : responsables.txt absent" in out
+
+
+# ---------------------------------------------------------------------------
+# Quatrieme passage de revue : mode FIGE par instance, proprietaire d'une piece, recoupement base /
+# journal / outbox, noms NFC. Chaque garde est verifiee par mutation (voir le rapport).
+# ---------------------------------------------------------------------------
+
+import dataclasses as _dc  # noqa: E402
+import sqlite3  # noqa: E402
+import unicodedata  # noqa: E402
+
+
+# --- Le mode (test ou reel) est une propriete de l'instance ----------------------------------
+
+
+def _instance_figee(tmp_path: Path, entree: Path, cree_en: str, nom: str = "figee"):
+    """Instance dont le premier cycle a fige le mode `cree_en`, SANS config.json (par le seul
+    drapeau, comme `cycle --mode-test`). Renvoie (instance, id d'un brouillon)."""
+    inst = nouvelle_instance(tmp_path / nom)
+    lancer(entree, inst, J0, mode_test=(cree_en == "test"))
+    assert cycle.mode_instance(inst) == cree_en
+    b = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE)
+    return inst, b.id_relance
+
+
+def _appeler(nom: str, inst: cycle.Instance, entree: Path, ident: str, mode_test: bool, par: str = RESPONSABLE):
+    m = a_10h(J0)
+    kw = {"maintenant": m, "mode_test": mode_test}
+    if nom == "cycle":
+        return cycle.executer_cycle(entree, inst, J0, m, mode_test=mode_test)
+    return {
+        "valider": lambda: cycle.valider_relance(inst, ident, par, **kw),
+        "rejeter": lambda: cycle.rejeter_relance(inst, ident, par, "non", **kw),
+        "envoyer": lambda: cycle.envoyer_relance(inst, ident, par=par, **kw),
+        "rattacher": lambda: cycle.rattacher_piece(inst, par, dossier="ALPHA", reference="A-001",
+                                                   id_piece="P-1", **kw),
+        "rattacher_forcer": lambda: cycle.rattacher_piece(inst, par, dossier="ALPHA", reference="A-001",
+                                                          id_piece="P-1", forcer=True, motif="x", **kw),
+        "controler": lambda: cycle.controler_piece(inst, "ALPHA", "A-001", par, conforme=True, **kw),
+        "promesse": lambda: cycle.saisir_promesse(inst, "ALPHA", "A-001", par, date_promesse=jour(3), **kw),
+        "arbitrer": lambda: cycle.arbitrer_piece(inst, "ALPHA", "A-001", par, motif="x", **kw),
+        "bloquer": lambda: cycle.bloquer_piece(inst, "ALPHA", "A-001", par, motif="x", **kw),
+        "debloquer": lambda: cycle.debloquer_piece(inst, "ALPHA", "A-001", par, motif="x", **kw),
+        "trancher": lambda: cycle.trancher_envoi(inst, ident, par, parti=True, **kw),
+        "reparer": lambda: cycle.reparer_audit(inst, par, **kw),
+    }[nom]()
+
+
+OPERATIONS_A_MODE = ["cycle", "valider", "rejeter", "envoyer", "rattacher", "rattacher_forcer", "controler",
+                     "promesse", "arbitrer", "bloquer", "debloquer", "trancher", "reparer"]
+
+
+def test_le_premier_cycle_fige_le_mode_une_seule_fois(entree, inst):
+    assert cycle.mode_instance(inst) is None and cycle.mode_instance(inst.racine / "inexistante") is None
+    assert not (inst.racine / "inexistante").exists()                      # lecture seule
+    lancer(entree, inst, J0, mode_test=True)
+    assert cycle.mode_instance(inst) == "test"
+    lancer(entree, inst, jour(1), mode_test=True)
+    (figeage,) = _entrees_audit(inst, "mode_instance")                     # une seule fois
+    assert figeage.details["mode"] == "test" and figeage.details["source"] == "--mode-test"
+    assert figeage.details["pieces_deja_presentes"] == 0 and figeage.acteur == "systeme"
+    with sqlite3.connect(inst.depot) as c:                                  # marqueur dans le depot
+        assert c.execute("SELECT cle FROM vus WHERE cle LIKE 'mode-instance:%'").fetchall() == [("mode-instance:test",)]
+    assert JournalAudit(inst.audit).verifier().ok
+
+
+@pytest.mark.parametrize("config, drapeau, source", [
+    (True, False, "config.json"), (False, True, "--mode-test"), (True, True, "config.json et --mode-test"),
+    (False, False, "defaut"),
+])
+def test_la_source_du_mode_est_journalisee(entree, tmp_path, config, drapeau, source):
+    inst = nouvelle_instance(tmp_path / "i")
+    if config:
+        ecrire_config(inst, mode_test=True)
+    lancer(entree, inst, J0, mode_test=drapeau)
+    (figeage,) = _entrees_audit(inst, "mode_instance")
+    assert figeage.details["source"] == source
+    assert figeage.details["mode"] == ("test" if config or drapeau else "reel")
+
+
+def test_un_cycle_refuse_ne_fige_rien(tmp_path):
+    ops = OPERATIONS + [["BETA", "2026-09-12", "CB LEROY MERLIN", "99.00", "A-001"]]       # collision
+    entree = ecrire_entree(tmp_path / "e", operations=ops)
+    inst = nouvelle_instance(tmp_path / "i")
+    with pytest.raises(cycle.CollisionReferences):
+        lancer(entree, inst, J0, mode_test=True)
+    assert cycle.mode_instance(inst) is None and "mode_instance" not in actions_audit(inst)
+    lancer(ecrire_entree(tmp_path / "ok"), inst, J0)                        # le bon cycle fige, lui
+    assert cycle.mode_instance(inst) == "reel"
+
+
+@pytest.mark.parametrize("nom", OPERATIONS_A_MODE)
+@pytest.mark.parametrize("cree_en", ["test", "reel"])
+def test_mode_fige_toute_operation_refuse_l_autre_mode_avant_toute_ecriture(entree, tmp_path, nom, cree_en):
+    inst, ident = _instance_figee(tmp_path, entree, cree_en)
+    if nom == "reparer":
+        with open(inst.audit, "ab") as f:
+            f.write(b'{"acteur":"sys')                                      # un journal a reparer, que l'on ne doit PAS toucher
+    avant = (etat_depot(inst), inst.audit.read_bytes(), empreintes(inst.racine, "sortie", "outbox"))
+    autre = cree_en == "reel"                                               # le mode demande est l'inverse
+    with pytest.raises(cycle.ModeInstanceIncompatible,
+                       match=f"cette instance a ete creee en mode {cree_en} .*pour changer, creer une nouvelle instance"):
+        _appeler(nom, inst, entree, ident, mode_test=autre)
+    assert (etat_depot(inst), inst.audit.read_bytes(), empreintes(inst.racine, "sortie", "outbox")) == avant
+    # Le MEME mode n'est jamais refuse pour cette raison (l'operation peut echouer pour une autre).
+    try:
+        _appeler(nom, inst, entree, ident, mode_test=not autre)
+    except cycle.ModeInstanceIncompatible:
+        pytest.fail("le mode de l'instance a ete refuse alors qu'il est le bon")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@pytest.mark.parametrize("nom", ["arbitrer", "trancher", "reparer", "rattacher_forcer"])
+def test_mode_fige_est_controle_avant_le_role(entree, tmp_path, nom):
+    """Mode ET role faux : c'est le mode qui est dit (message le plus utile)."""
+    inst, ident = _instance_figee(tmp_path, entree, "reel")
+    with pytest.raises(cycle.ModeInstanceIncompatible, match="creee en mode reel"):
+        _appeler(nom, inst, entree, ident, mode_test=True, par=VALIDEUSE)       # simple validatrice
+
+
+def test_mode_fige_par_config_json_dans_les_deux_sens(entree, tmp_path):
+    inst = nouvelle_instance(tmp_path / "reel")
+    lancer(entree, inst, J0)
+    ecrire_config(inst, mode_test=True)                                     # config bascule apres coup
+    b = cycle.brouillons(inst)[0]
+    with pytest.raises(cycle.ModeInstanceIncompatible, match="creee en mode reel .*demandee en mode test"):
+        cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    inst2 = nouvelle_instance(tmp_path / "test")
+    ecrire_config(inst2, mode_test=True)
+    lancer(entree, inst2, J0)
+    ecrire_config(inst2, mode_test=False)
+    b2 = cycle.brouillons(inst2)[0]
+    with pytest.raises(cycle.ModeInstanceIncompatible, match="creee en mode test .*demandee en mode reel"):
+        cycle.envoyer_relance(inst2, b2.id_relance, maintenant=a_10h(J0), par=VALIDEUSE)
+    assert emls(inst2) == []
+
+
+@pytest.mark.parametrize("cree_en, flag", [("test", False), ("reel", True)])
+def test_mode_fige_cli_les_sept_commandes_dans_les_deux_sens(entree, tmp_path, capsys, cree_en, flag):
+    inst = nouvelle_instance(tmp_path / "i")
+    creation = ["cycle", "--entree", str(entree)] + (["--mode-test"] if cree_en == "test" else [])
+    assert cli(capsys, inst, *creation)[0] == 0
+    ident = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE).id_relance
+    erreur = ["--mode-test"] if flag else []            # test cree -> sans drapeau ; reel cree -> avec drapeau
+    avant = (etat_depot(inst), inst.audit.read_bytes())
+    commandes = [
+        ["cycle", "--entree", str(entree)],
+        ["valider", ident, "--par", RESPONSABLE],
+        ["envoyer", ident, "--par", RESPONSABLE],
+        ["rattacher", "--dossier", "ALPHA", "--reference", "A-001", "--piece", "P-1", "--par", RESPONSABLE],
+        ["arbitrer", "--dossier", "ALPHA", "--reference", "A-001", "--motif", "x", "--par", RESPONSABLE],
+        ["trancher", ident, "--parti", "--par", RESPONSABLE],
+        ["reparer-audit", "--par", RESPONSABLE],
+    ]
+    for commande in commandes:
+        rc, out, err = cli(capsys, inst, *commande, *erreur)
+        assert rc == 1 and f"REFUS (ModeInstanceIncompatible) : cette instance a ete creee en mode {cree_en}" in err, commande
+    assert (etat_depot(inst), inst.audit.read_bytes()) == avant and emls(inst) == []
+
+
+def test_attaque_du_reviewer_cycle_mode_test_puis_envoi_sans_le_drapeau(tmp_path, capsys):
+    """Un dossier SANS circuit est tolere en test ; ses brouillons ne doivent jamais partir au vrai client."""
+    dossiers = [["ALPHA", "Alpha SARL", "compta@alpha-sarl.fr", "M. Alpha", "15", "courtois", "", ""]]
+    entree = ecrire_entree(tmp_path / "e", dossiers=dossiers, operations=[OPERATIONS[0]])
+    inst = nouvelle_instance(tmp_path / "i")
+    assert cli(capsys, inst, "cycle", "--entree", str(entree), "--mode-test")[0] == 0
+    ident = cycle.brouillons(inst)[0].id_relance
+    assert cli(capsys, inst, "valider", ident, "--par", VALIDEUSE)[0] == 1
+    assert cli(capsys, inst, "envoyer", ident, "--par", VALIDEUSE)[0] == 1
+    assert emls(inst) == [] and cycle.brouillons(inst)[0].statut is StatutBrouillon.BROUILLON
+    assert cli(capsys, inst, "valider", ident, "--par", VALIDEUSE, "--mode-test")[0] == 0     # le bon mode
+    assert cli(capsys, inst, "envoyer", ident, "--par", VALIDEUSE, "--mode-test")[0] == 0
+    msg, _ = _eml_sorti(inst, ident)
+    assert msg["To"] == ADRESSE_TEST
+
+
+def test_mode_fige_les_lectures_ne_sont_pas_bloquees(entree, tmp_path):
+    inst, ident = _instance_figee(tmp_path, entree, "test")
+    assert cycle.pieces(inst) and cycle.brouillons(inst) and cycle.lister_file(inst) == []
+    assert cycle.suivi_pieces(inst, J0).lignes and cycle.verifier_audit(inst).ok
+    assert cycle.controler_envois(inst).ok and cycle.exporter(inst, tmp_path / "x.json").exists()
+
+
+def test_mode_fige_marqueurs_contradictoires_refus(entree, tmp_path):
+    inst, ident = _instance_figee(tmp_path, entree, "test")
+    with Depot(inst.depot) as d:
+        d.marquer_vu("mode-instance:reel")                                 # base alteree
+    for mode in (True, False):
+        with pytest.raises(cycle.ModeInstanceIncompatible, match="incoherent"):
+            cycle.valider_relance(inst, ident, VALIDEUSE, maintenant=a_10h(J0), mode_test=mode)
+    with pytest.raises(cycle.ModeInstanceIncompatible):
+        cycle.mode_instance(inst)
+
+
+def test_mode_fige_instance_ancienne_sans_marqueur_est_figee_au_prochain_cycle(entree, tmp_path):
+    inst = nouvelle_instance(tmp_path / "i")
+    lancer(entree, inst, J0)
+    with sqlite3.connect(inst.depot) as c:                                  # instance d'avant cette regle
+        c.execute("DELETE FROM vus WHERE cle LIKE 'mode-instance:%'")
+    assert cycle.mode_instance(inst) is None
+    lancer(entree, inst, jour(1), mode_test=True)                           # le prochain cycle choisit, et fige
+    assert cycle.mode_instance(inst) == "test"
+    assert _entrees_audit(inst, "mode_instance")[-1].details["pieces_deja_presentes"] == 5
+
+
+# --- A7 : un fichier n'appartient qu'a un dossier -------------------------------------------------
+
+
+def test_a7_meme_id_piece_refusee_pour_un_autre_dossier_forcer_compris(entree, inst):
+    lancer(entree, inst, J0)
+    cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(J0), dossier="ALPHA", reference="A-001",
+                          id_piece="facture.pdf#abc123def456")
+    avant = (etat_depot(inst), actions_audit(inst))
+    for par, kw in ((VALIDEUSE, {}), (RESPONSABLE, dict(forcer=True, motif="verifie"))):
+        with pytest.raises(cycle.ErreurCycle, match=r"deja rattachee au dossier ALPHA \(reference A-001\) "
+                                                    r"et ne peut pas l'etre au dossier BETA") as exc:
+            cycle.rattacher_piece(inst, par, maintenant=a_10h(J0), dossier="BETA", reference="B-001",
+                                  id_piece=" facture.pdf#abc123def456 ", **kw)
+        assert "aucun detachement" in str(exc.value)
+    assert etat_depot(inst) == avant[0]
+    refus = _entrees_audit(inst, "rattachement_refuse")
+    assert len(refus) == 2 and refus[0].details["dossier_proprietaire"] == "ALPHA"
+    assert refus[1].details["forcer"] is True and "rattachement_force" not in actions_audit(inst)
+    assert pieces_par_ref(inst)["B-001"].etat is EtatPiece.ATTENDUE
+
+
+def test_a7_meme_id_piece_meme_dossier_reste_possible(entree, inst):
+    lancer(entree, inst, J0)
+    cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(J0), dossier="ALPHA", reference="A-001", id_piece="P-X")
+    p = cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(J0), dossier="ALPHA", reference="A-002", id_piece="P-X")
+    assert (p.dossier, p.reference, p.etat) == ("ALPHA", "A-002", EtatPiece.RECUE)
+
+
+def test_a7_le_proprietaire_vaut_aussi_avec_une_decision_de_routage(entree, inst):
+    d = _proposition_alpha(inst, entree)
+    cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), message_id=d.message_id)    # id = fichier#empreinte
+    ecrire_eml(inst.entrant, "2.eml", expediteur="pieces@cabinet-relais.fr", message_id="<copie@x>",
+               corps="230,40 EUR", fichiers=(("loxam_2026-09-03.pdf", b"%PDF-loxam"),))        # MEME fichier
+    lancer(entree, inst, jour(2))
+    (d2,) = cycle.lister_file(inst)
+    with pytest.raises(cycle.ErreurCycle, match="deja rattachee au dossier ALPHA"):
+        cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(2)), message_id=d2.message_id,
+                              dossier="BETA", reference="B-001")
+    assert cycle.lister_file(inst) == [d2] and pieces_par_ref(inst)["B-001"].etat is EtatPiece.ATTENDUE
+
+
+# --- F3 : noms NFC / NFD ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ecrit, saisi", [("NFD", "NFC"), ("NFC", "NFD")])
+def test_f3_les_noms_sont_compares_en_nfc(tmp_path, ecrit, saisi):
+    inst = nouvelle_instance(tmp_path / "i", validateurs=None)
+    nom = "  Hélène Roux  "                                     # espaces de bord retires
+    inst.validateurs.write_bytes(("﻿# equipe\r\n" + unicodedata.normalize(ecrit, nom) + "\r\n").encode("utf-8"))
+    inst.responsables.write_bytes(unicodedata.normalize(ecrit, "Zoé Responsable\n").encode("utf-8"))
+    attendu = unicodedata.normalize("NFC", "Hélène Roux")
+    assert cycle.lire_validateurs(inst) == (attendu,)                       # forme canonique : NFC, espaces de bord
+    assert cycle.exiger_validateur(inst, unicodedata.normalize(saisi, " hélène ROUX ")) == attendu
+    for truque in ("Hélène  Roux", "Hélène\u00a0Roux"):                       # espaces internes : autre nom
+        with pytest.raises(cycle.ValidateurRefuse):
+            cycle.exiger_validateur(inst, unicodedata.normalize(saisi, truque))
+    assert cycle.exiger_responsable(inst, unicodedata.normalize(saisi, "ZOÉ responsable")) == \
+        unicodedata.normalize("NFC", "Zoé Responsable")
+    with pytest.raises(cycle.ValidateurRefuse):
+        cycle.exiger_validateur(inst, "Helene Roux")                        # un accent absent reste un autre nom
+
+
+def test_f3_nom_nfd_en_ligne_de_commande_et_au_journal(entree, tmp_path, capsys):
+    inst = nouvelle_instance(tmp_path / "i", validateurs=None)
+    inst.validateurs.write_bytes(unicodedata.normalize("NFD", "Hélène Roux\n").encode("utf-8"))
+    inst.responsables.write_bytes(b"Paul Martin\n")
+    lancer(entree, inst, J0)
+    ident = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE).id_relance
+    rc, out, _ = cli(capsys, inst, "valider", ident, "--par", unicodedata.normalize("NFC", "hélène roux"))
+    assert rc == 0
+    (valide,) = _entrees_audit(inst, "valide")
+    assert valide.acteur == unicodedata.normalize("NFC", "Hélène Roux")            # journalise en NFC
+    cycle.envoyer_relance(inst, ident, maintenant=a_10h(J0), par="Paul Martin")
+    assert cycle.controler_envois(inst).ok                                         # la recette compare en NFC
+
+
+# --- A17 : recoupement avec la base et l'outbox ---------------------------------------------------
+
+
+def _forger_valide(inst: cycle.Instance, ident: str, par: str = VALIDEUSE, dest: str = ORIGINE) -> None:
+    JournalAudit(inst.audit).ecrire(par, "valide", ident, {"par": par, "destinataire": dest, "niveau": 1})
+
+
+def _forger_envoi(inst: cycle.Instance, ident: str, par: str = VALIDEUSE, dest: str = ORIGINE,
+                  envoye_par: str | None = "Paul Martin") -> None:
+    JournalAudit(inst.audit).ecrire("systeme", "envoi_effectue", ident, {
+        "valide_par": par, "destinataire": dest, "identifiant_externe": "<x@y>", "envoye_par": envoye_par})
+
+
+def _brouillon_alpha(inst: cycle.Instance) -> Brouillon:
+    return next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE)
+
+
+def test_a17_cas_sain_base_journal_outbox_concordent(entree, inst, capsys):
+    _envoi_sain(inst, entree)
+    controle = cycle.controler_envois(inst)
+    assert controle.ok and controle.ecarts == () and len(emls(inst)) == 1
+    assert cli(capsys, inst, "controler-envois")[0] == 0
+
+
+def test_a17_cas_sain_instance_de_test(entree, tmp_path, capsys):
+    inst = nouvelle_instance(tmp_path / "t")
+    ecrire_config(inst, mode_test=True)
+    _envoi_sain(inst, entree)
+    assert cycle.controler_envois(inst).ok and cli(capsys, inst, "controler-envois")[0] == 0
+
+
+def test_a17_eml_dans_outbox_sans_trace_au_journal(entree, inst, capsys):
+    lancer(entree, inst, J0)
+    b = _brouillon_alpha(inst)
+    envoi.ExpediteurDossier(inst.outbox).envoyer(_dc.replace(b, statut=StatutBrouillon.EN_COURS, valide_par=VALIDEUSE))
+    controle = cycle.controler_envois(inst)
+    assert not controle.ok and controle.lignes == ()
+    assert controle.ecarts == (f"outbox/{b.id_relance}.eml : .eml sans trace dans le journal "
+                               "(aucune entree d'envoi pour ce brouillon)",)
+    rc, out, _ = cli(capsys, inst, "controler-envois")
+    assert rc == 1 and "ECART : outbox/" in out and "1 envoi(s) controle(s)" not in out
+
+
+def test_a17_eml_d_un_envoi_incertain_est_signale_comme_tel(entree, inst):
+    lancer(entree, inst, J0)
+    b = _brouillon_alpha(inst)
+    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    with Depot(inst.depot) as d:
+        d.maj_brouillon(_dc.replace(d.charger_brouillon(b.id_relance), statut=StatutBrouillon.EN_COURS))
+    envoi.ExpediteurDossier(inst.outbox).envoyer(_dc.replace(b, statut=StatutBrouillon.EN_COURS, valide_par=VALIDEUSE))
+    (ecart,) = cycle.controler_envois(inst).ecarts
+    assert "envoi incertain non tranche" in ecart and ".eml sans trace" not in ecart
+
+
+def test_a17_brouillon_envoyee_en_base_sans_journal(entree, inst, capsys):
+    lancer(entree, inst, J0)
+    b = _brouillon_alpha(inst)
+    with Depot(inst.depot) as d:
+        d.maj_brouillon(_dc.replace(b, statut=StatutBrouillon.VALIDEE, valide_par="Mallory", valide_le=a_10h(J0)))
+        d.maj_brouillon(_dc.replace(b, statut=StatutBrouillon.EN_COURS, valide_par="Mallory", valide_le=a_10h(J0)))
+        d.maj_brouillon(_dc.replace(b, statut=StatutBrouillon.ENVOYEE, valide_par="Mallory", valide_le=a_10h(J0),
+                                    envoye_le=a_10h(J0)))
+    controle = cycle.controler_envois(inst)
+    assert not controle.ok
+    assert controle.ecarts == (f"brouillon {b.id_relance} ENVOYEE en base sans entree valide ni envoi_effectue au journal",)
+    assert cli(capsys, inst, "controler-envois")[0] == 1
+
+
+def test_a17_paire_forgee_pour_un_brouillon_inexistant(entree, inst):
+    _envoi_sain(inst, entree)
+    _forger_valide(inst, "FORGE1")
+    _forger_envoi(inst, "FORGE1")
+    controle = cycle.controler_envois(inst)
+    forge = next(l for l in controle.lignes if l.id_relance == "FORGE1")
+    assert not controle.ok and forge.anomalies == ("brouillon absent de la base",)
+    assert all(l.anomalies == () for l in controle.lignes if l.id_relance != "FORGE1")
+
+
+def test_a17_paire_forgee_pour_un_brouillon_non_envoye_ou_au_valide_par_different(entree, inst):
+    _envoi_sain(inst, entree)
+    autre = next(x for x in cycle.brouillons(inst) if x.statut is StatutBrouillon.BROUILLON)
+    _forger_valide(inst, autre.id_relance, dest=autre.destinataire)
+    _forger_envoi(inst, autre.id_relance, dest=autre.destinataire)
+    ligne = next(l for l in cycle.controler_envois(inst).lignes if l.id_relance == autre.id_relance)
+    assert ligne.anomalies == ("brouillon au statut brouillon en base, pas envoyee",)
+    # Journal coherent en lui-meme, mais la base dit autre chose : le `valide_par` de la base fait foi.
+    _reecrire_journal(inst, lambda e: ("Paul Martin", {**e.details, "par": "Paul Martin"}) if (
+        e.action == "valide" and e.objet != autre.id_relance) else (
+        (e.acteur, {**e.details, "valide_par": "Paul Martin"}) if (
+            e.action == "envoi_effectue" and e.objet != autre.id_relance) else (e.acteur, e.details)))
+    sain = next(l for l in cycle.controler_envois(inst).lignes if l.id_relance != autre.id_relance)
+    assert sain.anomalies == ("`valide_par` en base ('Marie Durand') different du journal ('Paul Martin')",)
+
+
+def test_a17_brouillon_rejete_puis_envoye(entree, inst):
+    lancer(entree, inst, J0)
+    b = _brouillon_alpha(inst)
+    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    cycle.rejeter_relance(inst, b.id_relance, VALIDEUSE, "non", maintenant=a_10h(J0))
+    _forger_envoi(inst, b.id_relance, dest=b.destinataire)
+    (ligne,) = cycle.controler_envois(inst).lignes
+    assert any(a.startswith("brouillon rejete (entree ") and a.endswith(") puis envoye") for a in ligne.anomalies)
+    assert any("statut rejetee en base" in a for a in ligne.anomalies)
+
+
+def test_a17_envoi_sans_declencheur_nominatif(entree, inst, capsys):
+    b = _valider_premier(inst, entree)
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0))                  # API sans `par`
+    (ligne,) = cycle.controler_envois(inst).lignes
+    assert ligne.anomalies == ("envoi non nominatif (`envoye_par` absent : qui l'a declenche ?)",)
+    rc, out, _ = cli(capsys, inst, "controler-envois")
+    assert rc == 1 and "envoi non nominatif" in out

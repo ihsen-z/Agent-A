@@ -100,6 +100,21 @@ Regles issues de l'audit de conformite (docs/conformite_mvp.md, section 4) :
 - Mode test : `creneau_envoi_libre` et `limite_hebdomadaire` de `config.json` (sans effet hors
   mode test) ; les garde-fous coupes sont journalises (`garde_fous_coupes`) et affiches.
 
+Quatrieme passage de revue :
+
+- MODE FIGE PAR INSTANCE. Le mode (test ou reel) est une propriete de l'instance, enregistree
+  par son premier cycle (journal `mode_instance` + marqueur `vus`, que rien ne reecrit). Toute
+  operation d'ecriture compare le mode EFFECTIF demande (`config.json` ou `mode_test`) a lui et
+  leve `ModeInstanceIncompatible` AVANT toute ecriture s'ils different : une instance de test ne
+  devient jamais reelle, et inversement (`cycle --mode-test` ne peut plus preparer des brouillons
+  tolerants pour les expedier ensuite au vrai client). Consequence voulue : dans une instance de
+  test tout est simule, y compris l'historique des envois, le passage des pieces a DEMANDEE et la
+  limite hebdomadaire. `mode_instance` (lecture seule) l'expose. Une configuration illisible
+  refuse aussi : sans elle le mode effectif est inconnu.
+- Un fichier (`id_piece`) n'appartient qu'a un dossier, `forcer` compris.
+- `controler_envois` recoupe le journal avec la base et l'outbox.
+- Noms de validateurs et de responsables compares en NFC (espaces de bord retires).
+
 Le cycle ne valide JAMAIS rien lui-meme.
 """
 
@@ -481,14 +496,26 @@ def mode_demande(instance: Instance | Path | str, mode_test: bool = False) -> st
     return "test" if bool(mode_test) or charger_config(instance)["mode_test"] else "reel"
 
 
+def _refus_mode(enregistre: str, demande: str) -> ModeInstanceIncompatible:
+    return ModeInstanceIncompatible(
+        f"cette instance a ete creee en mode {enregistre} (operation demandee en mode {demande}) ; "
+        "pour changer, creer une nouvelle instance"
+    )
+
+
 def _exiger_mode(depot: Depot, demande: str) -> str | None:
     enregistre = _mode_enregistre(depot)
     if enregistre is not None and enregistre != demande:
-        raise ModeInstanceIncompatible(
-            f"cette instance a ete creee en mode {enregistre} (operation demandee en mode {demande}) ; "
-            "pour changer, creer une nouvelle instance"
-        )
+        raise _refus_mode(enregistre, demande)
     return enregistre
+
+
+def _exiger_mode_instance(inst: Instance, mode_test: bool) -> None:
+    """Meme verification que `_ouvrir`, faite AVANT un controle de role : quand le mode ET le role
+    sont faux, le message du mode (« cette instance a ete creee en mode ... ») est le plus utile."""
+    enregistre, demande = mode_instance(inst), mode_demande(inst, mode_test)
+    if enregistre is not None and enregistre != demande:
+        raise _refus_mode(enregistre, demande)
 
 
 def _figer_mode(depot: Depot, journal: JournalAudit, demande: str, source: str, aujourdhui: dt.date,
@@ -544,8 +571,10 @@ def affichable(valeur: object) -> str:
 
 def normaliser_nom(nom: str) -> str:
     """Forme canonique d'un nom de personne : NFC (macOS ecrit en NFD, Windows en NFC) et espaces
-    reduits. Ne change PAS la casse : voir `_cle_nom` pour la comparaison."""
-    return " ".join(unicodedata.normalize("NFC", nom).split())
+    de bord retires. Les espaces INTERNES ne sont pas touches : « Marie  Durand » (deux espaces) ou
+    « Marie\u00a0Durand » (espace insecable) ne sont pas « Marie Durand » (nom a l'apparence trompeuse).
+    Ne change PAS la casse : voir `_cle_nom` pour la comparaison."""
+    return unicodedata.normalize("NFC", nom).strip()
 
 
 def _cle_nom(nom: str) -> str:
@@ -1895,6 +1924,7 @@ def trancher_envoi(instance: Instance | Path | str, id_relance: str, par: str, *
     """Tranche un envoi incertain. Operation de RESPONSABLE (`responsables.txt`, A14) ; en mode
     test sans `responsables.txt`, repli sur les validateurs (journal `repli_roles_mode_test`)."""
     inst = Instance.de(instance)
+    _exiger_mode_instance(inst, mode_test)
     nom, repli = _nom_responsable(inst, par, mode_test)
     with _ouvrir(inst, ecriture=True, mode=mode_demande(inst, mode_test)) as (depot, journal):
         if repli:
@@ -1962,6 +1992,7 @@ def rattacher_piece(
     inst = Instance.de(instance)
     repli = False
     if forcer:
+        _exiger_mode_instance(inst, mode_test)
         nom, repli = _nom_responsable(inst, par, mode_test)
     else:
         nom = exiger_validateur(inst, par)
@@ -2135,6 +2166,7 @@ def arbitrer_piece(instance: Instance | Path | str, dossier: str, reference: str
     validateurs (journal `repli_roles_mode_test`)."""
     if not isinstance(motif, str) or not motif.strip():
         raise ErreurCycle("arbitrer : --motif obligatoire et non vide")
+    _exiger_mode_instance(Instance.de(instance), mode_test)
     nom, repli = _nom_responsable(Instance.de(instance), par, mode_test)
     if repli:
         with _ouvrir(Instance.de(instance), ecriture=True,
@@ -2468,12 +2500,7 @@ def reparer_audit(instance: Instance | Path | str, par: str, *,
     (idempotent). Journal altere AILLEURS qu'en fin : `audit.JournalCorrompu` remonte
     tel quel, sans rien modifier (reparer effacerait la preuve d'une falsification)."""
     inst = Instance.de(instance)
-    enregistre, demande = mode_instance(inst), mode_demande(inst, mode_test)
-    if enregistre is not None and enregistre != demande:     # avant tout, comme `_ouvrir`
-        raise ModeInstanceIncompatible(
-            f"cette instance a ete creee en mode {enregistre} (operation demandee en mode {demande}) ; "
-            "pour changer, creer une nouvelle instance"
-        )
+    _exiger_mode_instance(inst, mode_test)                   # avant tout, comme `_ouvrir`
     nom, repli = _nom_responsable(inst, par, mode_test)     # operation de RESPONSABLE (A14)
     if not isinstance(maintenant, dt.datetime) or maintenant.utcoffset() is None:
         raise ValueError("maintenant doit etre un datetime avec fuseau")

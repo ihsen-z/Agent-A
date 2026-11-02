@@ -231,7 +231,7 @@ def test_c_chemins_avec_espaces_et_accents(tmp_path, strategie):
     assert r.quarantaine == 0 and r.messages_lus == 3 and r.propositions == 1
     assert cycle.verifier_audit(inst).ok
     b = cycle.brouillons(inst)[0]
-    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0), mode_test=True)
     cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0), mode_test=True)
     assert (inst.outbox / f"{b.id_relance}.eml").exists()
     export = cycle.exporter(inst, inst.racine / "export é.json")
@@ -405,6 +405,7 @@ def depots_tenus(monkeypatch):
 def test_f_aucun_descripteur_ouvert_apres_chaque_operation_et_repertoire_supprimable(tmp_path, depots_tenus):
     entree = ecrire_entree(tmp_path / "e")
     inst = nouvelle_instance(tmp_path / "instance")
+    (inst.racine / "config.json").write_text('{"mode_test": true}', encoding="utf-8")   # mode fige : test
     deposer_emls(inst)
 
     def rien_d_ouvert(etape: str) -> None:
@@ -507,9 +508,9 @@ def test_fuseaux_cycle_validation_et_envoi_sans_base_de_fuseaux(tmp_path, sans_b
     assert ZoneInfo("Europe/Paris").utcoffset(dt.datetime(2026, 7, 1, 12)) == dt.timedelta(hours=2)
     entree = ecrire_entree(tmp_path / "e")
     inst = nouvelle_instance(tmp_path / "i")
-    lancer(entree, inst)
+    lancer(entree, inst, mode_test=True)
     b = cycle.brouillons(inst)[0]
-    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0), mode_test=True)
     envoye = cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0), mode_test=True)
     assert envoye.statut is StatutBrouillon.ENVOYEE
     # Creneau d'envoi (cadence.heure_d_envoi_valide) : 07:59 UTC = 09:59 Paris l'ete, ouvre.
@@ -530,7 +531,7 @@ def test_fuseaux_cli_complet_sans_base_de_fuseaux(tmp_path):
     r = sous_processus([cli, "cycle", *base, "--entree", str(entree), "--mode-test"], **env)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
     (b, *_) = cycle.brouillons(inst)
-    r = sous_processus([cli, "valider", *base, "--par", VALIDEUSE, b.id_relance], **env)
+    r = sous_processus([cli, "valider", *base, "--mode-test", "--par", VALIDEUSE, b.id_relance], **env)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
     r = sous_processus([cli, "envoyer", *base, "--mode-test", "--par", VALIDEUSE, b.id_relance], **env)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
