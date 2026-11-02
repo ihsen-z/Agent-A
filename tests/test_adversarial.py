@@ -2685,12 +2685,8 @@ def test_sain_montants_formes_illisibles_refusees(texte) -> None:
         lire_montant(texte)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Montants : `EUR` et `€` sont retires N'IMPORTE OU dans la chaine : `12€50` (ecriture usuelle de "
-    "12,50 EUR) est lu 1250, `12 EUR 50` aussi, `1EUR2` donne 12. Un montant multiplie par 100 sans "
-    "erreur : la piece ne correspond plus, un autre paiement peut etre justifie a tort."))
 @pytest.mark.parametrize("texte, interdit", [("12€50", "1250"), ("12 EUR 50", "1250"), ("1EUR2", "12")])
-def test_defaut_montant_symbole_devise_au_milieu(texte, interdit) -> None:
+def test_regression_montant_symbole_devise_au_milieu(texte, interdit) -> None:
     try:
         valeur = lire_montant(texte)
     except ErreurFormat:
@@ -2698,12 +2694,8 @@ def test_defaut_montant_symbole_devise_au_milieu(texte, interdit) -> None:
     assert valeur != Decimal(interdit)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Montants : `1,234` et `1.234` (trois decimales) sont lus 1,234 EUR alors que, selon la banque, "
-    "ils designent 1 234 EUR ; `12.345` est accepte tel quel. Une monnaie a deux decimales : un "
-    "montant a trois decimales est ambigu et doit etre refuse, pas devine."))
 @pytest.mark.parametrize("texte", ["1,234", "1.234", "12.345", "0,125"])
-def test_defaut_montant_a_trois_decimales_devine(texte) -> None:
+def test_regression_montant_a_trois_decimales_devine(texte) -> None:
     try:
         valeur = lire_montant(texte)
     except ErreurFormat:
@@ -2711,12 +2703,8 @@ def test_defaut_montant_a_trois_decimales_devine(texte) -> None:
     assert valeur.as_tuple().exponent >= -2
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Montants : une parenthese non appariee (`(12,50`, `12,50)`) est retiree sans regard et le "
-    "montant est lu POSITIF ; `(-12,50)` (double negation) est lu +12,50. Le sens d'un montant "
-    "(paiement ou remboursement) est devine de travers sans erreur."))
 @pytest.mark.parametrize("texte", ["(12,50", "12,50)", "(-12,50)"])
-def test_defaut_montant_parentheses_mal_appariees(texte) -> None:
+def test_regression_montant_parentheses_mal_appariees(texte) -> None:
     try:
         lire_montant(texte)
     except ErreurFormat:
@@ -2727,11 +2715,6 @@ def test_defaut_montant_parentheses_mal_appariees(texte) -> None:
 # --- En-tetes normalises : deux colonnes qui se normalisent identiquement --------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Lecteurs : `Débit` et `debit` (ou `Dossier` et `dossier`, `Circuit` et `circuit`...) se "
-    "normalisent en une seule cle : la DERNIERE colonne ecrase la premiere en silence (releve : un "
-    "debit de 120,00 devient 0 et la ligne est sautee ; dossiers : C-RELAIS devient C-DIRECT). "
-    "Seul `exclusions_dossier.csv` refuse les colonnes en double."))
 @pytest.mark.parametrize("lecteur, contenu", [
     ("releve", "dossier,date_operation,libelle,Débit,debit,credit,reference\nA,2026-09-03,CB X,120.00,,,R1\n"),
     ("releve", "dossier,Dossier,date_operation,libelle,debit,credit,reference\nALPHA,BETA,2026-09-03,CB X,120.00,,R1\n"),
@@ -2739,7 +2722,7 @@ def test_defaut_montant_parentheses_mal_appariees(texte) -> None:
     ("pieces", "id_piece,dossier,fichier,fournisseur,date_facture,montant_ttc,Montant_TTC\nP1,A,f,X,2026-09-02,12.50,99.00\n"),
     ("dossiers", "dossier,raison_sociale,email_contact,circuit,Circuit,email_relais\nA,Alpha,a@a.fr,C-RELAIS,C-DIRECT,p@c.fr\n"),
 ])
-def test_defaut_entetes_en_double_apres_normalisation(tmp_path, lecteur, contenu) -> None:
+def test_regression_entetes_en_double_apres_normalisation(tmp_path, lecteur, contenu) -> None:
     chemin = tmp_path / "x.csv"
     chemin.write_text(contenu, encoding="utf-8")
     try:
@@ -2805,7 +2788,7 @@ def test_sain_controler_mode_texte_hostile_dans_une_valeur_du_journal(tmp_path) 
     assert cycle.controler_mode(inst) == () and cycle.mode_instance(inst) == "reel"
 
 
-def test_defaut_base_recreee_guerie_en_silence_double_envoi(tmp_path) -> None:
+def test_regression_base_recreee_guerie_en_silence_double_envoi(tmp_path) -> None:
     entree, inst, b = _brouillon_valide(tmp_path)
     cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE)
     for chemin in tmp_path.glob("i/depot.sqlite*"):
@@ -2867,7 +2850,7 @@ def test_sain_adresse_test_adresses_sans_client_acceptees(adresse) -> None:
 
 @pytest.mark.parametrize("adresse", ["autre@ALPHA-SARL.FR.", "autre@mail.alpha-sarl.fr", "autre@xn--socit-esab.fr",
                                      "autre@deep.sous.gamma.fr"])
-def test_defaut_adresse_test_variantes_de_domaine_d_un_client(adresse) -> None:
+def test_regression_adresse_test_variantes_de_domaine_d_un_client(adresse) -> None:
     try:
         cycle.verifier_adresse_test(adresse, _dossiers_adresse_test())
     except cycle.ConfigInvalide:
@@ -2876,7 +2859,7 @@ def test_defaut_adresse_test_variantes_de_domaine_d_un_client(adresse) -> None:
 
 
 @pytest.mark.parametrize("adresse", ["gerant+test@gmail.com", "ge.rant@gmail.com", "gerant@googlemail.com"])
-def test_defaut_adresse_test_meme_boite_grand_public(adresse) -> None:
+def test_regression_adresse_test_meme_boite_grand_public(adresse) -> None:
     try:
         cycle.verifier_adresse_test(adresse, _dossiers_adresse_test())
     except cycle.ConfigInvalide:
@@ -2926,24 +2909,15 @@ def test_sain_sonde_regex_deux_lectures_concurrentes(tmp_path) -> None:
     assert resultats == ["refuse"] * 4
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Sonde de regex : chaque regle « a sonder » (`(loxam|hilti)+ pro`, alternative quantifiee, "
-    "tout a fait saine) lance son PROPRE interpreteur (~21 ms) a chaque lecture du fichier, donc a "
-    "chaque cycle : 100 regles = 2 s, 1 000 regles = 21 s avant la moindre ecriture. `_sonder` "
-    "accepte pourtant une liste ; aucun regroupement ni cache."))
-def test_defaut_sonde_regex_cout_lineaire_en_processus(tmp_path) -> None:
+def test_regression_sonde_regex_cout_lineaire_en_processus(tmp_path) -> None:
     fichier = _fichier_regles(tmp_path / "x.csv", [f"(loxam{i}|hilti{i})+ ?pro" for i in range(300)])
     t = time.perf_counter()
     Referentiel.depuis_csv(fichier)
     assert time.perf_counter() - t < 3
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Sonde de regex : si le processus de sondage ne peut pas demarrer (`sys.executable` vide ou "
-    "introuvable, limite de processus, executable fige) ou plante, `_sonder` renvoie None = « ne "
-    "gele pas » : `(a|aa)+$` est ACCEPTEE. Le garde-fou echoue OUVERT ; il devrait echouer ferme."))
 @pytest.mark.parametrize("executable", ["", "/nonexistent/python"])
-def test_defaut_sonde_regex_echoue_ouvert(tmp_path, monkeypatch, executable) -> None:
+def test_regression_sonde_regex_echoue_ouvert(tmp_path, monkeypatch, executable) -> None:
     monkeypatch.setattr(sys, "executable", executable)
     try:
         Referentiel.depuis_csv(_fichier_regles(tmp_path / "x.csv", ["(a|aa)+$"]))
@@ -2952,13 +2926,8 @@ def test_defaut_sonde_regex_echoue_ouvert(tmp_path, monkeypatch, executable) -> 
     raise AssertionError("expression catastrophique acceptee sans sonde")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Garde-fou de regex : des repetitions SUCCESSIVES non imbriquees (`.*.*.*.*.*.*.*.*.*.*x`, "
-    "`\\w+\\w+\\w+\\w+\\w+\\w+\\w+\\w+x`, `a*a*a*a*a*a*a*a*a*a*b`) sont classees « sures », "
-    "non sondees, et gelent le cycle de tous les dossiers (temps polynomial de degre eleve) sur un "
-    "libelle de 60 caracteres."))
 @pytest.mark.parametrize("regle", [".*.*.*.*.*.*.*.*.*.*x", "\\w+\\w+\\w+\\w+\\w+\\w+\\w+\\w+x", "a*a*a*a*a*a*a*a*a*a*b"])
-def test_defaut_regex_repetitions_successives_gelent_le_cycle(tmp_path, regle) -> None:
+def test_regression_regex_repetitions_successives_gelent_le_cycle(tmp_path, regle) -> None:
     chemin = _fichier_regles(tmp_path / "x.csv", [regle])
     script = (_SCRIPT_REGEX.replace("'a' * 30 + 'b'", "'a' * 60").replace("ALPHA", "D00")
               .format(src=str(RACINE / "src"), csv=str(chemin)))
