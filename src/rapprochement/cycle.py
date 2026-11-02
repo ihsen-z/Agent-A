@@ -68,19 +68,38 @@ Suivi humain : `saisir_promesse`, `arbitrer_piece`, `bloquer_piece`,
 `suivi_pieces` (lecture seule, echeances calculees par `cadence.planifier`).
 Le cycle ecrit `sortie/escalades.csv` (pieces ESCALADEE) a chaque passage.
 
+Mode test (essais locaux, donnees fictives) : `<instance>/config.json` (`mode_test`,
+`adresse_test`) ou drapeau `--mode-test`. Il n'enleve AUCUN garde-fou : il en ajoute un
+(`ExpediteurTest` : aucun e-mail n'est jamais adresse au vrai destinataire) et autorise
+des strategies d'isolation de lecture plus faibles, toujours annoncees (en tete du
+resume, dans `resume.txt`, au journal : `mode_test_actif`, `isolation_degradee`).
+Strategies de lecture des .eml : `fork` (Linux, macOS : memoire + CPU + delai),
+`spawn` (Windows : delai seulement, SANS limite memoire), `directe` (aucune isolation,
+`--sans-isolation`, mode test uniquement). Hors mode test, une plateforme sans
+`fork` + `resource` est refusee.
+
 Le cycle ne valide JAMAIS rien lui-meme.
 """
 
 from __future__ import annotations
 
+import atexit
 import csv
+import dataclasses
 import datetime as dt
 import io
+import json
 import math
 import multiprocessing
 import os
+import re
+import shutil
 import signal
+import struct
+import sys
+import tempfile
 import unicodedata
+import zoneinfo
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -139,6 +158,21 @@ LIMITE_MEMOIRE_LECTURE_EML = 1024 ** 3       # octets d'espace d'adressage EN PL
 LIMITE_CPU_LECTURE_EML = 10.0                # secondes de CPU de l'enfant
 MARGE_GARDE_LECTURE_EML = 3.0                # secondes reelles ajoutees au CPU avant de tuer
 
+# Strategies de lecture des .eml (voir `choisir_strategie_isolation`).
+STRATEGIES_ISOLATION = ("fork", "spawn", "directe")
+# Le demarrage d'un interpreteur `spawn` (imports compris) est lent, surtout sous Windows
+# avec un antivirus : il ne doit pas etre pris pour un blocage de l'analyse.
+MARGE_DEMARRAGE_SPAWN = 5.0
+AVERTISSEMENT_SPAWN = "isolation partielle : temps seulement, pas de limite memoire"
+AVERTISSEMENT_DIRECTE = ("aucune isolation : les e-mails sont lus dans le processus principal "
+                         "(--sans-isolation, mode test uniquement)")
+
+# Mode test. `.invalid` est un TLD reserve (RFC 2606) : jamais une vraie adresse.
+NOM_CONFIG = "config.json"
+ADRESSE_TEST_DEFAUT = "test@exemple.invalid"
+PREFIXE_TEST = "[TEST] "
+_ADRESSE_TEST = re.compile(r"[^\s@,;<>()\[\]\\\"]+@[^\s@,;<>()\[\]\\\"]+")
+
 ACTEUR_SYSTEME = "systeme"
 FUSEAU = "Europe/Paris"
 PREFIXE_MOTIF_CYCLE = "[cycle] "
@@ -170,6 +204,10 @@ class CollisionReferences(ErreurCycle):
             "(dossiers listes ; corriger les references a la source, le cycle ne tranche pas) :\n"
             + "\n".join(lignes)
         )
+
+
+class ConfigInvalide(ErreurCycle):
+    """`config.json` illisible ou de type incorrect : refus avant toute ecriture."""
 
 
 class JournalNonSain(ErreurCycle):
@@ -210,6 +248,10 @@ class Instance:
         return self.racine / "validateurs.txt"
 
     @property
+    def config(self) -> Path:
+        return self.racine / NOM_CONFIG
+
+    @property
     def entrant(self) -> Path:
         return self.racine / "entrant"
 
@@ -224,6 +266,93 @@ class Instance:
     def preparer(self) -> None:
         for chemin in (self.racine, self.entrant, self.outbox, self.sortie):
             chemin.mkdir(parents=True, exist_ok=True)
+
+
+def charger_config(instance: Instance | Path | str) -> dict[str, Any]:
+    """Configuration de l'instance (`<instance>/config.json`), valeurs par defaut comprises.
+
+    Cles connues : `mode_test` (booleen STRICT, defaut False : "false" ou 0 sont refuses
+    plutot que lus comme vrais) et `adresse_test` (une adresse simple, defaut
+    `test@exemple.invalid`). Les autres cles sont conservees telles quelles (d'autres
+    composants peuvent y ranger les leurs). Fichier absent : mode normal. JSON invalide,
+    non UTF-8, ou valeur de mauvais type : `ConfigInvalide` (message lisible, sans trace).
+    Lecture seule : ne cree jamais rien. Un BOM UTF-8 (Bloc-notes) est accepte.
+    """
+    config: dict[str, Any] = {"mode_test": False, "adresse_test": ADRESSE_TEST_DEFAUT}
+    chemin = Instance.de(instance).config
+    if not chemin.exists():
+        return config
+    try:
+        contenu = json.loads(chemin.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ConfigInvalide(
+            f"{NOM_CONFIG} invalide (JSON, ligne {exc.lineno} colonne {exc.colno} : "
+            f"{affichable(exc.msg)}) : corriger ou supprimer {chemin}"
+        ) from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigInvalide(
+            f"{NOM_CONFIG} illisible ({type(exc).__name__}) : l'enregistrer en UTF-8 ({chemin})"
+        ) from None
+    if not isinstance(contenu, dict):
+        raise ConfigInvalide(f"{NOM_CONFIG} doit contenir un objet JSON {{...}} ({chemin})")
+    config.update(contenu)
+    if not isinstance(config["mode_test"], bool):
+        raise ConfigInvalide(
+            f"{NOM_CONFIG} : `mode_test` doit etre true ou false (booleen JSON), "
+            f"pas {affichable(repr(config['mode_test']))}"
+        )
+    adresse = config["adresse_test"]
+    if not isinstance(adresse, str) or not _ADRESSE_TEST.fullmatch(adresse):
+        raise ConfigInvalide(
+            f"{NOM_CONFIG} : `adresse_test` doit etre une seule adresse simple "
+            f"(exemple : {ADRESSE_TEST_DEFAUT}), pas {affichable(repr(adresse))}"
+        )
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Fuseaux horaires : sous Windows, `zoneinfo` n'a PAS de base de fuseaux (elle vient du
+# systeme sous Linux/macOS, ou du paquet PyPI `tzdata` que ce projet n'exige pas).
+# `cadence` et `envoi` appellent `ZoneInfo("Europe/Paris")` directement : sans base,
+# tout envoi leve ZoneInfoNotFoundError. On installe donc, SEULEMENT si la base manque,
+# un fichier TZif minimal (regle de l'Union europeenne, valable depuis 1996) dans un
+# repertoire prive ajoute au chemin de `zoneinfo` : les trois modules en profitent.
+# ---------------------------------------------------------------------------
+
+_FUSEAUX_VERIFIES = False
+_REGLE_EUROPE_PARIS = b"CET-1CEST,M3.5.0,M10.5.0/3"
+
+
+def _tzif_europe_paris() -> bytes:
+    """Fichier TZif v2 sans transition : tout est decrit par la regle POSIX finale."""
+    abreviation = b"CET\0"
+    type_local = struct.pack(">lBB", 3600, 0, 0)
+    bloc = (b"TZif2" + b"\0" * 15 + struct.pack(">6l", 0, 0, 0, 0, 1, len(abreviation))
+            + type_local + abreviation)
+    return bloc + bloc + b"\n" + _REGLE_EUROPE_PARIS + b"\n"
+
+
+def garantir_fuseaux() -> str:
+    """Rend `ZoneInfo("Europe/Paris")` utilisable. Renvoie "systeme" si la base existe,
+    "secours" si le fichier de secours a ete installe. Idempotent et bon marche."""
+    global _FUSEAUX_VERIFIES
+    if _FUSEAUX_VERIFIES:
+        return "systeme"
+    try:
+        zoneinfo.ZoneInfo(FUSEAU)
+    except zoneinfo.ZoneInfoNotFoundError:
+        dossier = Path(tempfile.mkdtemp(prefix="rapprochement-fuseaux-"))
+        atexit.register(shutil.rmtree, dossier, ignore_errors=True)
+        cible = dossier.joinpath(*FUSEAU.split("/"))
+        cible.parent.mkdir(parents=True)
+        cible.write_bytes(_tzif_europe_paris())
+        zoneinfo.reset_tzpath(to=[*zoneinfo.TZPATH, str(dossier)])
+        zoneinfo.ZoneInfo.clear_cache()
+        zoneinfo.ZoneInfo(FUSEAU)   # doit marcher maintenant, sinon l'erreur remonte
+        _FUSEAUX_VERIFIES = True
+        return "secours"
+    _FUSEAUX_VERIFIES = True
+    return "systeme"
 
 
 def exiger_journal_sain(instance: Instance | Path | str) -> JournalAudit:
@@ -250,6 +379,7 @@ def exiger_journal_sain(instance: Instance | Path | str) -> JournalAudit:
 def _ouvrir(instance: Instance, *, ecriture: bool = False) -> Iterator[tuple[Depot, JournalAudit]]:
     """`ecriture=True` : refuse (`JournalNonSain`) avant d'ouvrir la base si le journal
     d'audit ne verifie pas. Les lectures (liste, export) restent possibles."""
+    garantir_fuseaux()
     instance.preparer()
     journal = exiger_journal_sain(instance) if ecriture else JournalAudit(instance.audit)
     depot = Depot(instance.depot)
@@ -443,6 +573,7 @@ def _transition(piece: PieceAttendue, evenement: Evenement, aujourdhui: dt.date,
 
 
 def _jour_local(maintenant: dt.datetime) -> dt.date:
+    garantir_fuseaux()
     return maintenant.astimezone(ZoneInfo(FUSEAU)).date()
 
 
@@ -498,6 +629,10 @@ class ResumeCycle:
     bloquees: int = 0
     anomalies: list[str] = field(default_factory=list)
     quarantaine: int = 0
+    mode_test: bool = False
+    adresse_test: str = ""
+    strategie_isolation: str = ""
+    avertissements: list[str] = field(default_factory=list)
 
     def en_dict(self) -> dict[str, Any]:
         return {
@@ -513,13 +648,21 @@ class ResumeCycle:
             "brouillons_du_jour": list(self.brouillons_du_jour),
             "reportees": dict(sorted(self.reportees.items())), "bloquees": self.bloquees,
             "anomalies": list(self.anomalies), "quarantaine": self.quarantaine,
+            "mode_test": self.mode_test, "strategie_isolation": self.strategie_isolation,
         }
 
     def texte(self) -> str:
         d = self.en_dict()
-        lignes = [f"Cycle du {self.aujourdhui.isoformat()}"]
+        lignes = []
+        if self.mode_test:
+            lignes.append(
+                f"*** MODE TEST ACTIF : tout e-mail part vers {affichable(self.adresse_test)}, "
+                "jamais vers un client. Donnees fictives uniquement. ***")
+        lignes += [f"AVERTISSEMENT : {affichable(a)}" for a in self.avertissements]
+        lignes.append(f"Cycle du {self.aujourdhui.isoformat()}")
         for cle, valeur in d.items():
-            if cle in ("aujourdhui", "anomalies", "brouillons_du_jour", "reportees"):
+            if cle in ("aujourdhui", "anomalies", "brouillons_du_jour", "reportees",
+                       "mode_test", "strategie_isolation"):
                 continue
             lignes.append(f"  {cle:28s}: {valeur}")
         for raison, n in d["reportees"].items():
@@ -600,8 +743,15 @@ def executer_cycle(
     panne: Panne | None = None,
     limite_memoire_eml: int = LIMITE_MEMOIRE_LECTURE_EML,
     limite_cpu_eml: float = LIMITE_CPU_LECTURE_EML,
+    mode_test: bool = False,
+    strategie_isolation: str | None = None,
 ) -> ResumeCycle:
     """Execute un cycle complet (voir la docstring du module).
+
+    `mode_test` active le mode test en plus de `config.json` (il ne peut pas le
+    desactiver). `strategie_isolation` : None (automatique), "fork", "spawn" ou
+    "directe" ; voir `choisir_strategie_isolation`. Tout refus (configuration, strategie)
+    intervient AVANT la moindre ecriture, instance non creee comprise.
 
     Chaque .eml est analyse dans un processus enfant borne a `limite_memoire_eml`
     octets d'espace d'adressage supplementaire et `limite_cpu_eml` secondes de CPU ;
@@ -618,8 +768,10 @@ def executer_cycle(
     audit laisse l'evenement sans trace d'audit (jamais l'inverse).
     """
     _exiger_temps(aujourdhui, maintenant)
-    exiger_isolation()
     inst = Instance.de(instance)
+    config = charger_config(inst)
+    en_mode_test = bool(mode_test) or config["mode_test"]
+    strategie = choisir_strategie_isolation(en_mode_test, strategie_isolation)
     entrees = lire_entrees(entree)
 
     # 2. Collisions dans le releve : refus AVANT toute ecriture.
@@ -628,7 +780,13 @@ def executer_cycle(
         raise CollisionReferences(collisions)
 
     rapprochements = Moteur(entrees.referentiel).rapprocher(entrees.operations, entrees.pieces)
-    resume = ResumeCycle(aujourdhui=aujourdhui, operations=len(rapprochements))
+    resume = ResumeCycle(aujourdhui=aujourdhui, operations=len(rapprochements),
+                         mode_test=en_mode_test, adresse_test=config["adresse_test"] if en_mode_test else "",
+                         strategie_isolation=strategie)
+    if strategie == "spawn":
+        resume.avertissements.append(AVERTISSEMENT_SPAWN)
+    elif strategie == "directe":
+        resume.avertissements.append(AVERTISSEMENT_DIRECTE)
 
     # Journal d'audit sain AVANT toute ecriture en base (sinon : effets sans trace).
     with _ouvrir(inst, ecriture=True) as (depot, journal):
@@ -637,6 +795,20 @@ def executer_cycle(
         if collisions:
             raise CollisionReferences(collisions)
         notes = _Notes(journal, maintenant)
+        if en_mode_test:
+            # Une fois par cycle, avant tout effet : le mode ne passe jamais inapercu.
+            journal.ecrire(ACTEUR_SYSTEME, "mode_test_actif", aujourdhui.isoformat(), {
+                "adresse_test": config["adresse_test"],
+                "source": ("config.json et --mode-test" if mode_test and config["mode_test"]
+                           else "--mode-test" if mode_test else "config.json"),
+            }, horodatage=maintenant)
+        if strategie != "fork":
+            journal.ecrire(ACTEUR_SYSTEME, "isolation_degradee", aujourdhui.isoformat(), {
+                "strategie": strategie,
+                "niveau": "partielle" if strategie == "spawn" else "aucune",
+                "avertissement": resume.avertissements[0],
+                "plateforme": sys.platform,
+            }, horodatage=maintenant)
 
         # 4 avant 3 (ecart volontaire a l'ordre du cahier de l'integrateur) : un envoi
         # deja parti doit etre enregistre AVANT que la fusion ne bloque ou n'exclue une
@@ -652,7 +824,7 @@ def executer_cycle(
 
         quarantaine = _etape_routage(depot, notes, inst, entrees.dossiers, aujourdhui, resume,
                                      limite_memoire_eml=limite_memoire_eml,
-                                     limite_cpu_eml=limite_cpu_eml)
+                                     limite_cpu_eml=limite_cpu_eml, strategie=strategie)
         _panne(panne, "apres_routage")
 
         pieces_avant = depot.charger_pieces()
@@ -766,14 +938,54 @@ class IsolationIndisponible(ErreurCycle):
     """La lecture isolee des .eml exige `resource` et `fork` (Linux, macOS)."""
 
 
-def exiger_isolation() -> None:
-    """Refus explicite si la lecture isolee est impossible : jamais de repli silencieux
-    sur l'analyse directe (une protection qui disparait sans bruit est pire qu'aucune)."""
-    if resource is None or "fork" not in multiprocessing.get_all_start_methods():
-        raise IsolationIndisponible(
-            "la lecture isolee des e-mails entrants exige Linux ou macOS (modules `resource` "
-            "et demarrage `fork`) : cycle refuse sur cette plateforme, rien n'a ete ecrit"
+def _fork_disponible() -> bool:
+    return resource is not None and "fork" in multiprocessing.get_all_start_methods()
+
+
+def choisir_strategie_isolation(mode_test: bool = False, demandee: str | None = None) -> str:
+    """Strategie de lecture des .eml ("fork", "spawn" ou "directe") ; refuse sinon.
+
+    - Automatique (`demandee` None) : `fork` + `resource` si la plateforme les a (Linux,
+      macOS). Sinon (Windows) : `spawn` EN MODE TEST seulement ; hors mode test, refus.
+    - `spawn` (delai de garde, SANS limite memoire) et `directe` (aucune isolation) ne
+      sont acceptes qu'en mode test, meme demandes explicitement : une protection plus
+      faible ne se choisit jamais en production, ni par accident.
+    Une protection qui disparait sans bruit est pire qu'une protection absente : tout
+    repli est annonce (resume, `resume.txt`, journal `isolation_degradee`).
+    """
+    if demandee is not None and demandee not in STRATEGIES_ISOLATION:
+        raise ErreurCycle(
+            f"strategie d'isolation inconnue {affichable(repr(demandee))} "
+            f"(attendu : {', '.join(STRATEGIES_ISOLATION)})"
         )
+    refus_plateforme = (
+        "la lecture isolee des e-mails entrants exige Linux ou macOS (modules `resource` "
+        "et demarrage `fork`) : cycle refuse sur cette plateforme, rien n'a ete ecrit"
+    )
+    indice = "" if mode_test else " ; utilisez --mode-test pour un essai local"
+    if demandee is None:
+        if _fork_disponible():
+            return "fork"
+        if mode_test:
+            return "spawn"
+        raise IsolationIndisponible(refus_plateforme + indice)
+    if demandee == "fork":
+        if not _fork_disponible():
+            raise IsolationIndisponible(refus_plateforme + indice)
+        return "fork"
+    if not mode_test:
+        raise IsolationIndisponible(
+            f"la strategie d'isolation {demandee!r} est plus faible que fork + resource : "
+            "elle n'est autorisee qu'en mode test (--mode-test ou config.json) ; "
+            "utilisez --mode-test pour un essai local"
+        )
+    return demandee
+
+
+def exiger_isolation(mode_test: bool = False, demandee: str | None = None) -> str:
+    """Compatibilite : refus explicite si la lecture isolee est impossible ; renvoie
+    la strategie retenue (voir `choisir_strategie_isolation`)."""
+    return choisir_strategie_isolation(mode_test, demandee)
 
 
 def _espace_adresses_actuel() -> int:
@@ -822,12 +1034,20 @@ def _lire_eml_isole(chemin: Path, limite_memoire: int, limite_cpu: float) -> Mes
     lecture, ecriture = contexte.Pipe(duplex=False)
     enfant = contexte.Process(target=_enfant_lire_eml, daemon=True,
                               args=(ecriture, str(chemin), int(limite_memoire), cpu))
-    statut: str | None = None
-    valeur: Any = None
     enfant.start()
     ecriture.close()
+    statut, valeur, code = _attendre_enfant(enfant, lecture, cpu + MARGE_GARDE_LECTURE_EML)
+    return _message_ou_refus(statut, valeur, code, cpu + MARGE_GARDE_LECTURE_EML, cpu)
+
+
+def _attendre_enfant(enfant: Any, lecture: Any, delai: float) -> tuple[str | None, Any, int | None]:
+    """Attend le resultat de l'enfant au plus `delai` secondes ; le TUE s'il depasse et
+    l'attend toujours : aucun processus ne survit. Renvoie (statut, valeur, code de sortie).
+    `terminate` d'abord, `kill` si l'enfant ne s'arrete pas (Windows : les deux tuent)."""
+    statut: str | None = None
+    valeur: Any = None
     try:
-        if lecture.poll(cpu + MARGE_GARDE_LECTURE_EML):
+        if lecture.poll(delai):
             try:
                 statut, valeur = lecture.recv()
             except Exception:  # noqa: BLE001 - EOF (enfant mort) ou resultat illisible
@@ -836,22 +1056,91 @@ def _lire_eml_isole(chemin: Path, limite_memoire: int, limite_cpu: float) -> Mes
             statut = "delai"
     finally:
         if enfant.is_alive():
-            enfant.kill()
+            enfant.terminate()
+            enfant.join(2.0)
+            if enfant.is_alive():
+                enfant.kill()
         enfant.join()
+        code = enfant.exitcode
         lecture.close()
+        enfant.close()      # libere le descripteur / la poignee du processus (Windows)
+    return statut, valeur, code
+
+
+def _message_ou_refus(statut: str | None, valeur: Any, code: int | None, delai: float,
+                      cpu: int) -> MessageEntrant:
+    """Traduit le resultat d'un enfant en `MessageEntrant` ou en `EmlRefuse` lisible."""
     if statut == "ok" and isinstance(valeur, MessageEntrant):
         return valeur
     if statut == "erreur":
         raise EmlRefuse(f"lecture isolee en echec : {valeur}")
     if statut == "delai":
-        raise EmlRefuse(f"lecture isolee interrompue : plus de {cpu + MARGE_GARDE_LECTURE_EML:g} s")
-    code = enfant.exitcode
+        raise EmlRefuse(f"lecture isolee interrompue : plus de {delai:g} s")
     if code is not None and code < 0:
         nom = signal.Signals(-code).name if -code in signal.valid_signals() else str(-code)
         cause = {"SIGXCPU": f"temps CPU depasse (limite {cpu} s)",
                  "SIGKILL": "processus tue (memoire ou temps)"}.get(nom, "signal recu")
         raise EmlRefuse(f"lecture isolee en echec : {cause} [{nom}]")
     raise EmlRefuse(f"lecture isolee en echec : aucun resultat (code de sortie {code})")
+
+
+def _enfant_lire_eml_spawn(connexion: Any, chemin: str, sys_path: list[str]) -> None:
+    """Travailleur `spawn` : fonction de NIVEAU MODULE (serialisable par nom), seul moyen
+    pour que `multiprocessing` la retrouve dans l'interpreteur neuf de l'enfant.
+
+    Sous `spawn` l'enfant reimporte le module principal puis ce module : `src/` doit etre
+    sur son `sys.path`. `multiprocessing` transmet deja `sys.path` ; on le retransmet
+    explicitement (arguments) pour ne pas dependre de ce detail d'implementation.
+    Aucune limite memoire possible (pas de `resource` sous Windows) : seul le delai
+    de garde du parent borne cet enfant."""
+    try:
+        for entree in reversed(sys_path):
+            if entree not in sys.path:
+                sys.path.insert(0, entree)
+        connexion.send(("ok", routage.lire_eml(chemin)))
+    except BaseException as exc:  # noqa: BLE001 - tout echec devient une raison de quarantaine
+        try:
+            connexion.send(("erreur", _raison(exc)))
+        except BaseException:  # noqa: BLE001
+            pass
+    finally:
+        try:
+            connexion.close()
+        except BaseException:  # noqa: BLE001
+            pass
+
+
+def _lire_eml_spawn(chemin: Path, limite_cpu: float) -> MessageEntrant:
+    """Analyse `chemin` dans un processus `spawn` borne par un DELAI de garde seulement
+    (`limite_cpu` + marges, demarrage de l'interpreteur compris). Meme contrat que
+    `_lire_eml_isole` : `EmlRefuse` lisible pour tout echec, aucun processus ne survit."""
+    cpu = max(1, math.ceil(limite_cpu))
+    delai = cpu + MARGE_GARDE_LECTURE_EML + MARGE_DEMARRAGE_SPAWN
+    contexte = multiprocessing.get_context("spawn")
+    lecture, ecriture = contexte.Pipe(duplex=False)
+    enfant = contexte.Process(target=_enfant_lire_eml_spawn, daemon=True,
+                              args=(ecriture, str(chemin), list(sys.path)))
+    enfant.start()
+    ecriture.close()
+    statut, valeur, code = _attendre_enfant(enfant, lecture, delai)
+    return _message_ou_refus(statut, valeur, code, delai, cpu)
+
+
+def _lire_eml_direct(chemin: Path) -> MessageEntrant:
+    """Lecture dans le processus principal, SANS isolation : memoire et temps non bornes
+    (seules les exceptions sont rattrapees). Mode test uniquement (`--sans-isolation`)."""
+    try:
+        return routage.lire_eml(chemin)
+    except Exception as exc:  # noqa: BLE001
+        raise EmlRefuse(f"lecture directe en echec : {_raison(exc)}") from None
+
+
+def _lire_eml(chemin: Path, strategie: str, limite_memoire: int, limite_cpu: float) -> MessageEntrant:
+    if strategie == "fork":
+        return _lire_eml_isole(chemin, limite_memoire, limite_cpu)
+    if strategie == "spawn":
+        return _lire_eml_spawn(chemin, limite_cpu)
+    return _lire_eml_direct(chemin)
 
 
 def _garde_eml(chemin: Path) -> None:
@@ -883,7 +1172,8 @@ def _raison(exc: BaseException) -> str:
 def _etape_routage(depot: Depot, notes: _Notes, inst: Instance, dossiers: Mapping[str, Dossier],
                    aujourdhui: dt.date, resume: ResumeCycle, *,
                    limite_memoire_eml: int = LIMITE_MEMOIRE_LECTURE_EML,
-                   limite_cpu_eml: float = LIMITE_CPU_LECTURE_EML) -> list[FichierEnQuarantaine]:
+                   limite_cpu_eml: float = LIMITE_CPU_LECTURE_EML,
+                   strategie: str = "fork") -> list[FichierEnQuarantaine]:
     """Etape 5 : routage des .eml ; rien n'est rattache sans confirmation humaine.
 
     Chaque fichier est lu et route isolement : un .eml pathologique (imbrication
@@ -901,7 +1191,7 @@ def _etape_routage(depot: Depot, notes: _Notes, inst: Instance, dossiers: Mappin
     for chemin in chemins:
         try:
             _garde_eml(chemin)                    # premier filtre, sans analyse
-            message = _lire_eml_isole(chemin, limite_memoire_eml, limite_cpu_eml)
+            message = _lire_eml(chemin, strategie, limite_memoire_eml, limite_cpu_eml)
             attendues = depot.charger_pieces()
             deja_vus = {c for c in _cles_message(message) if depot.est_vu(c)}
             decisions = routage.router(
@@ -1157,6 +1447,33 @@ def _controler_avant_envoi(depot: Depot, journal: JournalAudit, b: Brouillon,
         raise exc
 
 
+class ExpediteurTest:
+    """Expediteur du mode test : enveloppe un expediteur reel et lui remet une COPIE du
+    brouillon dont l'objet est prefixe `[TEST] `, le destinataire remplace par
+    `adresse_test`, et le corps precede de « [TEST] Destinataire d'origine : <adresse> ».
+
+    Le brouillon stocke en base n'est PAS modifie (la limite hebdomadaire continue de
+    s'appliquer au vrai destinataire). Garantit qu'un essai n'ecrit jamais a un tiers,
+    meme le jour ou un vrai connecteur existe.
+    """
+
+    def __init__(self, reel: envoi_mod.Expediteur, adresse_test: str = ADRESSE_TEST_DEFAUT) -> None:
+        if not isinstance(adresse_test, str) or not _ADRESSE_TEST.fullmatch(adresse_test):
+            raise ErreurCycle(f"adresse de test invalide : {affichable(repr(adresse_test))}")
+        self.reel = reel
+        self.adresse_test = adresse_test
+
+    def envoyer(self, brouillon: Brouillon) -> str:
+        origine = " ".join(str(brouillon.destinataire).split())
+        copie = dataclasses.replace(
+            brouillon,
+            objet=PREFIXE_TEST + brouillon.objet,
+            destinataire=self.adresse_test,
+            corps=f"{PREFIXE_TEST}Destinataire d'origine : {origine}\n\n{brouillon.corps}",
+        )
+        return self.reel.envoyer(copie)
+
+
 def envoyer_relance(
     instance: Instance | Path | str,
     id_relance: str,
@@ -1165,18 +1482,31 @@ def envoyer_relance(
     expediteur: envoi_mod.Expediteur | None = None,
     creneau_ok: Callable[[dt.datetime], bool] | None = None,
     panne: Panne | None = None,
+    mode_test: bool = False,
 ) -> Brouillon:
     """Emet un brouillon VALIDEE (via `envoi.envoyer`, unique chemin d'emission),
     puis applique `RELANCE_ENVOYEE` aux pieces par le mecanisme idempotent de
     l'etape 4. Un crash entre les deux est rattrape par le cycle suivant.
+
+    En mode test (`mode_test=True` ou `config.json`), l'expediteur, y compris un
+    expediteur passe en argument, est enveloppe dans `ExpediteurTest` : rien n'est
+    jamais adresse au vrai destinataire. Une configuration invalide refuse l'envoi.
     """
     inst = Instance.de(instance)
+    config = charger_config(inst)
+    en_mode_test = bool(mode_test) or config["mode_test"]
     with _ouvrir(inst, ecriture=True) as (depot, journal):
         b = depot.charger_brouillon(id_relance)
         if b is not None and b.statut is StatutBrouillon.VALIDEE:
             _controler_avant_envoi(depot, journal, b, maintenant)
         exp = expediteur if expediteur is not None else envoi_mod.ExpediteurDossier(inst.outbox)
+        if en_mode_test:
+            exp = ExpediteurTest(exp, config["adresse_test"])
         envoi_mod.envoyer(depot, journal, exp, id_relance, maintenant=maintenant, creneau_ok=creneau_ok)
+        if en_mode_test and b is not None:
+            journal.ecrire(ACTEUR_SYSTEME, "envoi_mode_test", id_relance, {
+                "destinataire_reel": b.destinataire, "adresse_test": config["adresse_test"],
+            }, horodatage=maintenant)
         _panne(panne, "apres_envoi")
         _, anomalies = repercuter_envois(depot, journal, maintenant)
         if anomalies:
@@ -1569,7 +1899,9 @@ def brouillons(instance: Instance | Path | str,
 
 __all__ = [
     "CollisionReferences", "EnvoiRefuse", "ErreurCycle", "FichierEnQuarantaine", "Instance",
-    "IsolationIndisponible", "JournalNonSain", "exiger_isolation", "LigneSuivi", "ReparationAudit", "affichable", "exiger_journal_sain",
+    "ConfigInvalide", "ExpediteurTest", "IsolationIndisponible", "JournalNonSain",
+    "STRATEGIES_ISOLATION", "charger_config", "choisir_strategie_isolation", "exiger_isolation",
+    "garantir_fuseaux", "LigneSuivi", "ReparationAudit", "affichable", "exiger_journal_sain",
     "reparer_audit",
     "ResumeCycle", "SuiviPieces", "ValidateurRefuse", "arbitrer_piece", "bloquer_piece",
     "brouillons", "collisions_de_reference", "controler_piece", "debloquer_piece",

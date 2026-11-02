@@ -757,3 +757,274 @@ def test_deux_reparations_dans_la_meme_seconde_ne_s_ecrasent_pas(chemin):
     assert len(fragments(chemin)) == 2
     assert all(p.read_bytes() == b'{"seq": 9' for p in fragments(chemin))
     assert j.verifier().ok
+
+
+# --- verrou d'ecriture entre objets et entre processus (sans fcntl) ---------
+
+import multiprocessing  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
+
+from rapprochement import audit as audit_mod  # noqa: E402
+from rapprochement.audit import JournalVerrouille  # noqa: E402
+
+
+@pytest.fixture
+def sans_fcntl(monkeypatch):
+    """Simule Windows : `fcntl` indisponible."""
+    monkeypatch.setattr(audit_mod, "fcntl", None)
+
+
+def verrou_de(chemin: Path) -> Path:
+    return chemin.with_name(chemin.name + ".lock")
+
+
+def ecrire_verrou(chemin: Path, *, pid: int, age: float, jeton: str = "autre") -> bytes:
+    contenu = json.dumps({"pid": pid, "horodatage": time.time() - age, "jeton": jeton}).encode()
+    v = verrou_de(chemin)
+    v.write_bytes(contenu)
+    os.utime(v, (time.time() - age, time.time() - age))
+    return contenu
+
+
+def pid_mort() -> int:
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def travailleur(chemin: str, n: int, sans_fcntl_: bool, nom: str) -> None:
+    """Corps d'un processus enfant (contexte spawn : tout est reimporte)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from rapprochement import audit as a
+
+    if sans_fcntl_:
+        a.fcntl = None
+    for i in range(n):
+        a.JournalAudit(chemin, delai_verrou=60).ecrire(nom, "x", str(i), {"i": i})
+
+
+@pytest.mark.parametrize("avec_fcntl", [False, True], ids=["sans_fcntl", "avec_fcntl"])
+def test_deux_fils_deux_objets_200_ecritures_chacun(chemin, monkeypatch, avec_fcntl):
+    if not avec_fcntl:
+        monkeypatch.setattr(audit_mod, "fcntl", None)
+    JournalAudit(chemin)
+    erreurs: list[BaseException] = []
+
+    def travail(nom: str) -> None:
+        try:
+            j = JournalAudit(chemin, delai_verrou=60)  # un objet par fil
+            for i in range(200):
+                j.ecrire(nom, "x", str(i), {"i": i})
+        except BaseException as exc:  # noqa: BLE001
+            erreurs.append(exc)
+
+    fils = [threading.Thread(target=travail, args=(n,)) for n in ("a", "b")]
+    for t in fils:
+        t.start()
+    for t in fils:
+        t.join()
+    assert not erreurs
+    verif = JournalAudit(chemin).verifier()
+    assert verif.ok and verif.nb_entrees == 400
+    entrees = JournalAudit(chemin).lire()
+    assert [e.seq for e in entrees] == list(range(1, 401))
+    for nom in ("a", "b"):
+        assert [e.details["i"] for e in entrees if e.acteur == nom] == list(range(200))
+    assert not verrou_de(chemin).exists()
+
+
+def test_quatre_processus_reels_sans_fcntl(tmp_path):
+    chemin = tmp_path / "multi" / "journal.jsonl"
+    JournalAudit(chemin)
+    ctx = multiprocessing.get_context("spawn")
+    procs = [
+        ctx.Process(target=travailleur, args=(str(chemin), 100, True, f"p{k}")) for k in range(4)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(120)
+    assert [p.exitcode for p in procs] == [0, 0, 0, 0]
+    j = JournalAudit(chemin)
+    verif = j.verifier()
+    assert verif.ok and verif.nb_entrees == 400, verif
+    entrees = j.lire()
+    seqs = [e.seq for e in entrees]
+    assert seqs == list(range(1, 401)) and len(set(seqs)) == 400  # zero doublon
+    for k in range(4):
+        assert [e.details["i"] for e in entrees if e.acteur == f"p{k}"] == list(range(100))
+    assert not verrou_de(chemin).exists()
+    assert list(chemin.parent.glob("*.perime-*")) == []
+
+
+def test_verrou_perime_pid_inexistant_est_repris(chemin, sans_fcntl):
+    j = JournalAudit(chemin, delai_verrou=2)
+    ecrire_verrou(chemin, pid=pid_mort(), age=120)
+    assert j.ecrire("alice", "a", "b").seq == 1
+    assert not verrou_de(chemin).exists()
+    assert j.verifier().ok
+
+
+def test_verrou_perime_contenu_illisible_est_repris(chemin, sans_fcntl):
+    j = JournalAudit(chemin, delai_verrou=2)
+    verrou_de(chemin).write_bytes(b"\x00\xffgarbage")
+    os.utime(verrou_de(chemin), (time.time() - 120, time.time() - 120))
+    assert j.ecrire("alice", "a", "b").seq == 1
+    assert not verrou_de(chemin).exists()
+
+
+def test_verrou_recent_pid_mort_n_est_pas_ecrase(chemin, sans_fcntl):
+    j = JournalAudit(chemin, delai_verrou=0.2)
+    contenu = ecrire_verrou(chemin, pid=pid_mort(), age=1)  # recent : respecte
+    with pytest.raises(JournalVerrouille):
+        j.ecrire("alice", "a", "b")
+    assert verrou_de(chemin).read_bytes() == contenu
+    assert chemin.read_bytes() == b""  # rien d'ecrit
+
+
+def test_verrou_recent_pid_vivant_respecte_puis_erreur_apres_delai(chemin, sans_fcntl):
+    j = JournalAudit(chemin, delai_verrou=0.3)
+    contenu = ecrire_verrou(chemin, pid=os.getpid(), age=0)
+    debut = time.monotonic()
+    with pytest.raises(JournalVerrouille, match="verrou"):
+        j.ecrire("alice", "a", "b")
+    assert 0.25 <= time.monotonic() - debut < 5
+    assert verrou_de(chemin).read_bytes() == contenu  # jamais ecrase
+    assert isinstance(JournalVerrouille("x"), TimeoutError)
+
+
+def test_verrou_ancien_pid_vivant_est_respecte(chemin, sans_fcntl):
+    j = JournalAudit(chemin, delai_verrou=0.2)
+    contenu = ecrire_verrou(chemin, pid=os.getpid(), age=300)
+    with pytest.raises(JournalVerrouille):
+        j.ecrire("alice", "a", "b")
+    assert verrou_de(chemin).read_bytes() == contenu
+
+
+def test_attente_puis_acquisition_quand_le_verrou_est_libere(chemin, sans_fcntl):
+    j = JournalAudit(chemin, delai_verrou=5)
+    ecrire_verrou(chemin, pid=os.getpid(), age=0)
+    threading.Timer(0.3, lambda: verrou_de(chemin).unlink()).start()
+    assert j.ecrire("alice", "a", "b").seq == 1
+
+
+def test_lock_supprime_apres_chaque_ecriture(chemin, sans_fcntl):
+    j = JournalAudit(chemin)
+    for i in range(3):
+        j.ecrire("alice", "a", str(i))
+        assert not verrou_de(chemin).exists()
+
+
+def test_lock_supprime_meme_si_l_ecriture_leve(chemin, sans_fcntl, monkeypatch):
+    j = JournalAudit(chemin)
+
+    def echec(fd):
+        raise OSError("disque plein")
+
+    monkeypatch.setattr(os, "fsync", echec)
+    with pytest.raises(OSError):
+        j.ecrire("alice", "a", "b")
+    monkeypatch.undo()
+    assert not verrou_de(chemin).exists()
+    monkeypatch.setattr(audit_mod, "fcntl", None)
+    assert j.ecrire("alice", "a", "b").seq == 1  # le journal reste utilisable
+
+
+def test_lock_supprime_si_la_lecture_de_la_fin_leve(chemin, sans_fcntl):
+    j = remplir(chemin, 2)
+    chemin.write_bytes(chemin.read_bytes()[:-10])
+    with pytest.raises(JournalCorrompu):
+        j.ecrire("alice", "a", "b")
+    assert not verrou_de(chemin).exists()
+
+
+def test_lock_n_est_pas_cree_pour_une_ecriture_refusee_en_amont(chemin, sans_fcntl):
+    with pytest.raises(TypeError):
+        JournalAudit(chemin).ecrire("alice", "a", "b", {"x": object()})
+    assert not verrou_de(chemin).exists()
+
+
+def test_avec_fcntl_aucun_fichier_lock(chemin):
+    if audit_mod.fcntl is None:
+        pytest.skip("fcntl indisponible")
+    JournalAudit(chemin).ecrire("alice", "a", "b")
+    assert not verrou_de(chemin).exists()
+
+
+def test_lock_ignore_par_verifier_lire_et_reparer(chemin, sans_fcntl):
+    j = remplir(chemin, 3)
+    # Verrou perime (PID mort) laisse par un plantage : reprise automatique.
+    ecrire_verrou(chemin, pid=pid_mort(), age=120)
+    assert j.verifier().ok and j.verifier().nb_entrees == 3
+    assert len(j.lire()) == 3
+    assert j.reparer_fin_tronquee() == 0
+    assert not verrou_de(chemin).exists()
+
+
+def test_verifier_ne_leve_pas_si_le_verrou_est_tenu(chemin, sans_fcntl):
+    j = JournalAudit(chemin, delai_verrou=0.2)
+    ecrire_verrou(chemin, pid=os.getpid(), age=0)
+    r = j.verifier()
+    assert isinstance(r, ResultatVerification) and not r.ok and r.premiere_erreur_seq is None
+
+
+def test_reparer_prend_le_meme_verrou_fichier(chemin, sans_fcntl):
+    j = remplir(chemin, 3)
+    chemin.write_bytes(chemin.read_bytes()[:-25])
+    avant = chemin.read_bytes()
+    JournalAudit(chemin, delai_verrou=0.2)
+    j.delai_verrou = 0.2
+    contenu = ecrire_verrou(chemin, pid=os.getpid(), age=0)
+    with pytest.raises(JournalVerrouille):
+        j.reparer_fin_tronquee()
+    assert chemin.read_bytes() == avant and verrou_de(chemin).read_bytes() == contenu
+    verrou_de(chemin).unlink()
+    assert j.reparer_fin_tronquee() > 0
+    assert not verrou_de(chemin).exists()
+
+
+@pytest.mark.parametrize("operation", ["ecrire", "reparer"])
+def test_verrou_de_fil_partage_entre_objets(chemin, operation):
+    """Meme avec fcntl : un autre objet sur le meme fichier attend le verrou de fil."""
+    a, b = JournalAudit(chemin), JournalAudit(chemin)
+    assert a._cle_verrou == b._cle_verrou
+    if operation == "reparer":
+        chemin.write_bytes(b'{"seq": 1')
+    fait = threading.Event()
+
+    def travail():
+        if operation == "ecrire":
+            b.ecrire("alice", "a", "b")
+        else:
+            b.reparer_fin_tronquee()
+        fait.set()
+
+    with audit_mod._verrou_fil(a._cle_verrou):
+        t = threading.Thread(target=travail)
+        t.start()
+        assert not fait.wait(0.3)  # bloque tant que le verrou est tenu ailleurs
+    assert fait.wait(5)
+    t.join()
+
+
+def test_cle_de_verrou_resout_les_chemins_equivalents(tmp_path):
+    (tmp_path / "d").mkdir()
+    a = JournalAudit(tmp_path / "d" / "j.jsonl")
+    b = JournalAudit(tmp_path / "d" / ".." / "d" / "j.jsonl")
+    assert a._cle_verrou == b._cle_verrou
+    lien = tmp_path / "lien.jsonl"
+    try:
+        lien.symlink_to(a.chemin)
+    except OSError:
+        pytest.skip("liens symboliques indisponibles")
+    assert JournalAudit(lien)._cle_verrou == a._cle_verrou
+
+
+def test_derniere_entree_relue_dans_le_fichier_jamais_memorisee(chemin, sans_fcntl):
+    a, b = JournalAudit(chemin), JournalAudit(chemin)
+    a.ecrire("alice", "a", "1")
+    b.ecrire("bob", "b", "2")  # a ne connait pas cette ecriture
+    e = a.ecrire("alice", "a", "3")
+    assert e.seq == 3 and e.hash_precedent == a.lire()[1].hash
+    assert a.verifier().ok

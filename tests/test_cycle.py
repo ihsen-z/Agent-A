@@ -12,7 +12,11 @@ import datetime as dt
 import hashlib
 import os
 import importlib.util
+import io
+import json
+import pickle
 import shutil
+import subprocess
 import sys
 import time
 from decimal import Decimal
@@ -1583,10 +1587,15 @@ def _partie_nom_encode(n: int, mid: str) -> bytes:
 
 
 def _enfants_vivants() -> list[str]:
+    """Processus enfants encore vivants, hors `resource_tracker` : assistant POSIX de
+    `multiprocessing` (demarre par le contexte spawn, absent sous Windows), qui s'arrete
+    avec le parent et ne lit aucun e-mail."""
+    from multiprocessing import resource_tracker
+    assistant = str(getattr(resource_tracker._resource_tracker, "_pid", None))
     vivants = [str(p.pid) for p in multiprocessing.active_children()]
     for fichier in Path("/proc/self/task").glob("*/children"):
         vivants += fichier.read_text().split()
-    return vivants
+    return [pid for pid in vivants if pid != assistant]
 
 
 def _rss_parent_ko() -> int:
@@ -1681,14 +1690,19 @@ def test_lecture_isolee_chaque_echec_devient_une_quarantaine(entree, inst, monke
             return bytearray(4 * 1024 ** 3)
         os._exit(3)
 
-    monkeypatch.setattr(cycle, "MARGE_GARDE_LECTURE_EML", 0.5)
+    # Une boucle est arretee par la limite de TEMPS CPU (1 s) : sur une machine saturee l'enfant
+    # n'obtient qu'une fraction du processeur, donc le delai de garde en temps REEL doit rester
+    # tres superieur (sinon il tuerait l'enfant avant SIGXCPU et le test dependrait de la charge).
+    # Les autres comportements ne consomment pas de CPU : delai serre, test rapide.
+    marge = 8.0 if comportement == "boucle" else 0.5
+    monkeypatch.setattr(cycle, "MARGE_GARDE_LECTURE_EML", marge)
     monkeypatch.setattr(routage, "lire_eml", lecteur_hostile)      # herite par l'enfant (fork)
     ecrire_eml(inst.entrant, "1.eml", expediteur="compta@alpha-sarl.fr", message_id="<h@a>",
                fichiers=(("f.pdf", b"%PDF"),))
     t = time.perf_counter()
     r = cycle.executer_cycle(entree, inst, J0, a_10h(J0), limite_memoire_eml=MEMOIRE_TEST,
                              limite_cpu_eml=1)
-    assert time.perf_counter() - t < 4.0
+    assert time.perf_counter() - t < (20.0 if comportement == "boucle" else 4.0)
     (q,) = lire_csv(inst.sortie / "quarantaine.csv")
     assert attendu in q["raison"] and "Traceback" not in q["raison"], q["raison"]
     assert r.quarantaine == 1 and r.brouillons_crees == 2
@@ -1702,3 +1716,395 @@ def test_sans_module_resource_refus_explicite(entree, inst, monkeypatch, capsys)
     assert not inst.depot.exists()
     rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
     assert rc == 1 and "IsolationIndisponible" in err and "Linux ou macOS" in err
+
+
+# ---------------------------------------------------------------------------
+# Mode test, strategies d'isolation (fork / spawn / directe), ExpediteurTest, console
+# ---------------------------------------------------------------------------
+
+ADRESSE_TEST = "test@exemple.invalid"
+ORIGINE = "compta@alpha-sarl.fr"
+
+
+def ecrire_config(inst: cycle.Instance, contenu: object = None, **valeurs: object) -> Path:
+    texte = contenu if isinstance(contenu, (str, bytes)) else json.dumps(valeurs)
+    chemin = inst.racine / "config.json"
+    chemin.write_bytes(texte if isinstance(texte, bytes) else texte.encode("utf-8"))
+    return chemin
+
+
+def faire_plateforme_sans_fork(monkeypatch) -> None:
+    """Simule Windows : ni le module `resource`, ni le demarrage `fork`."""
+    monkeypatch.setattr(cycle, "resource", None)
+    monkeypatch.setattr(cycle.multiprocessing, "get_all_start_methods", lambda: ["spawn"])
+
+
+def deposer_emls(inst: cycle.Instance) -> None:
+    """Trois messages : une proposition, un sans piece jointe, un inconnu."""
+    ecrire_eml(inst.entrant, "1.eml", expediteur=ORIGINE, message_id="<a@a>", corps="120,00 EUR",
+               fichiers=(("loxam_2026-09-03.pdf", b"%PDF-1"),))
+    ecrire_eml(inst.entrant, "2.eml", expediteur=ORIGINE, message_id="<b@a>", corps="bientot")
+    ecrire_eml(inst.entrant, "3.eml", expediteur="inconnu@gmail.com", message_id="<c@x>",
+               fichiers=(("x.pdf", b"%PDF-2"),))
+
+
+def test_charger_config_defauts_et_validation(tmp_path):
+    inst = nouvelle_instance(tmp_path / "i")
+    assert cycle.charger_config(inst) == {"mode_test": False, "adresse_test": ADRESSE_TEST}
+    assert not (inst.racine / "config.json").exists()                  # lecture seule
+    assert cycle.charger_config(tmp_path / "inexistante") == cycle.charger_config(inst)
+    ecrire_config(inst, b"\xef\xbb\xbf" + json.dumps({"mode_test": True, "port": 8080}).encode())
+    config = cycle.charger_config(inst)                                 # BOM accepte, cle inconnue gardee
+    assert config == {"mode_test": True, "adresse_test": ADRESSE_TEST, "port": 8080}
+    ecrire_config(inst, mode_test=True, adresse_test="moi@exemple.invalid")
+    assert cycle.charger_config(inst)["adresse_test"] == "moi@exemple.invalid"
+    for contenu, attendu in [
+        ('{"mode_test": true,', "ligne 1"),                             # JSON invalide
+        ("[]", "objet JSON"),
+        ('{"mode_test": "false"}', "booleen"),                          # jamais "false" lu comme vrai
+        ('{"mode_test": 1}', "booleen"),
+        ('{"mode_test": true, "adresse_test": "deux mots@x"}', "adresse_test"),
+        ('{"mode_test": true, "adresse_test": 12}', "adresse_test"),
+        ('{"mode_test": true, "adresse_test": "a@b.fr\\nBcc: c@d.fr"}', "adresse_test"),
+        (b'{"mode_test": true, "x": "\xe9"}', "UTF-8"),
+    ]:
+        ecrire_config(inst, contenu)
+        with pytest.raises(cycle.ConfigInvalide, match=attendu) as exc:
+            cycle.charger_config(inst)
+        assert "Traceback" not in str(exc.value) and "\n" not in str(exc.value)
+
+
+def test_mode_normal_aucune_trace_du_mode_test(entree, inst):
+    r = lancer(entree, inst, J0)
+    assert not r.mode_test and r.avertissements == [] and r.strategie_isolation == "fork"
+    assert r.texte().splitlines()[0] == "Cycle du 2026-10-05"
+    assert (inst.sortie / "resume.txt").read_text().splitlines()[0] == "Cycle du 2026-10-05"
+    assert "mode_test_actif" not in actions_audit(inst) and "isolation_degradee" not in actions_audit(inst)
+
+
+def test_mode_test_config_visible_partout_et_journalise_une_fois_par_cycle(entree, inst):
+    ecrire_config(inst, mode_test=True)
+    r = lancer(entree, inst, J0)
+    banniere = f"*** MODE TEST ACTIF : tout e-mail part vers {ADRESSE_TEST}, jamais vers un client."
+    assert r.texte().splitlines()[0].startswith(banniere)
+    assert (inst.sortie / "resume.txt").read_text().splitlines()[0].startswith(banniere)
+    assert "isolation_degradee" not in actions_audit(inst)             # fork : pas de degradation
+    lancer(entree, inst, J0)
+    assert actions_audit(inst).count("mode_test_actif") == 2           # une fois PAR cycle
+    (premier, *_) = [e for e in JournalAudit(inst.audit).lire() if e.action == "mode_test_actif"]
+    assert premier.details == {"adresse_test": ADRESSE_TEST, "source": "config.json"}
+    cycle_termine = [e for e in JournalAudit(inst.audit).lire() if e.action == "cycle_termine"][-1]
+    assert cycle_termine.details["mode_test"] is True and cycle_termine.details["strategie_isolation"] == "fork"
+    assert JournalAudit(inst.audit).verifier().ok
+
+
+def test_mode_test_drapeau_cli_et_config_invalide_refusee_sans_rien_ecrire(entree, tmp_path, capsys):
+    inst = cycle.Instance(tmp_path / "neuve")
+    rc, out, _ = cli(capsys, inst, "cycle", "--entree", str(entree), "--mode-test")
+    assert rc == 0 and out.startswith("*** MODE TEST ACTIF")
+    (source,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "mode_test_actif"]
+    assert source.details["source"] == "--mode-test"
+    ecrire_config(inst, mode_test=True)
+    lancer(entree, inst, jour(1))
+    assert [e.details["source"] for e in JournalAudit(inst.audit).lire()
+            if e.action == "mode_test_actif"] == ["--mode-test", "config.json"]
+    # config invalide : refus lisible, avant toute ecriture (instance non creee)
+    jamais = cycle.Instance(tmp_path / "jamais")
+    jamais.racine.mkdir()
+    ecrire_config(jamais, '{"mode_test": tru')
+    rc, _, err = cli(capsys, jamais, "cycle", "--entree", str(entree))
+    assert rc == 1 and "REFUS (ConfigInvalide)" in err and "config.json invalide" in err
+    assert sorted(p.name for p in jamais.racine.iterdir()) == ["config.json"]
+    rc, _, err = cli(capsys, jamais, "envoyer", "abc")
+    assert rc == 1 and "ConfigInvalide" in err
+
+
+@pytest.mark.parametrize("fork_dispo, mode_test, demandee, attendu", [
+    (True, False, None, "fork"),
+    (True, True, None, "fork"),
+    (True, False, "fork", "fork"),
+    (True, True, "spawn", "spawn"),
+    (True, True, "directe", "directe"),
+    (True, False, "spawn", cycle.IsolationIndisponible),             # plus faible : jamais hors mode test
+    (True, False, "directe", cycle.IsolationIndisponible),
+    (False, False, None, cycle.IsolationIndisponible),               # Windows hors mode test : refus
+    (False, False, "fork", cycle.IsolationIndisponible),
+    (False, True, None, "spawn"),                                    # Windows en mode test : spawn
+    (False, True, "fork", cycle.IsolationIndisponible),
+    (False, True, "directe", "directe"),
+    (True, True, "bidon", cycle.ErreurCycle),
+])
+def test_choix_de_la_strategie_d_isolation(monkeypatch, fork_dispo, mode_test, demandee, attendu):
+    if not fork_dispo:
+        faire_plateforme_sans_fork(monkeypatch)
+    if isinstance(attendu, str):
+        assert cycle.choisir_strategie_isolation(mode_test, demandee) == attendu
+    else:
+        with pytest.raises(attendu) as exc:
+            cycle.choisir_strategie_isolation(mode_test, demandee)
+        if not mode_test and attendu is cycle.IsolationIndisponible:
+            assert "utilisez --mode-test pour un essai local" in str(exc.value)
+        if not fork_dispo and demandee in (None, "fork"):
+            assert "Linux ou macOS" in str(exc.value)
+
+
+def test_windows_hors_mode_test_refus_avant_toute_ecriture(entree, tmp_path, monkeypatch, capsys):
+    faire_plateforme_sans_fork(monkeypatch)
+    racine = tmp_path / "jamais"
+    with pytest.raises(cycle.IsolationIndisponible, match="utilisez --mode-test pour un essai local"):
+        cycle.executer_cycle(entree, racine, J0, a_10h(J0))
+    assert not racine.exists()
+    rc, _, err = cli(capsys, cycle.Instance(racine), "cycle", "--entree", str(entree))
+    assert rc == 1 and "utilisez --mode-test pour un essai local" in err and not racine.exists()
+
+
+def test_windows_en_mode_test_spawn_avec_avertissement_visible_partout(entree, tmp_path, monkeypatch, capsys):
+    reference = nouvelle_instance(tmp_path / "fork")
+    deposer_emls(reference)
+    lancer(entree, reference, J0, mode_test=True)                      # reference : fork
+    faire_plateforme_sans_fork(monkeypatch)
+    inst = nouvelle_instance(tmp_path / "windows")
+    deposer_emls(inst)
+    rc, out, _ = cli(capsys, inst, "cycle", "--entree", str(entree), "--mode-test")
+    assert rc == 0
+    ligne = "AVERTISSEMENT : isolation partielle : temps seulement, pas de limite memoire"
+    assert ligne in out.splitlines() and out.splitlines()[0].startswith("*** MODE TEST ACTIF")
+    assert ligne in (inst.sortie / "resume.txt").read_text().splitlines()
+    (degradee,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "isolation_degradee"]
+    assert degradee.acteur == "systeme" and degradee.details["strategie"] == "spawn"
+    assert degradee.details["niveau"] == "partielle" and "limite memoire" in degradee.details["avertissement"]
+    assert "strategie_isolation                : spawn" not in out    # affichee par le bandeau, pas en double
+    cd = [e for e in JournalAudit(inst.audit).lire() if e.action == "cycle_termine"][-1].details
+    assert cd["strategie_isolation"] == "spawn" and cd["messages_lus"] == 3 and cd["quarantaine"] == 0
+    # Memes resultats que sous fork : seule la facon de lire change.
+    for nom in ("file_humaine.csv", "pieces_attendues.csv", "a_verifier.csv", "quarantaine.csv",
+                "tableau_suivi.csv", "periodes.csv", "escalades.csv"):
+        assert (inst.sortie / nom).read_bytes() == (reference.sortie / nom).read_bytes(), nom
+    assert _enfants_vivants() == []
+
+
+def test_sans_isolation_mode_test_seulement_et_annonce(entree, inst, monkeypatch, capsys):
+    deposer_emls(inst)
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree), "--sans-isolation")
+    assert rc == 1 and "IsolationIndisponible" in err and "mode test" in err
+    assert cycle.pieces(inst) == []                                    # rien n'a ete ecrit
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree), "--sans-isolation",
+                     "--isolation", "spawn", "--mode-test")
+    assert rc == 1 and "contredit" in err
+    appels = []
+    for nom in ("_lire_eml_isole", "_lire_eml_spawn"):
+        monkeypatch.setattr(cycle, nom, lambda *a, _n=nom: appels.append(_n) or pytest.fail("enfant lance"))
+    rc, out, _ = cli(capsys, inst, "cycle", "--entree", str(entree), "--sans-isolation", "--mode-test")
+    assert rc == 0 and appels == []
+    assert "AVERTISSEMENT : aucune isolation : les e-mails sont lus dans le processus principal" in out
+    (degradee,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "isolation_degradee"]
+    assert degradee.details["niveau"] == "aucune" and degradee.details["strategie"] == "directe"
+    assert lire_csv(inst.sortie / "file_humaine.csv")                  # les messages sont bien routes
+    # Meme en mode test, une bombe est rattrapee comme exception (pas de protection memoire/temps).
+    (inst.entrant / "0-bombe.eml").write_bytes(_imbrique(1000))
+    r = lancer(entree, inst, jour(1), mode_test=True, strategie_isolation="directe")
+    assert r.quarantaine == 1 and r.strategie_isolation == "directe"
+
+
+def test_le_travailleur_spawn_est_serialisable_et_l_enfant_retrouve_sys_path():
+    import multiprocessing.spawn as mp_spawn
+
+    assert cycle._enfant_lire_eml_spawn.__module__ == "rapprochement.cycle"
+    assert "<locals>" not in cycle._enfant_lire_eml_spawn.__qualname__          # niveau module
+    assert pickle.loads(pickle.dumps(cycle._enfant_lire_eml_spawn)) is cycle._enfant_lire_eml_spawn
+    src = str(RACINE / "src")
+    assert src in sys.path and src in mp_spawn.get_preparation_data("x")["sys_path"]
+    message = cycle.MessageEntrant(
+        "<m@x>", "a@b.fr", dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc), "objet", "corps",
+        (cycle.routage.FichierEntrant("f.pdf", b"\x00\xff%PDF"),))
+    assert pickle.loads(pickle.dumps(message)) == message                       # bytes compris
+
+
+def test_spawn_lit_un_vrai_message_et_laisse_le_parent_intact(tmp_path):
+    chemin = ecrire_eml(tmp_path, "m.eml", expediteur=ORIGINE, message_id="<s@x>", corps="120,00 EUR",
+                        fichiers=(("a.pdf", b"%PDF-a"), ("b.pdf", b"%PDF-b")))
+    message = cycle._lire_eml_spawn(chemin, 5)
+    assert message == cycle.routage.lire_eml(chemin) and len(message.fichiers) == 2
+    assert _enfants_vivants() == []
+
+
+def test_spawn_attaque_tuee_au_delai_de_garde_le_reste_du_lot_traite(entree, inst, monkeypatch):
+    # Delai serre pour la seule attaque : un fichier legitime ne doit jamais y etre soumis
+    # (le demarrage d'un interpreteur spawn est lent sur une machine chargee).
+    monkeypatch.setattr(cycle, "MARGE_GARDE_LECTURE_EML", 1.5)
+    monkeypatch.setattr(cycle, "MARGE_DEMARRAGE_SPAWN", 0.0)
+    (inst.entrant / "0-lourd.eml").write_bytes(_partie_nom_encode(16000, "p218@x"))    # 218 Ko : ~19 s
+    rss_avant = _rss_parent_ko()
+    t = time.perf_counter()
+    r = lancer(entree, inst, J0, mode_test=True, strategie_isolation="spawn", limite_cpu_eml=1)
+    assert time.perf_counter() - t < 12.0
+    assert _rss_parent_ko() - rss_avant < 100 * 1024
+    (q,) = lire_csv(inst.sortie / "quarantaine.csv")
+    assert q["nom_fichier"] == "0-lourd.eml" and "interrompue" in q["raison"] and "Traceback" not in q["raison"]
+    assert (r.quarantaine, r.messages_lus) == (1, 0)
+    assert _enfants_vivants() == []
+    # Le reste du lot, ensuite, avec les delais normaux : l'attaque, toujours la, est remise en
+    # quarantaine (elle est retentee a chaque cycle) et le message legitime est traite.
+    monkeypatch.undo()
+    ecrire_eml(inst.entrant, "1-ok.eml", expediteur=ORIGINE, message_id="<ok@a>", corps="120,00 EUR",
+               fichiers=(("loxam_2026-09-03.pdf", b"%PDF"),))
+    (inst.entrant / "0-lourd.eml").unlink()                          # retire par un humain
+    r = lancer(entree, inst, J0, mode_test=True, strategie_isolation="spawn")
+    assert (r.quarantaine, r.propositions, r.messages_lus) == (0, 1, 1)
+    assert _enfants_vivants() == []
+
+
+# --- ExpediteurTest ---------------------------------------------------------
+
+
+class Espion:
+    def __init__(self):
+        self.recus = []
+
+    def envoyer(self, brouillon):
+        self.recus.append(brouillon)
+        return "ext-1"
+
+
+def _brouillon_de_test(destinataire: str = ORIGINE) -> Brouillon:
+    return Brouillon(identifiant_relance(destinataire, ("A-001",), 1, J0), destinataire,
+                     "Justificatifs - 1 justificatif(s)", "Bonjour,\n\n  - 03/09/2026  120,00 EUR", ("ALPHA",),
+                     ("A-001",), 1, J0, StatutBrouillon.EN_COURS, "Marie Durand")
+
+
+def test_expediteur_test_copie_sans_toucher_l_original():
+    reel = Espion()
+    b = _brouillon_de_test()
+    assert cycle.ExpediteurTest(reel, ADRESSE_TEST).envoyer(b) == "ext-1"
+    (copie,) = reel.recus
+    assert copie.destinataire == ADRESSE_TEST and copie.objet == "[TEST] Justificatifs - 1 justificatif(s)"
+    assert copie.corps.splitlines()[0] == f"[TEST] Destinataire d'origine : {ORIGINE}"
+    assert copie.corps.endswith(b.corps) and copie.id_relance == b.id_relance
+    assert (b.destinataire, b.objet) == (ORIGINE, "Justificatifs - 1 justificatif(s)")     # original intact
+    assert cycle.ExpediteurTest(reel).adresse_test == ADRESSE_TEST
+    hostile = dataclasses_replace(b, destinataire="a@b.fr\r\nBcc: x@y.fr")
+    cycle.ExpediteurTest(reel, ADRESSE_TEST).envoyer(hostile)
+    assert len(reel.recus[-1].corps.splitlines()[0].splitlines()) == 1                    # une seule ligne
+    for mauvaise in ("", "pas d'adresse", "a@b.fr, c@d.fr", None):
+        with pytest.raises(cycle.ErreurCycle):
+            cycle.ExpediteurTest(reel, mauvaise)
+
+
+def dataclasses_replace(objet, **champs):
+    import dataclasses
+    return dataclasses.replace(objet, **champs)
+
+
+def _eml_sorti(inst: cycle.Instance, id_relance: str):
+    import email
+    import email.policy
+    brut = (inst.outbox / f"{id_relance}.eml").read_bytes()
+    return email.message_from_bytes(brut, policy=email.policy.default), brut
+
+
+def test_envoi_en_mode_test_ecrit_a_l_adresse_de_test_jamais_au_client(entree, inst):
+    ecrire_config(inst, mode_test=True, adresse_test="essai@exemple.invalid")
+    lancer(entree, inst, J0)
+    b = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE)
+    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    envoye = cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0))
+    msg, brut = _eml_sorti(inst, b.id_relance)
+    assert msg["To"] == "essai@exemple.invalid"
+    assert msg["Subject"].startswith("[TEST] ")
+    corps = msg.get_content()
+    assert corps.splitlines()[0] == f"[TEST] Destinataire d'origine : {ORIGINE}"
+    en_tetes = brut.split(b"\r\n\r\n", 1)[0].decode()
+    assert ORIGINE not in en_tetes                                      # ni To, ni Cc, ni aucun en-tete
+    assert [h for h, v in msg.items() if ORIGINE in str(v)] == []
+    # Le brouillon et l'historique restent ceux du VRAI destinataire.
+    assert envoye.destinataire == ORIGINE and envoye.objet == b.objet and envoye.corps == b.corps
+    assert cycle.brouillons(inst, StatutBrouillon.ENVOYEE)[0].destinataire == ORIGINE
+    with Depot(inst.depot) as d:
+        assert [e.destinataire for e in d.historique_envois()] == [ORIGINE]
+    (trace,) = [e for e in JournalAudit(inst.audit).lire() if e.action == "envoi_mode_test"]
+    assert trace.details == {"destinataire_reel": ORIGINE, "adresse_test": "essai@exemple.invalid"}
+    # La limite hebdomadaire continue de s'appliquer au VRAI destinataire.
+    autre = Brouillon(identifiant_relance(ORIGINE, ("A-002",), 1, J0), ORIGINE, "Autre", "x", ("ALPHA",),
+                      ("A-002",), 1, J0)
+    with Depot(inst.depot) as d:
+        d.sauver_brouillon(autre)
+    cycle.valider_relance(inst, autre.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    with pytest.raises(cycle.EnvoiRefuse, match="un e-mail par 7 jours"):
+        cycle.envoyer_relance(inst, autre.id_relance, maintenant=a_10h(jour(1)))
+    assert emls(inst) == [f"{b.id_relance}.eml"]
+
+
+def test_envoi_mode_test_enveloppe_aussi_un_expediteur_fourni_et_le_drapeau_cli(entree, inst, capsys):
+    lancer(entree, inst, J0)
+    b1, b2 = sorted(cycle.brouillons(inst), key=lambda x: x.destinataire)
+    for b in (b1, b2):
+        cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    espion = Espion()
+    cycle.envoyer_relance(inst, b1.id_relance, maintenant=a_10h(J0), expediteur=espion, mode_test=True)
+    assert [x.destinataire for x in espion.recus] == [ADRESSE_TEST] and espion.recus[0].objet.startswith("[TEST] ")
+    rc, out, _ = cli(capsys, inst, "envoyer", b2.id_relance, "--mode-test")
+    assert rc == 0 and f"[MODE TEST] {b2.id_relance} envoye a {ADRESSE_TEST}" in out
+    assert f"destinataire reel, NON contacte : {b2.destinataire}" in out
+    msg, _ = _eml_sorti(inst, b2.id_relance)
+    assert msg["To"] == ADRESSE_TEST and b2.destinataire not in str(msg["To"])
+
+
+def test_envoi_hors_mode_test_inchange(entree, inst):
+    lancer(entree, inst, J0)
+    b = next(x for x in cycle.brouillons(inst) if x.destinataire == ORIGINE)
+    cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(J0))
+    cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(J0))
+    msg, _ = _eml_sorti(inst, b.id_relance)
+    assert msg["To"] == ORIGINE and not msg["Subject"].startswith("[TEST]")
+    assert "envoi_mode_test" not in actions_audit(inst)
+
+
+# --- Console Windows (cp1252) -----------------------------------------------
+
+
+def _cli_en_sous_processus(args: list[str], codage: str = "cp1252") -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PYTHONIOENCODING"] = codage              # console Windows en cp1252, strict comme un vrai terminal
+    return subprocess.run([sys.executable, str(RACINE / "scripts" / "cycle.py"), *args],
+                          capture_output=True, env=env, timeout=120)
+
+
+def test_console_cp1252_le_cli_ne_plante_pas_sur_un_caractere_hors_page_de_codes(entree, inst):
+    temoin = subprocess.run([sys.executable, "-c", "print('日本語 Ж ☃')"], capture_output=True,
+                            env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert temoin.returncode != 0 and b"UnicodeEncodeError" in temoin.stderr     # le probleme est reel
+    nom = "facture_日本語_Ж_☃.pdf"
+    ecrire_eml(inst.entrant, "1.eml", expediteur="inconnu@gmail.com", message_id="<jp@x>",
+               fichiers=((nom, b"%PDF"),))
+    lancer(entree, inst, J0)
+    base = ["--instance", str(inst.racine), "--date", J0.isoformat()]
+    r = _cli_en_sous_processus(["file", *base])
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert nom in r.stdout.decode("utf-8")                                       # octets UTF-8, rien de perdu
+    r = _cli_en_sous_processus(["arbitrer", *base, "--dossier", "ALPHA", "--reference", "日本語-Ж",
+                                "--motif", "x", "--par", VALIDEUSE])
+    assert r.returncode == 1 and "Traceback" not in r.stderr.decode("utf-8")
+    assert "ALPHA/日本語-Ж" in r.stderr.decode("utf-8")                           # message d'erreur compris
+    cycle.bloquer_piece(inst, "ALPHA", "A-001", VALIDEUSE, motif="litige 日本語", maintenant=a_10h(J0))
+    r = _cli_en_sous_processus(["pieces", *base])
+    assert r.returncode == 0 and "litige 日本語" in r.stdout.decode("utf-8")
+
+
+def test_console_utf8_flux_sans_reconfigure_ou_ferme(monkeypatch):
+    cli_module = charger_cli()
+
+    class SansReconfigure:
+        pass
+
+    class Ferme:
+        def reconfigure(self, **_):
+            raise ValueError("I/O operation on closed file")
+
+    flux = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", flux)
+    monkeypatch.setattr(sys, "stderr", SansReconfigure())
+    cli_module._console_utf8()
+    assert (flux.encoding, flux.errors) == ("utf-8", "replace")
+    flux.write("日本語 \udcff")                                                    # ni exception, ni perte de flux
+    monkeypatch.setattr(sys, "stdout", Ferme())
+    cli_module._console_utf8()

@@ -20,8 +20,20 @@ Limites connues :
   (coupure nette sur une frontiere de ligne), ni la reecriture complete du
   fichier par quelqu'un qui recalcule toute la chaine. Pour cela il faut ancrer
   le dernier hash hors du fichier (hors perimetre du MVP).
-- Le verrou exclusif repose sur `fcntl.flock` (Linux/macOS). Sans `fcntl`, seul
-  un verrou de thread protege les ecritures d'un meme processus.
+- Verrouillage des ecritures (et des lectures de `verifier`/`lire`) :
+  * un verrou de FIL partage au niveau du module, indexe par chemin absolu
+    resolu : deux objets `JournalAudit` sur le meme fichier se serialisent ;
+  * avec `fcntl` : `flock` exclusif en plus (entre processus) ;
+  * sans `fcntl` (Windows) : fichier `<journal>.lock` cree en `O_CREAT|O_EXCL`
+    (PID + horodatage), attente bornee (`delai_verrou`, defaut 10 s, sinon
+    `JournalVerrouille`), toujours libere dans un `finally`. Un verrou de plus
+    de 30 s dont le PID n'existe plus est repris ; un verrou recent n'est jamais
+    ecrase. Limite : la reprise d'un verrou perime n'est pas strictement
+    atomique si deux processus la tentent exactement en meme temps.
+  Dans tous les cas le dernier `seq` et le dernier hash sont relus dans le
+  fichier APRES l'obtention du verrou, jamais memorises dans l'objet.
+- Le chemin Windows (`O_EXCL`, test de PID via ctypes) n'a ete teste que sous
+  Linux, avec `fcntl` rendu indisponible.
 """
 
 from __future__ import annotations
@@ -31,7 +43,10 @@ import hashlib
 import json
 import os
 import threading
-from collections.abc import Mapping
+import time
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -52,6 +67,54 @@ _CLES_ENTREE = frozenset(
 
 class JournalCorrompu(ValueError):
     """Le fichier du journal n'a pas la structure attendue."""
+
+
+class JournalVerrouille(TimeoutError):
+    """Le verrou d'ecriture du journal n'a pas pu etre obtenu dans le delai."""
+
+
+DELAI_VERROU_DEFAUT = 10.0     # secondes d'attente maximale du verrou fichier
+AGE_VERROU_PERIME = 30.0       # secondes : en dessous, un verrou n'est jamais repris
+
+_VERROUS_FIL: dict[str, threading.Lock] = {}
+_GARDE_VERROUS_FIL = threading.Lock()
+
+
+def _verrou_fil(cle: str) -> threading.Lock:
+    """Verrou de fil partage par tous les objets visant le meme fichier."""
+    with _GARDE_VERROUS_FIL:
+        verrou = _VERROUS_FIL.get(cle)
+        if verrou is None:
+            verrou = _VERROUS_FIL[cle] = threading.Lock()
+        return verrou
+
+
+def _pid_vivant(pid: int) -> bool:
+    """Le processus `pid` existe-t-il ? En cas de doute : oui (verrou respecte)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":  # pragma: no cover - non testable sous Linux
+        # os.kill(pid, 0) TUERAIT le processus sous Windows : on passe par l'API.
+        try:
+            import ctypes
+
+            noyau = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            poignee = noyau.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if poignee:
+                noyau.CloseHandle(poignee)
+                return True
+            return noyau.GetLastError() == 5  # acces refuse : il existe
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
 
 
 @dataclass(frozen=True)
@@ -168,15 +231,20 @@ def _sans_hash(donnees: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in donnees.items() if k != "hash"}
 
 
+@contextmanager
+def _sans_verrou() -> Iterator[None]:
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Journal
 # ---------------------------------------------------------------------------
 
 
 class JournalAudit:
-    def __init__(self, chemin: Path | str) -> None:
+    def __init__(self, chemin: Path | str, *, delai_verrou: float = DELAI_VERROU_DEFAUT) -> None:
         self.chemin = Path(chemin)
-        self._verrou_thread = threading.Lock()
+        self.delai_verrou = delai_verrou
         self.chemin.parent.mkdir(parents=True, exist_ok=True)
         existait = self.chemin.exists()
         # Cree le fichier s'il manque : un journal qui disparait ensuite est
@@ -185,6 +253,8 @@ class JournalAudit:
             pass
         if not existait:
             self._fsync_repertoire()
+        self._cle_verrou = os.path.normcase(os.path.realpath(os.path.abspath(self.chemin)))
+        self.chemin_verrou = self.chemin.with_name(self.chemin.name + ".lock")
 
     # -- verrous -----------------------------------------------------------
 
@@ -192,6 +262,124 @@ class JournalAudit:
     def _verrouiller(f: Any, exclusif: bool) -> None:
         if fcntl is not None:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX if exclusif else fcntl.LOCK_SH)
+
+    @contextmanager
+    def _verrou_ecriture(self) -> Iterator[None]:
+        """Verrou exclusif valable entre objets, fils et processus."""
+        with _verrou_fil(self._cle_verrou):
+            if fcntl is not None:
+                yield  # le flock est pris sur le fichier ouvert, par l'appelant
+                return
+            jeton = self._prendre_verrou_fichier()
+            try:
+                yield
+            finally:
+                self._rendre_verrou_fichier(jeton)
+
+    def _prendre_verrou_fichier(self) -> str:
+        jeton = f"{os.getpid()}-{uuid.uuid4().hex}"
+        contenu = _canonique(
+            {"pid": os.getpid(), "horodatage": time.time(), "jeton": jeton}
+        ).encode("ascii")
+        limite = time.monotonic() + self.delai_verrou
+        pause = 0.002
+        while True:
+            try:
+                fd = os.open(
+                    self.chemin_verrou, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
+                )
+            except FileExistsError:
+                if self._reprendre_si_perime():
+                    continue
+                if time.monotonic() >= limite:
+                    raise JournalVerrouille(
+                        f"verrou {self.chemin_verrou} detenu depuis plus de "
+                        f"{self.delai_verrou:g} s : un autre processus ecrit dans le journal"
+                    ) from None
+                time.sleep(pause)
+                pause = min(pause * 1.5, 0.05)
+                continue
+            try:
+                os.write(fd, contenu)
+            except BaseException:
+                os.close(fd)
+                self._supprimer_verrou()
+                raise
+            os.close(fd)
+            return jeton
+
+    def _supprimer_verrou(self) -> None:
+        try:
+            os.unlink(self.chemin_verrou)
+        except FileNotFoundError:
+            pass
+
+    def _rendre_verrou_fichier(self, jeton: str) -> None:
+        try:
+            actuel = json.loads(self.chemin_verrou.read_bytes())
+        except FileNotFoundError:
+            return
+        except Exception:
+            actuel = {}
+        # Ne supprime pas le verrou d'un autre (repris a tort apres un gel).
+        if not isinstance(actuel, dict) or actuel.get("jeton") in (jeton, None):
+            self._supprimer_verrou()
+
+    def _reprendre_si_perime(self) -> bool:
+        """Retire le verrou s'il est perime (> 30 s et PID absent ou inconnu).
+
+        Jamais pour un verrou recent. Le fichier est d'abord renomme (atomique) :
+        si ce n'etait pas un verrou perime, on le remet en place.
+        """
+        try:
+            age_fichier = time.time() - self.chemin_verrou.stat().st_mtime
+        except FileNotFoundError:
+            return True  # libere entre-temps : reessayer
+        if age_fichier < AGE_VERROU_PERIME:
+            return False
+        if not self._verrou_perime():
+            return False
+        ecarte = self.chemin_verrou.with_name(
+            f"{self.chemin_verrou.name}.perime-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            os.replace(self.chemin_verrou, ecarte)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        try:
+            if self._verrou_perime(ecarte):
+                return True
+            # On a ecarte un verrou vivant par mauvaise chance : on le restitue.
+            try:
+                os.link(ecarte, self.chemin_verrou)
+            except OSError:
+                pass
+            return False
+        finally:
+            try:
+                os.unlink(ecarte)
+            except OSError:
+                pass
+
+    def _verrou_perime(self, chemin: Path | None = None) -> bool:
+        chemin = chemin or self.chemin_verrou
+        try:
+            donnees = json.loads(chemin.read_bytes())
+            pid = int(donnees["pid"])
+            horodatage = float(donnees["horodatage"])
+        except FileNotFoundError:
+            return True
+        except Exception:
+            # Contenu illisible : PID inconnu, seul l'age du fichier compte.
+            try:
+                return time.time() - chemin.stat().st_mtime >= AGE_VERROU_PERIME
+            except OSError:
+                return False
+        if time.time() - horodatage < AGE_VERROU_PERIME:
+            return False
+        return not _pid_vivant(pid)
 
     def _fsync_repertoire(self) -> None:
         try:
@@ -233,7 +421,7 @@ class JournalAudit:
         except RecursionError as exc:
             raise ValueError("details contient une reference circulaire") from exc
 
-        with self._verrou_thread, open(self.chemin, "a+b") as f:
+        with self._verrou_ecriture(), open(self.chemin, "a+b") as f:
             self._verrouiller(f, exclusif=True)  # relache a la fermeture du fichier
             taille = f.seek(0, os.SEEK_END)
             dernier_seq, dernier_hash = self._dernier(f, taille)
@@ -284,7 +472,7 @@ class JournalAudit:
         effacerait la preuve d'une falsification. Meme verrou exclusif que
         `ecrire` ; idempotent.
         """
-        with self._verrou_thread, open(self.chemin, "a+b") as f:
+        with self._verrou_ecriture(), open(self.chemin, "a+b") as f:
             self._verrouiller(f, exclusif=True)
             f.seek(0)
             donnees = f.read()
@@ -412,12 +600,15 @@ class JournalAudit:
     # -- lecture -----------------------------------------------------------
 
     def _octets(self) -> bytes:
-        with open(self.chemin, "rb") as f:
-            try:
-                self._verrouiller(f, exclusif=False)
-            except OSError:
-                pass
-            return f.read()
+        # Sans fcntl, une lecture coherente exige le meme verrou que l'ecriture
+        # (sinon on peut lire une ligne a moitie ecrite).
+        with self._verrou_ecriture() if fcntl is None else _sans_verrou():
+            with open(self.chemin, "rb") as f:
+                try:
+                    self._verrouiller(f, exclusif=False)
+                except OSError:
+                    pass
+                return f.read()
 
     def lire(self) -> list[EntreeAudit]:
         """Toutes les entrees, dans l'ordre. Ne verifie PAS la chaine (voir

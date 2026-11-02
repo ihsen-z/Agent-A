@@ -15,6 +15,13 @@ client (comme demande) ; le jour courant s'y donne avec `--le`.
 `--date` vaut aujourd'hui par defaut (seul endroit ou l'horloge est lue) ;
 l'heure de `maintenant` vient de `--heure` (defaut : l'heure courante si
 `--date` est absent, 10:00 sinon), dans le fuseau Europe/Paris.
+
+Mode test (essais locaux, donnees fictives) : `--mode-test` sur `cycle` et `envoyer`, ou
+`"mode_test": true` dans `<instance>/config.json`. Il est affiche partout, journalise, et
+tout e-mail part vers `adresse_test` (jamais vers le vrai destinataire). `--sans-isolation`
+(mode test uniquement) lit les .eml sans processus enfant ; `--isolation fork|spawn|directe`
+choisit la strategie (par defaut : fork sous Linux/macOS, spawn sous Windows en mode test,
+refus sous Windows hors mode test).
 """
 
 from __future__ import annotations
@@ -39,7 +46,28 @@ from rapprochement.etats import TransitionInterdite   # noqa: E402
 from rapprochement.parseurs import ErreurFormat       # noqa: E402
 from rapprochement.modeles import EtatPiece           # noqa: E402
 
-FUSEAU = ZoneInfo("Europe/Paris")
+
+
+def _fuseau() -> ZoneInfo:
+    """Europe/Paris, avec le repli de `cycle.garantir_fuseaux` quand le systeme n'a pas de
+    base de fuseaux (Windows sans le paquet `tzdata`). Paresseux : aucun effet a l'import."""
+    cycle.garantir_fuseaux()
+    return ZoneInfo(cycle.FUSEAU)
+
+
+def _console_utf8() -> None:
+    """Console Windows en cp1252 : un caractere hors de cette page de codes (cyrillique,
+    CJK, emoji...) leverait UnicodeEncodeError en plein cycle, apres des ecritures. On
+    force UTF-8 avec remplacement : l'affichage peut etre degrade, jamais interrompu.
+    Sans effet si le flux n'a pas `reconfigure` (flux de remplacement, tests)."""
+    for flux in (sys.stdout, sys.stderr):
+        reconfigurer = getattr(flux, "reconfigure", None)
+        if reconfigurer is None:
+            continue
+        try:
+            reconfigurer(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):   # flux ferme ou deja utilise sans pouvoir changer
+            pass
 
 
 def _date(valeur: str) -> dt.date:
@@ -61,10 +89,11 @@ def _instants(args: argparse.Namespace) -> tuple[dt.date, dt.datetime]:
     if args.jour:
         jour = args.jour
         heure = dt.time.fromisoformat(args.heure) if args.heure else dt.time(10, 0)
-        return jour, dt.datetime.combine(jour, heure, tzinfo=FUSEAU)
-    maintenant = dt.datetime.now(FUSEAU)
+        return jour, dt.datetime.combine(jour, heure, tzinfo=_fuseau())
+    maintenant = dt.datetime.now(_fuseau())
     if args.heure:
-        maintenant = dt.datetime.combine(maintenant.date(), dt.time.fromisoformat(args.heure), tzinfo=FUSEAU)
+        maintenant = dt.datetime.combine(maintenant.date(), dt.time.fromisoformat(args.heure),
+                                         tzinfo=_fuseau())
     return maintenant.date(), maintenant
 
 
@@ -85,6 +114,12 @@ def _parseur() -> argparse.ArgumentParser:
 
     s = sous.add_parser("cycle", parents=[commun], help="execute un cycle")
     s.add_argument("--entree", default=str(RACINE / "data" / "corpus"))
+    s.add_argument("--mode-test", action="store_true",
+                   help="mode test : annonce partout, e-mails vers l'adresse de test (config.json)")
+    s.add_argument("--isolation", choices=cycle.STRATEGIES_ISOLATION,
+                   help="strategie de lecture des .eml (defaut : automatique)")
+    s.add_argument("--sans-isolation", action="store_true",
+                   help="lit les .eml sans processus enfant (mode test uniquement)")
 
     s = sous.add_parser("valider", parents=[commun, humain], help="valide un brouillon")
     s.add_argument("id_relance")
@@ -93,6 +128,8 @@ def _parseur() -> argparse.ArgumentParser:
     s.add_argument("--motif", required=True)
     s = sous.add_parser("envoyer", parents=[commun], help="emet un brouillon valide")
     s.add_argument("id_relance")
+    s.add_argument("--mode-test", action="store_true",
+                   help="mode test : le message part vers l'adresse de test, jamais vers le client")
     s = sous.add_parser("trancher", parents=[commun, humain], help="tranche un envoi incertain")
     s.add_argument("id_relance")
     g = s.add_mutually_exclusive_group(required=True)
@@ -145,7 +182,11 @@ def _executer(args: argparse.Namespace) -> int:
     aujourdhui, maintenant = _instants(args)
     c = args.commande
     if c == "cycle":
-        resume = cycle.executer_cycle(Path(args.entree), inst, aujourdhui, maintenant)
+        if args.sans_isolation and args.isolation not in (None, "directe"):
+            raise cycle.ErreurCycle("--sans-isolation contredit --isolation " + args.isolation)
+        strategie = "directe" if args.sans_isolation else args.isolation
+        resume = cycle.executer_cycle(Path(args.entree), inst, aujourdhui, maintenant,
+                                      mode_test=args.mode_test, strategie_isolation=strategie)
         _afficher(resume.texte(), end="")
         _afficher(f"Sorties : {inst.sortie}")
         return 0
@@ -158,8 +199,14 @@ def _executer(args: argparse.Namespace) -> int:
         _afficher(f"{b.id_relance} rejete")
         return 0
     if c == "envoyer":
-        b = cycle.envoyer_relance(inst, args.id_relance, maintenant=maintenant)
-        _afficher(f"{b.id_relance} envoye a {b.destinataire}")
+        b = cycle.envoyer_relance(inst, args.id_relance, maintenant=maintenant,
+                                  mode_test=args.mode_test)
+        config = cycle.charger_config(inst)
+        if args.mode_test or config["mode_test"]:
+            _afficher(f"[MODE TEST] {b.id_relance} envoye a {config['adresse_test']} "
+                      f"(destinataire reel, NON contacte : {b.destinataire})")
+        else:
+            _afficher(f"{b.id_relance} envoye a {b.destinataire}")
         return 0
     if c == "trancher":
         b = cycle.trancher_envoi(inst, args.id_relance, args.par, parti=args.parti, maintenant=maintenant)
@@ -229,6 +276,7 @@ def _afficher(texte: object = "", *, end: str = "\n", file=None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _console_utf8()
     args = _parseur().parse_args(argv)
     try:
         return _executer(args)

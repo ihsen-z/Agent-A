@@ -1147,11 +1147,7 @@ def test_serveur_reel_repond(inst, horloge):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "audit.py sans fcntl (Windows) : le verrou de thread est propre a CHAQUE objet JournalAudit. "
-    "Deux objets ouverts sur le meme fichier (cycle en cree un par operation) ecrivent la meme seq "
-    "et cassent la chaine. L'application web serialise ses ecritures pour s'en proteger."))
-def test_defaut_audit_sans_fcntl_deux_journaux_concurrents(tmp_path, monkeypatch):
+def test_regression_audit_sans_fcntl_deux_journaux_concurrents(tmp_path, monkeypatch):
     from rapprochement import audit as audit_mod
 
     monkeypatch.setattr(audit_mod, "fcntl", None)
