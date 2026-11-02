@@ -779,6 +779,9 @@
           <tr><td>§4 et §12, identité et rôles</td><td>Deux rôles grossiers ; identité non authentifiée en ligne de commande</td><td>La protection est l'accès au disque de l'instance</td></tr>
           <tr><td>§14, ROI</td><td>Non fourni</td><td>Aucun chiffre de ROI ne peut être annoncé (phase P2)</td></tr>
           <tr><td>§10, texte des relances</td><td>Identique dans tous les cas ; sans signature de cabinet</td><td>Un client relancé après un rejet ne voit pas le motif</td></tr>
+          <tr><td>Lecture des fichiers d'entrée</td><td>Stricte : tout format ambigu ou tronqué est refusé avec son numéro de ligne</td><td>Un export de banque inhabituel doit d'abord être converti vers le CSV pivot ; aucune devinette</td></tr>
+          <tr><td>Mode test / réel</td><td>Figé par instance au premier cycle, recoupé avec le journal d'audit</td><td>Passer d'un mode à l'autre exige une nouvelle instance</td></tr>
+          <tr><td>Règles d'exclusion par dossier</td><td>Garde-fous heuristiques contre les expressions qui gèlent le cycle (sonde, échec fermé)</td><td>Une expression pathologique rare pourrait encore passer ; c'est une heuristique, pas une preuve</td></tr>
           <tr><td>Envoi réel</td><td>Un fichier <code>.eml</code> ; aucun connecteur de messagerie</td><td>Quelqu'un doit expédier les e-mails à la main</td></tr>
         </tbody>
       </table>

@@ -425,6 +425,32 @@ assumee.
 - **Expediteur d'un e-mail non authentifie** : l'en-tete `From` n'est verifie ni par
   SPF ni par DKIM. Le routage ne peut donc pas distinguer un expediteur usurpe.
 
+**Lecture des entrees et mode de l'instance (ajouts de la fin de phase 2)**
+
+- **Lecture stricte, refus plutot que devinette.** Tout CSV est lu avec des en-tetes
+  normalises (casse, accents, espaces : `Debit` = `debit`) ; deux colonnes qui se
+  normalisent pareil, une colonne inconnue, une ligne trop courte ou trop longue, un
+  champ geant, un montant negatif de piece (avoir), `NaN`/`Infinity`/`1E5`, un symbole
+  de devise au milieu (`12EUR50`), `1,234` (ambigu), un code dossier declare deux fois,
+  un dossier C-DIRECT sans adresse valide : `ErreurFormat` avec le numero de ligne, aucune
+  ecriture. Un debit negatif est un remboursement (credit).
+- **Regles d'exclusion.** `statut` vide refuse ; regle qui correspond a tout libelle
+  (`.*`, `^`) refusee quand elle est validee ; quantificateurs imbriques, plus de 4
+  repetitions non bornees, ou expression qui ne termine pas dans le delai d'une sonde
+  (un seul processus par fichier, echec ferme) : refus. **Limite** : c'est une heuristique,
+  pas une preuve ; le module `re` ne peut pas etre interrompu.
+- **Mode test/reel fige par instance.** Le premier cycle fige le mode (base + entree
+  `mode_instance` du journal) ; toute operation d'ecriture demandee dans l'autre mode, ou
+  face a une base et un journal qui se contredisent, ou face a une base recreee qui ignore
+  des decisions du journal (`BaseRecreee`), est refusee. `verifier-audit` et
+  `controler-envois` sortent en code 1 sur ces incoherences. `adresse_test` ne peut pas
+  etre une adresse (ni une variante normalisee, ni un sous-domaine) d'un dossier.
+- **Une `id_piece` n'appartient qu'a un dossier**, forcage compris. Noms (`--par`,
+  `validateurs.txt`, `responsables.txt`) normalises en NFC.
+- **Limites assumees restantes** (xfail stricts dans `tests/test_adversarial.py`) : base
+  SQL forgee a la main, deblocage humain d'un blocage, adresses `+tag` cote routage, deux
+  cas d'isolation de lecture des `.eml`. Les connaitre fait partie de la recette.
+
 **Integrite du journal et du depot**
 
 - La suppression des *dernieres* entrees du journal d'audit n'est pas detectable
