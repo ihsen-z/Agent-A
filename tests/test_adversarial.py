@@ -2805,12 +2805,6 @@ def test_sain_controler_mode_texte_hostile_dans_une_valeur_du_journal(tmp_path) 
     assert cycle.controler_mode(inst) == () and cycle.mode_instance(inst) == "reel"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Mode fige : une base SUPPRIMEE puis recreee par un cycle est « guerie » en une passe "
-    "(`mode_marqueur_retabli`) : plus d'historique d'envois, les pieces redeviennent ATTENDUE, de "
-    "nouveaux brouillons sont crees et la limite d'un e-mail par semaine ne voit plus l'envoi de la "
-    "veille : un SECOND e-mail part au meme destinataire (CA-05). `controler_mode` et "
-    "`verifier-audit` sortent 0 ; seul `controler-envois` proteste, apres coup."))
 def test_defaut_base_recreee_guerie_en_silence_double_envoi(tmp_path) -> None:
     entree, inst, b = _brouillon_valide(tmp_path)
     cycle.envoyer_relance(inst, b.id_relance, maintenant=a(J0), par=VALIDEUSE)
@@ -2871,11 +2865,6 @@ def test_sain_adresse_test_adresses_sans_client_acceptees(adresse) -> None:
     cycle.verifier_adresse_test(adresse, _dossiers_adresse_test())
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "adresse_test : le domaine est compare tel quel. `autre@ALPHA-SARL.FR.` (point final du FQDN), "
-    "`autre@mail.alpha-sarl.fr` (sous-domaine d'un domaine DECLARE du client) et la forme punycode "
-    "d'un domaine accentue (`xn--socit-esab.fr` pour `société.fr`) sont acceptes : l'essai peut "
-    "atterrir chez le client. `routage.normaliser_domaine` sait pourtant normaliser ces formes."))
 @pytest.mark.parametrize("adresse", ["autre@ALPHA-SARL.FR.", "autre@mail.alpha-sarl.fr", "autre@xn--socit-esab.fr",
                                      "autre@deep.sous.gamma.fr"])
 def test_defaut_adresse_test_variantes_de_domaine_d_un_client(adresse) -> None:
@@ -2886,11 +2875,6 @@ def test_defaut_adresse_test_variantes_de_domaine_d_un_client(adresse) -> None:
     raise AssertionError("refus attendu")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "adresse_test : pour un domaine grand public, seule l'adresse EXACTE est comparee. "
-    "`gerant+test@gmail.com`, `ge.rant@gmail.com` et `gerant@googlemail.com` sont la MEME boite "
-    "Gmail que `gerant@gmail.com` (client) : l'essai lui est remis. Le routage, lui, ignore deja "
-    "le suffixe +tag."))
 @pytest.mark.parametrize("adresse", ["gerant+test@gmail.com", "ge.rant@gmail.com", "gerant@googlemail.com"])
 def test_defaut_adresse_test_meme_boite_grand_public(adresse) -> None:
     try:

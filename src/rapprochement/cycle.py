@@ -555,14 +555,17 @@ def _marqueurs_de_mode(inst: Instance) -> list[str]:
         return [m for m in MODES_INSTANCE if depot.est_vu(CLE_MODE_INSTANCE + m)]
 
 
-_ACTIONS_DE_BROUILLON = ("brouillon_cree", "valide", "rejete", "envoi_effectue", "envoi_confirme_par_humain",
+# Decisions et envois : tout sauf la simple creation du brouillon (une base recreee AVANT toute decision
+# humaine ne perd rien : le cycle suivant refait les memes brouillons).
+_ACTIONS_DE_BROUILLON = ("valide", "rejete", "envoi_demarre", "envoi_effectue", "envoi_incertain",
+                         "envoi_echec_certain", "envoi_confirme_par_humain", "envoi_declare_non_parti",
                          "envoi_repercute", "envoi_refuse", "envoi_mode_test")
 _MARQUES_DE_BROUILLON = tuple(f'"action":"{a}"'.encode() for a in _ACTIONS_DE_BROUILLON)
 
 
 def _brouillons_du_journal(inst: Instance) -> set[str]:
     """Identifiants de brouillons dont le journal d'audit porte une decision ou un envoi
-    (creation, validation, rejet, envoi, repercussion). Une passe sur les octets, comme
+    (validation, rejet, envoi, repercussion). Une passe sur les octets, comme
     `_modes_du_journal` (ligne illisible ignoree : la chaine est l'affaire de `verifier_audit`)."""
     if not inst.audit.exists():
         return set()

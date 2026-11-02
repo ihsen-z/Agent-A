@@ -3560,3 +3560,114 @@ def test_mode_journal_marqueur_absent_est_signale_par_controler_mode_et_verifier
     rc, out, _ = cli(capsys, inst, "verifier-audit")
     assert rc == 1 and "MODE INCOHERENT" in out
     assert any("mode de l'instance" in e for e in cycle.controler_envois(inst).ecarts)
+
+
+# --- 6e passage : base recreee jamais « guerie » ; adresse_test en forme normalisee ---------------------
+
+
+def _base_supprimee(inst: cycle.Instance) -> None:
+    for f in inst.racine.glob("depot.sqlite*"):
+        f.unlink()
+
+
+def _instance_avec_envoi(tmp_path: Path, entree: Path):
+    inst = nouvelle_instance(tmp_path / "i")
+    b = _envoi_sain(inst, entree)
+    assert len(emls(inst)) == 1
+    return inst, b
+
+
+def test_base_recreee_apres_envoi_cycle_valider_envoyer_refuses_rien_ne_part(entree, tmp_path):
+    inst, b = _instance_avec_envoi(tmp_path, entree)
+    _base_supprimee(inst)
+    audit_avant = inst.audit.read_bytes()
+    for appel in (lambda: lancer(entree, inst, jour(1)),
+                  lambda: cycle.valider_relance(inst, b.id_relance, VALIDEUSE, maintenant=a_10h(jour(1))),
+                  lambda: cycle.envoyer_relance(inst, b.id_relance, maintenant=a_10h(jour(1)), par=VALIDEUSE),
+                  lambda: cycle.rattacher_piece(inst, VALIDEUSE, maintenant=a_10h(jour(1)), dossier="ALPHA",
+                                                reference="A-001", id_piece="P-1")):
+        with pytest.raises(cycle.BaseRecreee, match="base recreee ou restauree"):
+            appel()
+    assert len(emls(inst)) == 1 and inst.audit.read_bytes() == audit_avant
+    assert issubclass(cycle.BaseRecreee, cycle.ModeInstanceIncompatible)
+
+
+def test_base_recreee_apres_envoi_est_signalee_par_controler_mode_verifier_audit_et_controler_envois(
+        entree, tmp_path, capsys):
+    inst, _ = _instance_avec_envoi(tmp_path, entree)
+    assert cycle.controler_mode(inst) == ()
+    _base_supprimee(inst)
+    problemes = cycle.controler_mode(inst)
+    assert any("base recreee ou restauree" in p and "1 brouillon(s)" in p for p in problemes)
+    rc, out, _ = cli(capsys, inst, "verifier-audit")
+    assert rc == 1 and "MODE INCOHERENT" in out and "base recreee ou restauree" in out
+    assert any("base recreee" in e for e in cycle.controler_envois(inst).ecarts)
+    rc, _, err = cli(capsys, inst, "cycle", "--entree", str(entree))
+    assert rc == 1 and "REFUS (BaseRecreee)" in err
+
+
+def test_base_recreee_avant_toute_decision_le_marqueur_est_retabli(entree, tmp_path):
+    inst, _ = _instance_figee(tmp_path, entree, "reel")
+    _base_supprimee(inst)
+    lancer(entree, inst, jour(1))                                  # journal sans decision ni envoi : rien de perdu
+    assert cycle.mode_instance(inst) == "reel" and cycle.controler_mode(inst) == ()
+    assert len(_entrees_audit(inst, "mode_marqueur_retabli")) == 1
+
+
+def test_base_recreee_rejet_aussi_est_une_decision_que_la_base_ignore(entree, tmp_path):
+    inst, ident = _instance_figee(tmp_path, entree, "reel")
+    cycle.rejeter_relance(inst, ident, VALIDEUSE, "non", maintenant=a_10h(J0))
+    _base_supprimee(inst)
+    with pytest.raises(cycle.BaseRecreee):
+        lancer(entree, inst, jour(1))
+
+
+def test_base_non_recreee_reste_utilisable_apres_envoi(entree, tmp_path):
+    inst, _ = _instance_avec_envoi(tmp_path, entree)
+    lancer(entree, inst, jour(1))
+    assert cycle.controler_mode(inst) == ()
+
+
+# adresse_test : formes normalisees
+
+
+def _dossiers_variantes():
+    from rapprochement.modeles import Dossier
+    return {
+        "A": Dossier("A", "Alpha", "Compta <compta@alpha-sarl.fr>", "M", circuit="C-DIRECT", domaines=("alpha-sarl.fr",)),
+        "B": Dossier("B", "Beta", "gerant@gmail.com", "M", circuit="C-DIRECT"),
+        "C": Dossier("C", "Gamma", "x@sous.gamma.fr", "M", circuit="C-DIRECT"),
+        "D": Dossier("D", "Delta", "contact@société.fr", "M", circuit="C-DIRECT"),
+    }
+
+
+@pytest.mark.parametrize("adresse", [
+    "autre@ALPHA-SARL.FR.", "autre@mail.alpha-sarl.fr", "autre@xn--socit-esab.fr", "autre@deep.sous.gamma.fr",
+    "autre@société.fr", "gerant+test@gmail.com", "ge.rant@gmail.com", "gerant@googlemail.com",
+    "G.E.R.A.N.T+x@GoogleMail.com", "gerant@gmail.com.",
+])
+def test_adresse_test_formes_normalisees_refusees(adresse):
+    with pytest.raises(cycle.ConfigInvalide):
+        cycle.verifier_adresse_test(adresse, _dossiers_variantes())
+
+
+@pytest.mark.parametrize("adresse", ["test@gmail.com", "gerant2@gmail.com", "autre@alpha-sarl.fr.evil.invalid",
+                                     "autre@sarl.fr", "autre@notalpha-sarl.fr", "moi@exemple.invalid"])
+def test_adresse_test_formes_voisines_non_clientes_acceptees(adresse):
+    cycle.verifier_adresse_test(adresse, _dossiers_variantes())
+
+
+def test_base_recreee_une_validation_seule_au_journal_suffit_a_refuser(entree, tmp_path):
+    inst = nouvelle_instance(tmp_path / "i")
+    _valider_premier(inst, entree)
+    _base_supprimee(inst)
+    with pytest.raises(cycle.BaseRecreee):
+        lancer(entree, inst, jour(1))
+
+
+def test_base_recreee_un_envoi_seul_au_journal_suffit_a_refuser(entree, tmp_path):
+    inst, _ = _instance_avec_envoi(tmp_path, entree)
+    _reecrire_journal(inst, lambda e: None if e.action == "valide" else (e.acteur, e.details))
+    _base_supprimee(inst)
+    with pytest.raises(cycle.BaseRecreee):
+        lancer(entree, inst, jour(1))
