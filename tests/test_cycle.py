@@ -3155,9 +3155,10 @@ def test_mode_fige_marqueurs_contradictoires_refus(entree, tmp_path):
 def test_mode_fige_instance_ancienne_sans_marqueur_est_figee_au_prochain_cycle(entree, tmp_path):
     inst = nouvelle_instance(tmp_path / "i")
     lancer(entree, inst, J0)
-    with sqlite3.connect(inst.depot) as c:                                  # instance d'avant cette regle
-        c.execute("DELETE FROM vus WHERE cle LIKE 'mode-instance:%'")
-    assert cycle.mode_instance(inst) is None
+    with sqlite3.connect(inst.depot) as c:                                  # instance d'avant cette regle :
+        c.execute("DELETE FROM vus WHERE cle LIKE 'mode-instance:%'")       # ni marqueur en base...
+    _reecrire_journal(inst, lambda e: None if e.action == "mode_instance" else (e.acteur, e.details))   # ...ni au journal
+    assert cycle.mode_instance(inst) is None and cycle.controler_mode(inst) == ()
     lancer(entree, inst, jour(1), mode_test=True)                           # le prochain cycle choisit, et fige
     assert cycle.mode_instance(inst) == "test"
     assert _entrees_audit(inst, "mode_instance")[-1].details["pieces_deja_presentes"] == 5
