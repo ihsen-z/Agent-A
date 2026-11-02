@@ -54,6 +54,23 @@ INDICES_GROUPEMENT = (
 RATIO_ACOMPTE_MIN = 0.10
 RATIO_ACOMPTE_MAX = 0.95
 
+# Un montant identique au centime vaut 1.0 ; un montant seulement dans la tolerance
+# relative (0,5 %) vaut moins. L'ecart (0.30 x 0.55 = 0.165) depasse ce que la date
+# peut compenser (poids 0.15) : un paiement qui correspond au centime l'emporte
+# TOUJOURS sur un paiement approche, meme plus proche en date.
+# Defaut trouve par l'audit de conformite : deux prelevements de credit-bail du meme
+# fournisseur, 625,82 EUR et 628,75 EUR, pour une facture de 625,82 EUR. La facture
+# etait donnee a l'approche (plus proche en date), le paiement exact devenait un faux
+# manquant et l'approche un faux justifie : un manque rate.
+#
+# PLAFOND : 0.55 x SCORE_MONTANT_APPROCHE + 0.30 + 0.15 doit rester SOUS SEUIL_CERTITUDE
+# (0.80), donc SCORE_MONTANT_APPROCHE < 0.6364. Un montant qui ne correspond pas au
+# centime n'est JAMAIS une certitude : au mieux « probable a confirmer », traite apres
+# les reglements groupes et les acomptes. Sinon le nom d'un fournisseur identique
+# suffit a lui faire consommer une facture dont un reglement groupe a besoin (defaut
+# trouve a 40 % de pieces manquantes : Point P 848,47 contre un groupe de 3 factures).
+SCORE_MONTANT_APPROCHE = 0.60
+
 SEUIL_CONFIANCE = 0.55
 SEUIL_CERTITUDE = 0.80
 MAX_PIECES_GROUPEES = 4
@@ -67,6 +84,15 @@ def _montants_compatibles(a: Decimal, b: Decimal) -> bool:
 # Alias public : le routage des pieces entrantes applique la meme tolerance que
 # le rapprochement bancaire, il ne doit pas en avoir une deuxieme.
 montants_compatibles = _montants_compatibles
+
+
+def _score_montant(montant_operation: Decimal, total_pieces: Decimal) -> float:
+    """1.0 au centime, SCORE_MONTANT_APPROCHE dans la tolerance relative, sinon 0."""
+    if abs(montant_operation - total_pieces) <= TOLERANCE_ABSOLUE:
+        return 1.0
+    if _montants_compatibles(montant_operation, total_pieces):
+        return SCORE_MONTANT_APPROCHE
+    return 0.0
 
 
 def _montants_identiques(a: Decimal, b: Decimal) -> bool:
@@ -118,7 +144,7 @@ def _score_date(operation: OperationBancaire, piece: Piece) -> float:
 def _score(operation: OperationBancaire, pieces: list[Piece]) -> float:
     """Confiance globale : le montant pese le plus, puis le libelle, puis la date."""
     total = sum((p.montant_ttc for p in pieces), Decimal("0"))
-    score_montant = 1.0 if _montants_compatibles(operation.montant, total) else 0.0
+    score_montant = _score_montant(operation.montant, total)
     score_libelle = max(_similarite(operation.libelle, p.fournisseur) for p in pieces)
     score_dates = sum(_score_date(operation, p) for p in pieces) / len(pieces)
     # Un groupement est moins sur qu'un appariement direct.
@@ -171,9 +197,17 @@ class Moteur:
             disponibles.setdefault(piece.dossier, []).append(piece)
         consommees: set[str] = set()
 
-        self._passe_appariement(a_apparier, disponibles, consommees, resultats)
+        # Une decision incertaine ne doit jamais l'emporter sur une decision certaine :
+        # les correspondances CERTAINES d'abord, puis les reglements groupes et les
+        # acomptes, et SEULEMENT ENSUITE les correspondances probables, avec ce qui
+        # reste. Sinon un montant approche et un nom de fournisseur vaguement
+        # ressemblant (Loxam 850,81 contre Point P 848,13) consomment la facture d'un
+        # reglement groupe, qui n'est alors plus justifie (defaut trouve sur le
+        # corpus de graine 60).
+        self._passe_appariement(a_apparier, disponibles, consommees, resultats, certains_seulement=True)
         self._passe_groupement(a_apparier, disponibles, consommees, resultats)
         self._passe_acompte(a_apparier, disponibles, consommees, resultats)
+        self._passe_appariement(a_apparier, disponibles, consommees, resultats, certains_seulement=False)
 
         for operation in a_apparier:
             resultats.setdefault(
@@ -236,7 +270,7 @@ class Moteur:
 
     def _score(self, operation: OperationBancaire, pieces: list[Piece]) -> float:
         total = sum((p.montant_ttc for p in pieces), Decimal("0"))
-        score_montant = 1.0 if _montants_compatibles(operation.montant, total) else 0.0
+        score_montant = _score_montant(operation.montant, total)
         score_libelle = max(self._similarite(operation, p) for p in pieces)
         score_dates = sum(_score_date(operation, p) for p in pieces) / len(pieces)
         penalite = 0.0 if len(pieces) == 1 else 0.12 * (len(pieces) - 1)
@@ -251,23 +285,40 @@ class Moteur:
         disponibles: dict[str, list[Piece]],
         consommees: set[str],
         resultats: dict[str, Rapprochement],
+        *,
+        certains_seulement: bool = False,
     ) -> None:
-        """Appariements un pour un, par confiance decroissante sur tout le lot."""
-        couples: list[tuple[float, int, str, str, OperationBancaire, Piece]] = []
+        """Appariements un pour un, par confiance decroissante sur tout le lot.
+
+        `certains_seulement` : ne retient que les couples dont la confiance atteint
+        SEUIL_CERTITUDE (premiere passe). La seconde passe reprend les pieces
+        restantes pour les correspondances probables.
+        """
+        seuil = SEUIL_CERTITUDE if certains_seulement else SEUIL_CONFIANCE
+        couples: list[tuple[int, float, int, str, str, OperationBancaire, Piece]] = []
         for operation in operations:
             for piece in self._candidates(operation, disponibles, consommees):
                 if not _montants_compatibles(operation.montant, piece.montant_ttc):
                     continue
                 score = self._score(operation, [piece])
-                if score < SEUIL_CONFIANCE:
+                if score < seuil:
                     continue
                 ecart_jours = abs((operation.date_operation - piece.date_facture).days)
+                # Classe de montant, PREMIERE cle de tri : un paiement identique au
+                # centime a la facture passe avant un paiement qui n'en est qu'a un
+                # ou deux centimes, qui passe avant un paiement dans la tolerance
+                # relative. Sans cela, deux paiements du meme fournisseur a 69,60 et
+                # 69,61 EUR pour une seule facture se departagent par la date, au
+                # hasard : le paiement reellement justifie est declare manquant et
+                # l'autre justifie (defaut trouve sur des corpus inedits).
+                ecart_montant = abs(operation.montant - piece.montant_ttc)
+                classe = 0 if ecart_montant == 0 else (1 if ecart_montant <= TOLERANCE_ABSOLUE else 2)
                 # Cles de tri supplementaires pour un resultat deterministe.
                 couples.append(
-                    (-score, ecart_jours, operation.reference, piece.id_piece, operation, piece)
+                    (classe, -score, ecart_jours, operation.reference, piece.id_piece, operation, piece)
                 )
 
-        for _, _, _, _, operation, piece in sorted(couples, key=lambda c: c[:4]):
+        for _, _, _, _, _, operation, piece in sorted(couples, key=lambda c: c[:5]):
             if operation.reference in resultats or piece.id_piece in consommees:
                 continue
             score = self._score(operation, [piece])
