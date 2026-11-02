@@ -8,6 +8,7 @@ jobs:
   tests:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -21,9 +22,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Installer les dependances de test
-        run: python -m pip install pytest tzdata
+        run: python -m pip install pytest pytest-timeout tzdata
       - name: Suite de tests
-        run: python -m pytest tests -q
+        # delai par test : un blocage sous Windows doit nommer le test fautif, pas geler le job
+        run: python -m pytest tests -v --timeout=180 --durations=15 -p no:cacheprovider
 
   balayage:
     name: Balayage de graines (CA-01 et CA-02)
