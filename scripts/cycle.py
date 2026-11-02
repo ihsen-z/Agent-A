@@ -18,8 +18,10 @@ client (comme demande) ; le jour courant s'y donne avec `--le`.
 l'heure de `maintenant` vient de `--heure` (defaut : l'heure courante si
 `--date` est absent, 10:00 sinon), dans le fuseau Europe/Paris.
 
-Mode test (essais locaux, donnees fictives) : `--mode-test` sur `cycle` et `envoyer`, ou
-`"mode_test": true` dans `<instance>/config.json`. Il est affiche partout, journalise, et
+Mode test (essais locaux, donnees fictives) : `--mode-test` ou `"mode_test": true` dans
+`<instance>/config.json`. Le mode est une propriete de l'INSTANCE, fige par son premier cycle :
+toute commande d'ecriture doit demander le meme mode (drapeau ou config.json), sinon refus
+(« cette instance a ete creee en mode ... »). Il ne se change pas : creer une nouvelle instance. Il est affiche partout, journalise, et
 tout e-mail part vers `adresse_test` (jamais vers le vrai destinataire). `--sans-isolation`
 (mode test uniquement) lit les .eml sans processus enfant ; `--isolation fork|spawn|directe`
 choisit la strategie (par defaut : fork sous Linux/macOS, spawn sous Windows en mode test,
@@ -108,6 +110,10 @@ def _parseur() -> argparse.ArgumentParser:
     humain = argparse.ArgumentParser(add_help=False)
     humain.add_argument("--par", required=True,
                         help="nom declare dans validateurs.txt (ou responsables.txt)")
+    humain.add_argument("--mode-test", action="store_true",
+                        help="mode demande pour cette commande ; DOIT etre celui de l'instance "
+                             "(fige au premier cycle) sinon refus. Repli sur validateurs.txt si "
+                             "responsables.txt est absent (arbitrer, trancher, reparer-audit, --forcer)")
     piece = argparse.ArgumentParser(add_help=False)
     piece.add_argument("--dossier", required=True)
     piece.add_argument("--reference", required=True)
@@ -131,15 +137,11 @@ def _parseur() -> argparse.ArgumentParser:
     s.add_argument("--motif", required=True)
     s = sous.add_parser("envoyer", parents=[commun, humain], help="emet un brouillon valide")
     s.add_argument("id_relance")
-    s.add_argument("--mode-test", action="store_true",
-                   help="mode test : le message part vers l'adresse de test, jamais vers le client")
     s = sous.add_parser("trancher", parents=[commun, humain], help="tranche un envoi incertain")
     s.add_argument("id_relance")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--parti", dest="parti", action="store_true")
     g.add_argument("--non-parti", dest="parti", action="store_false")
-    s.add_argument("--mode-test", action="store_true",
-                   help="mode test : repli sur validateurs.txt si responsables.txt est absent")
 
     sous.add_parser("file", parents=[commun], help="liste la file humaine")
 
@@ -152,8 +154,6 @@ def _parseur() -> argparse.ArgumentParser:
     s.add_argument("--forcer", action="store_true",
                    help="autorise un dossier DIFFERENT de celui de la decision de routage "
                         "(RESPONSABLE seulement ; exige --motif)")
-    s.add_argument("--mode-test", action="store_true",
-                   help="mode test : repli sur validateurs.txt si responsables.txt est absent (--forcer)")
     s.add_argument("--motif", default="", help="motif obligatoire avec --forcer (journalise)")
 
     s = sous.add_parser("controler", parents=[commun, humain], help="controle une piece recue")
@@ -172,8 +172,6 @@ def _parseur() -> argparse.ArgumentParser:
     s = sous.add_parser("arbitrer", parents=[commun, humain, piece],
                         help="classe sans suite une piece ESCALADEE (responsable)")
     s.add_argument("--motif", required=True)
-    s.add_argument("--mode-test", action="store_true",
-                   help="mode test : repli sur validateurs.txt si responsables.txt est absent")
     s = sous.add_parser("bloquer", parents=[commun, humain, piece], help="bloque une piece")
     s.add_argument("--motif", required=True)
     s = sous.add_parser("debloquer", parents=[commun, humain, piece], help="debloque une piece")
@@ -185,8 +183,6 @@ def _parseur() -> argparse.ArgumentParser:
     sous.add_parser("verifier-audit", parents=[commun], help="verifie le journal d'audit")
     s = sous.add_parser("reparer-audit", parents=[commun, humain],
                         help="retire une derniere ligne tronquee du journal (coupure), jamais plus (responsable)")
-    s.add_argument("--mode-test", action="store_true",
-                   help="mode test : repli sur validateurs.txt si responsables.txt est absent")
     sous.add_parser("controler-envois", parents=[commun],
                     help="recette de CA-06 : chaque envoi a une validation anterieure par un validateur declare")
     s = sous.add_parser("exporter", parents=[commun], help="export JSON complet du depot")
@@ -215,11 +211,13 @@ def _executer(args: argparse.Namespace) -> int:
         _afficher(f"Sorties : {inst.sortie}")
         return 0
     if c == "valider":
-        b = cycle.valider_relance(inst, args.id_relance, args.par, maintenant=maintenant)
+        b = cycle.valider_relance(inst, args.id_relance, args.par, maintenant=maintenant,
+                                  mode_test=args.mode_test)
         _afficher(f"{b.id_relance} valide par {b.valide_par}")
         return 0
     if c == "rejeter":
-        b = cycle.rejeter_relance(inst, args.id_relance, args.par, args.motif, maintenant=maintenant)
+        b = cycle.rejeter_relance(inst, args.id_relance, args.par, args.motif, maintenant=maintenant,
+                                  mode_test=args.mode_test)
         _afficher(f"{b.id_relance} rejete")
         return 0
     if c == "envoyer":
@@ -270,7 +268,8 @@ def _executer(args: argparse.Namespace) -> int:
         return 0
     if c == "controler":
         p = cycle.controler_piece(inst, args.dossier, args.reference, args.par,
-                                  conforme=args.conforme, motif=args.motif, maintenant=maintenant)
+                                  conforme=args.conforme, motif=args.motif, maintenant=maintenant,
+                                  mode_test=args.mode_test)
         _afficher(f"{p.dossier}/{p.reference} -> {p.etat.value}")
         return 0
     if c in ("promesse", "arbitrer", "bloquer", "debloquer"):
@@ -280,11 +279,12 @@ def _executer(args: argparse.Namespace) -> int:
                                      maintenant=maintenant, mode_test=args.mode_test)
         elif c == "promesse":
             p = cycle.saisir_promesse(inst, args.dossier, args.reference, args.par,
-                                      date_promesse=args.date_promesse, maintenant=maintenant)
+                                      date_promesse=args.date_promesse, maintenant=maintenant,
+                                      mode_test=args.mode_test)
         else:
             fonction = {"bloquer": cycle.bloquer_piece, "debloquer": cycle.debloquer_piece}[c]
             p = fonction(inst, args.dossier, args.reference, args.par, motif=args.motif,
-                         maintenant=maintenant)
+                         maintenant=maintenant, mode_test=args.mode_test)
         drapeau = " (bloquee)" if p.bloquee else ""
         promesse = f" promise le {p.date_promesse.isoformat()}" if p.date_promesse else ""
         _afficher(f"{p.dossier}/{p.reference} -> {p.etat.value}{promesse}{drapeau}")

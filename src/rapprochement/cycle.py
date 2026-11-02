@@ -233,6 +233,10 @@ class ConfigInvalide(ErreurCycle):
     """`config.json` illisible ou de type incorrect : refus avant toute ecriture."""
 
 
+class ModeInstanceIncompatible(ErreurCycle):
+    """Le mode demande (test ou reel) n'est pas celui dans lequel l'instance a ete creee."""
+
+
 class JournalNonSain(ErreurCycle):
     """Le journal d'audit ne verifie pas : aucune ecriture n'est faite tant qu'il ne l'est pas."""
 
@@ -436,15 +440,85 @@ def exiger_journal_sain(instance: Instance | Path | str) -> JournalAudit:
     return journal
 
 
+CLE_MODE_INSTANCE = "mode-instance:"
+MODES_INSTANCE = ("test", "reel")
+
+
+def _mode_enregistre(depot: Depot) -> str | None:
+    """Mode (« test » ou « reel ») fige par le premier cycle, ou None. Deux marqueurs a la
+    fois (base alteree) : refus, jamais de choix arbitraire."""
+    presents = [m for m in MODES_INSTANCE if depot.est_vu(CLE_MODE_INSTANCE + m)]
+    if len(presents) > 1:
+        raise ModeInstanceIncompatible(
+            "le mode de l'instance est incoherent (« test » et « reel » sont tous deux enregistres) : "
+            "base alteree, restaurer une sauvegarde ou creer une nouvelle instance"
+        )
+    return presents[0] if presents else None
+
+
+def mode_instance(instance: Instance | Path | str) -> str | None:
+    """Mode de l'instance, « test » ou « reel », tel que le premier cycle l'a FIGE ; None si
+    aucun cycle n'a encore eu lieu. Lecture seule (ne cree rien) : pour le bandeau de
+    l'application web et pour savoir quel mode demander.
+
+    Le mode est une propriete de l'INSTANCE, pas un drapeau de commande : enregistre au premier
+    cycle (entree d'audit `mode_instance` + marqueur `vus` du depot, que rien ne reecrit), puis
+    toute operation d'ecriture compare le mode demande (`config.json` ou `mode_test`) a lui et
+    refuse (`ModeInstanceIncompatible`) AVANT toute ecriture s'ils different. Une instance de
+    test ne devient donc JAMAIS reelle, et inversement. Consequence voulue : dans une instance
+    de test tout est simule, y compris l'historique des envois, le passage des pieces a
+    DEMANDEE et la limite hebdomadaire."""
+    inst = Instance.de(instance)
+    if not inst.depot.exists():
+        return None
+    with Depot(inst.depot) as depot:
+        return _mode_enregistre(depot)
+
+
+def mode_demande(instance: Instance | Path | str, mode_test: bool = False) -> str:
+    """Mode EFFECTIF d'une operation : « test » si `mode_test` est vrai ou si `config.json`
+    le dit, sinon « reel »."""
+    return "test" if bool(mode_test) or charger_config(instance)["mode_test"] else "reel"
+
+
+def _exiger_mode(depot: Depot, demande: str) -> str | None:
+    enregistre = _mode_enregistre(depot)
+    if enregistre is not None and enregistre != demande:
+        raise ModeInstanceIncompatible(
+            f"cette instance a ete creee en mode {enregistre} (operation demandee en mode {demande}) ; "
+            "pour changer, creer une nouvelle instance"
+        )
+    return enregistre
+
+
+def _figer_mode(depot: Depot, journal: JournalAudit, demande: str, source: str, aujourdhui: dt.date,
+                maintenant: dt.datetime) -> None:
+    """Premier cycle : enregistre le mode (transaction d'abord, journal ensuite)."""
+    if _mode_enregistre(depot) is not None:
+        return
+    existantes = len(depot.charger_pieces())
+    with depot.transaction():
+        depot.marquer_vu(CLE_MODE_INSTANCE + demande)
+    journal.ecrire(ACTEUR_SYSTEME, "mode_instance", aujourdhui.isoformat(), {
+        "mode": demande, "source": source, "pieces_deja_presentes": existantes,
+    }, horodatage=maintenant)
+
+
 @contextmanager
-def _ouvrir(instance: Instance, *, ecriture: bool = False) -> Iterator[tuple[Depot, JournalAudit]]:
+def _ouvrir(instance: Instance, *, ecriture: bool = False,
+            mode: str | None = None) -> Iterator[tuple[Depot, JournalAudit]]:
     """`ecriture=True` : refuse (`JournalNonSain`) avant d'ouvrir la base si le journal
-    d'audit ne verifie pas. Les lectures (liste, export) restent possibles."""
+    d'audit ne verifie pas. Les lectures (liste, export) restent possibles.
+
+    `mode` (« test » ou « reel », voir `mode_demande`) : refuse (`ModeInstanceIncompatible`)
+    si l'instance a ete creee dans l'autre mode, AVANT que l'appelant n'ecrive quoi que ce soit."""
     garantir_fuseaux()
     instance.preparer()
     journal = exiger_journal_sain(instance) if ecriture else JournalAudit(instance.audit)
     depot = Depot(instance.depot)
     try:
+        if mode is not None:
+            _exiger_mode(depot, mode)
         yield depot, journal
     finally:
         depot.fermer()
@@ -468,6 +542,16 @@ def affichable(valeur: object) -> str:
     return "".join(sortie)
 
 
+def normaliser_nom(nom: str) -> str:
+    """Forme canonique d'un nom de personne : NFC (macOS ecrit en NFD, Windows en NFC) et espaces
+    reduits. Ne change PAS la casse : voir `_cle_nom` pour la comparaison."""
+    return " ".join(unicodedata.normalize("NFC", nom).split())
+
+
+def _cle_nom(nom: str) -> str:
+    return normaliser_nom(nom).casefold()
+
+
 def _lire_liste_de_noms(chemin: Path) -> tuple[str, ...]:
     """Lignes non vides, `#` = commentaire ; BOM et CRLF toleres. Fichier absent : ()."""
     if not chemin.exists():
@@ -481,7 +565,7 @@ def _lire_liste_de_noms(chemin: Path) -> tuple[str, ...]:
         ) from None
     noms = []
     for ligne in contenu.splitlines():
-        nom = ligne.strip()
+        nom = normaliser_nom(ligne)
         if nom and not nom.startswith("#"):
             noms.append(nom)
     return tuple(noms)
@@ -500,13 +584,13 @@ def lire_responsables(instance: Instance | Path | str) -> tuple[str, ...]:
 def _chercher_nom(declares: Sequence[str], nom: str | None, *, source: str) -> str:
     if not isinstance(nom, str) or not nom.strip():
         raise ValidateurRefuse("--par NOM est obligatoire")
-    cherche = nom.strip().casefold()
+    cherche = _cle_nom(nom)
     for declare in declares:
-        if declare.casefold() == cherche:
+        if _cle_nom(declare) == cherche:
             if not etats.est_acteur_humain(declare):
                 raise ValidateurRefuse(f"{declare!r} est un acteur automatique, pas un validateur")
             return declare
-    raise ValidateurRefuse(f"{nom.strip()!r} n'est pas dans {source}")
+    raise ValidateurRefuse(f"{normaliser_nom(nom)!r} n'est pas dans {source}")
 
 
 def exiger_validateur(instance: Instance | Path | str, nom: str | None) -> str:
@@ -972,12 +1056,19 @@ def executer_cycle(
     ]
 
     # Journal d'audit sain AVANT toute ecriture en base (sinon : effets sans trace).
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    mode_cycle = "test" if en_mode_test else "reel"
+    with _ouvrir(inst, ecriture=True, mode=mode_cycle) as (depot, journal):
         # 2 bis. Collisions entre le releve et le depot.
         collisions = collisions_de_reference(entrees.operations, depot.charger_pieces())
         if collisions:
             raise CollisionReferences(collisions)
         notes = _Notes(journal, maintenant)
+        # Le PREMIER cycle d'une instance fige son mode (test ou reel) ; les suivants, comme
+        # toute operation, ont deja ete confrontes a lui par `_ouvrir`.
+        _figer_mode(depot, journal, mode_cycle,
+                    "config.json et --mode-test" if mode_test and config["mode_test"]
+                    else "--mode-test" if mode_test else "config.json" if config["mode_test"] else "defaut",
+                    aujourdhui, maintenant)
         if en_mode_test:
             # Une fois par cycle, avant tout effet : le mode ne passe jamais inapercu.
             journal.ecrire(ACTEUR_SYSTEME, "mode_test_actif", aujourdhui.isoformat(), {
@@ -1636,18 +1727,18 @@ def ecrire_sorties(inst: Instance, depot: Depot, rapprochements: list[Rapprochem
 
 
 def valider_relance(instance: Instance | Path | str, id_relance: str, par: str, *,
-                    maintenant: dt.datetime) -> Brouillon:
+                    maintenant: dt.datetime, mode_test: bool = False) -> Brouillon:
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    with _ouvrir(inst, ecriture=True, mode=mode_demande(inst, mode_test)) as (depot, journal):
         return envoi_mod.valider(depot, journal, id_relance, nom, maintenant=maintenant)
 
 
 def rejeter_relance(instance: Instance | Path | str, id_relance: str, par: str, motif: str, *,
-                    maintenant: dt.datetime) -> Brouillon:
+                    maintenant: dt.datetime, mode_test: bool = False) -> Brouillon:
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    with _ouvrir(inst, ecriture=True, mode=mode_demande(inst, mode_test)) as (depot, journal):
         return envoi_mod.rejeter(depot, journal, id_relance, nom, motif, maintenant=maintenant)
 
 
@@ -1769,7 +1860,7 @@ def envoyer_relance(
     en_mode_test = bool(mode_test) or config["mode_test"]
     envoyeur = exiger_validateur(inst, par) if par is not None else None
     creneau_libre, limite_hebdomadaire = reglages_envoi(config, en_mode_test)
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    with _ouvrir(inst, ecriture=True, mode="test" if en_mode_test else "reel") as (depot, journal):
         b = depot.charger_brouillon(id_relance)
         if b is not None and b.statut is StatutBrouillon.VALIDEE:
             _controler_avant_envoi(depot, journal, b, maintenant, limite_hebdomadaire=limite_hebdomadaire)
@@ -1805,7 +1896,7 @@ def trancher_envoi(instance: Instance | Path | str, id_relance: str, par: str, *
     test sans `responsables.txt`, repli sur les validateurs (journal `repli_roles_mode_test`)."""
     inst = Instance.de(instance)
     nom, repli = _nom_responsable(inst, par, mode_test)
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    with _ouvrir(inst, ecriture=True, mode=mode_demande(inst, mode_test)) as (depot, journal):
         if repli:
             _noter_repli_roles(journal, nom, "trancher", maintenant)
         tranche = envoi_mod.trancher_envoi_incertain(
@@ -1857,6 +1948,9 @@ def rattacher_piece(
     (`rattachement_refuse`). Sans decision de routage (`message_id` absent), il n'y a pas
     de dossier d'origine a comparer.
 
+    Une `id_piece` deja rattachee a une piece d'un AUTRE dossier est refusee, `forcer` compris
+    (`rattachement_refuse`) : un fichier n'appartient qu'a un seul dossier.
+
     `forcer=True` est reserve au RESPONSABLE (`responsables.txt`, cahier v1.1 section 7, regle 7) :
     le cycle l'exige lui-meme, pas seulement l'ecran. Verifie AVANT toute ecriture et AVANT le
     motif : un simple validateur est refuse (`ValidateurRefuse`), sans effet ni entree
@@ -1872,7 +1966,7 @@ def rattacher_piece(
     else:
         nom = exiger_validateur(inst, par)
     aujourdhui = _jour_local(maintenant)
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    with _ouvrir(inst, ecriture=True, mode=mode_demande(inst, mode_test)) as (depot, journal):
         notes = _Notes(journal, maintenant)
         entree: DecisionRoutage | None = None
         force_depuis: str | None = None
@@ -1915,6 +2009,23 @@ def rattacher_piece(
         if not (dossier and reference and id_piece):
             raise ErreurCycle("dossier, reference et piece sont obligatoires")
         with _transaction(depot, notes):
+            # Un fichier (id_piece) n'appartient qu'a UN dossier, avec ou sans decision de routage,
+            # `forcer` compris : il n'existe pas de detachement. Le proprietaire est lu dans
+            # `pieces_rattachees` de toutes les pieces attendues.
+            proprietaire = next((p2 for p2 in depot.charger_pieces()
+                                 if p2.dossier != dossier and id_piece.strip() in p2.pieces_rattachees), None)
+            if proprietaire is not None:
+                journal.ecrire(nom, "rattachement_refuse", id_piece.strip(), {
+                    "raison": "id_piece deja rattachee a un autre dossier",
+                    "dossier_proprietaire": proprietaire.dossier, "dossier_cible": dossier,
+                    "reference_proprietaire": proprietaire.reference, "forcer": bool(forcer),
+                }, horodatage=maintenant)
+                raise ErreurCycle(
+                    f"rattachement refuse : la piece {affichable(id_piece.strip())!r} est deja rattachee au "
+                    f"dossier {affichable(proprietaire.dossier)} (reference {affichable(proprietaire.reference)}) "
+                    f"et ne peut pas l'etre au dossier {affichable(dossier)} : un fichier n'appartient qu'a un "
+                    "dossier, meme avec --forcer (aucun detachement)"
+                )
             piece = _piece(depot, dossier, reference)
             nouvelle = _transition(piece, Evenement.PIECE_RATTACHEE, aujourdhui, notes, acteur=nom,
                                    id_piece=id_piece, confirme_par=nom)
@@ -1935,11 +2046,12 @@ def rattacher_piece(
 
 
 def controler_piece(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
-                    conforme: bool, maintenant: dt.datetime, motif: str = "") -> PieceAttendue:
+                    conforme: bool, maintenant: dt.datetime, motif: str = "",
+                    mode_test: bool = False) -> PieceAttendue:
     inst = Instance.de(instance)
     nom = exiger_validateur(inst, par)
     aujourdhui = _jour_local(maintenant)
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    with _ouvrir(inst, ecriture=True, mode=mode_demande(inst, mode_test)) as (depot, journal):
         notes = _Notes(journal, maintenant)
         with _transaction(depot, notes):
             piece = _piece(depot, dossier, reference)
@@ -1974,6 +2086,8 @@ def _decision_sur_piece(
     deja_fait: Callable[[PieceAttendue], bool],
     action: str,
     details: Mapping[str, Any],
+    *,
+    mode_test: bool = False,
     **contexte: Any,
 ) -> PieceAttendue:
     """Squelette commun : validateur declare, piece existante, transition `etats`,
@@ -1985,7 +2099,7 @@ def _decision_sur_piece(
     if not isinstance(maintenant, dt.datetime) or maintenant.utcoffset() is None:
         raise ValueError("maintenant doit etre un datetime avec fuseau")
     aujourdhui = _jour_local(maintenant)
-    with _ouvrir(inst, ecriture=True) as (depot, journal):
+    with _ouvrir(inst, ecriture=True, mode=mode_demande(inst, mode_test)) as (depot, journal):
         notes = _Notes(journal, maintenant)
         with _transaction(depot, notes):
             piece = _piece(depot, dossier, reference)
@@ -2000,14 +2114,15 @@ def _decision_sur_piece(
 
 
 def saisir_promesse(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
-                    date_promesse: dt.date, maintenant: dt.datetime) -> PieceAttendue:
+                    date_promesse: dt.date, maintenant: dt.datetime, mode_test: bool = False) -> PieceAttendue:
     """`PROMESSE_SAISIE` : DEMANDEE -> PROMISE (date dans [aujourdhui, +15 j], garde `etats`)."""
     if isinstance(date_promesse, dt.datetime) or not isinstance(date_promesse, dt.date):
         raise ErreurCycle("la date promise doit etre une date AAAA-MM-JJ")
     return _decision_sur_piece(
         instance, par, dossier, reference, maintenant, Evenement.PROMESSE_SAISIE,
         lambda p: p.etat is EtatPiece.PROMISE and p.date_promesse == date_promesse,
-        "promesse_saisie", {"date_promesse": date_promesse}, date_promesse=date_promesse,
+        "promesse_saisie", {"date_promesse": date_promesse}, mode_test=mode_test,
+        date_promesse=date_promesse,
     )
 
 
@@ -2022,17 +2137,18 @@ def arbitrer_piece(instance: Instance | Path | str, dossier: str, reference: str
         raise ErreurCycle("arbitrer : --motif obligatoire et non vide")
     nom, repli = _nom_responsable(Instance.de(instance), par, mode_test)
     if repli:
-        with _ouvrir(Instance.de(instance), ecriture=True) as (_, journal):
+        with _ouvrir(Instance.de(instance), ecriture=True,
+                     mode=mode_demande(instance, mode_test)) as (_, journal):
             _noter_repli_roles(journal, nom, "arbitrer", maintenant)
     return _decision_sur_piece(
         instance, par, dossier, reference, maintenant, Evenement.ARBITRAGE_CLASSEMENT,
         lambda p: p.etat is EtatPiece.CLOSE_SANS_SUITE,
-        "arbitrage", {"motif": motif.strip()}, arbitre_par=nom, motif=motif.strip(),
+        "arbitrage", {"motif": motif.strip()}, mode_test=mode_test, arbitre_par=nom, motif=motif.strip(),
     )
 
 
 def bloquer_piece(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
-                  motif: str, maintenant: dt.datetime) -> PieceAttendue:
+                  motif: str, maintenant: dt.datetime, mode_test: bool = False) -> PieceAttendue:
     """`BLOCAGE_SIGNALE` : la piece n'est plus relancee tant qu'un humain ne la debloque pas."""
     if not isinstance(motif, str) or not motif.strip():
         raise ErreurCycle("bloquer : --motif obligatoire et non vide")
@@ -2042,12 +2158,12 @@ def bloquer_piece(instance: Instance | Path | str, dossier: str, reference: str,
     return _decision_sur_piece(
         instance, par, dossier, reference, maintenant, Evenement.BLOCAGE_SIGNALE,
         lambda p: p.bloquee and p.motif_blocage == motif,
-        "blocage", {"motif": motif}, motif=motif,
+        "blocage", {"motif": motif}, mode_test=mode_test, motif=motif,
     )
 
 
 def debloquer_piece(instance: Instance | Path | str, dossier: str, reference: str, par: str, *,
-                    motif: str, maintenant: dt.datetime) -> PieceAttendue:
+                    motif: str, maintenant: dt.datetime, mode_test: bool = False) -> PieceAttendue:
     """`BLOCAGE_LEVE`. Leve aussi un blocage pose par le cycle : la decision humaine est
     memorisee et le cycle ne rebloque plus cette piece pour le meme constat du moteur."""
     if not isinstance(motif, str) or not motif.strip():
@@ -2055,7 +2171,7 @@ def debloquer_piece(instance: Instance | Path | str, dossier: str, reference: st
     return _decision_sur_piece(
         instance, par, dossier, reference, maintenant, Evenement.BLOCAGE_LEVE,
         lambda p: not p.bloquee,
-        "deblocage", {"motif": motif.strip()},
+        "deblocage", {"motif": motif.strip()}, mode_test=mode_test,
     )
 
 
@@ -2212,10 +2328,14 @@ class ControleEnvois:
     raison_chaine: str
     nb_entrees: int
     lignes: tuple[LigneControleEnvoi, ...]
+    # Ecarts qui ne se rattachent a aucune ligne d'envoi du journal : .eml de l'outbox sans trace,
+    # brouillon ENVOYEE en base sans entree au journal...
+    ecarts: tuple[str, ...] = ()
 
     @property
     def nb_anomalies(self) -> int:
-        return sum(1 for l in self.lignes if l.anomalies) + (0 if self.chaine_ok else 1)
+        return (sum(1 for l in self.lignes if l.anomalies) + len(self.ecarts)
+                + (0 if self.chaine_ok else 1))
 
     @property
     def ok(self) -> bool:
@@ -2226,6 +2346,7 @@ class ControleEnvois:
         for l in self.lignes:
             sortie.append(f"{l.id_relance:18s} {l.valide_par or '-':16s} {l.envoye_le:26s} "
                           f"{l.envoye_par or '-':14s} {l.nature:9s} {l.verdict}")
+        sortie += [f"ECART : {affichable(e)}" for e in self.ecarts]
         sortie.append(f"chaine du journal : {'saine' if self.chaine_ok else 'NON SAINE'} "
                       f"({self.nb_entrees} entree(s)) ; {self.raison_chaine}")
         sortie.append(f"{len(self.lignes)} envoi(s) controle(s), {self.nb_anomalies} anomalie(s)")
@@ -2233,14 +2354,22 @@ class ControleEnvois:
 
 
 def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
-    """Recette de CA-06, LECTURE SEULE : pour CHAQUE envoi du journal (`envoi_effectue`, et
-    `envoi_confirme_par_humain` quand un humain a tranche un envoi incertain) il doit exister
-    une entree `valide` ANTERIEURE du MEME brouillon, par un nom de `validateurs.txt` ou
-    `responsables.txt`, avec le MEME destinataire. Verifie aussi que `valide_par` de l'envoi
-    est celui de la validation, qu'aucun brouillon n'est parti deux fois, et que `envoye_par`,
-    s'il est nominatif, est un nom declare. La chaine de hachage est verifiee d'abord : un
-    journal non sain est une anomalie a part entiere (les lignes sont alors analysees
-    quand meme, au mieux). Ne cree ni n'ecrit rien."""
+    """Recette de CA-06, LECTURE SEULE. Pour CHAQUE envoi du journal (`envoi_effectue`, et
+    `envoi_confirme_par_humain` quand un humain a tranche un envoi incertain) :
+
+    - une entree `valide` ANTERIEURE du MEME brouillon, par un nom de `validateurs.txt` ou
+      `responsables.txt`, avec le MEME destinataire, et `valide_par` de l'envoi identique ;
+    - aucun `rejete` anterieur du meme brouillon, aucun envoi en double ;
+    - le brouillon existe EN BASE, au statut ENVOYEE, avec le meme `valide_par` (une paire
+      `valide` + `envoi` forgee mais correctement chainee, pour un brouillon absent ou non
+      envoye, est une anomalie) ;
+    - `envoye_par` NOMINATIF (un `envoi_effectue` sans declencheur nomme est une anomalie) et
+      declare.
+    Et, dans l'autre sens : chaque `.eml` de `outbox/` doit avoir son entree d'envoi au journal
+    (sinon « .eml sans trace » ; un envoi incertain non tranche est signale comme tel), et
+    chaque brouillon ENVOYEE en base doit avoir ses entrees `valide` ET d'envoi.
+    La chaine de hachage est verifiee d'abord : un journal non sain est une anomalie a part
+    entiere (les lignes sont alors analysees quand meme, au mieux). Ne cree ni n'ecrit rien."""
     inst = Instance.de(instance)
     if not inst.audit.exists():
         return ControleEnvois(False, "fichier du journal absent", 0, ())
@@ -2250,7 +2379,11 @@ def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
         entrees = journal.lire()
     except JournalCorrompu as exc:
         return ControleEnvois(False, f"{verification.raison} ; lecture impossible : {exc}", 0, ())
-    autorises = {n.casefold() for n in (*lire_validateurs(inst), *lire_responsables(inst))}
+    autorises = {_cle_nom(n) for n in (*lire_validateurs(inst), *lire_responsables(inst))}
+    en_base: dict[str, Brouillon] = {}
+    if inst.depot.exists():
+        with Depot(inst.depot) as depot:
+            en_base = {b.id_relance: b for b in depot.lister_brouillons()}
     types_d_envoi = {"envoi_effectue": "effectue", "envoi_confirme_par_humain": "confirme"}
     envois = [e for e in entrees if e.action in types_d_envoi]
     nombre = Counter(e.objet for e in envois)
@@ -2263,27 +2396,61 @@ def controler_envois(instance: Instance | Path | str) -> ControleEnvois:
             anomalies.append("aucune entree `valide` anterieure pour ce brouillon")
         else:
             v = valides[-1]
-            valide_par = str(v.details.get("par") or v.acteur)
-            if valide_par.casefold() not in autorises:
+            valide_par = normaliser_nom(str(v.details.get("par") or v.acteur))
+            if _cle_nom(valide_par) not in autorises:
                 anomalies.append(f"valide par {valide_par!r}, absent de validateurs.txt et responsables.txt")
-            if v.acteur.casefold() != valide_par.casefold():
+            if _cle_nom(v.acteur) != _cle_nom(valide_par):
                 anomalies.append(f"acteur de la validation ({v.acteur!r}) different de `par` ({valide_par!r})")
             if v.details.get("destinataire") != e.details.get("destinataire"):
                 anomalies.append(f"destinataire valide {v.details.get('destinataire')!r}, "
                                  f"envoye a {e.details.get('destinataire')!r}")
-            if str(e.details.get("valide_par", "")).casefold() != valide_par.casefold():
+            if _cle_nom(str(e.details.get("valide_par", ""))) != _cle_nom(valide_par):
                 anomalies.append(f"`valide_par` de l'envoi ({e.details.get('valide_par')!r}) "
                                  f"different de la validation ({valide_par!r})")
+        rejetes = [x for x in entrees if x.action == "rejete" and x.objet == e.objet and x.seq < e.seq]
+        if rejetes:
+            anomalies.append(f"brouillon rejete (entree {rejetes[0].seq}) puis envoye")
         if nombre[e.objet] > 1:
             anomalies.append(f"brouillon envoye {nombre[e.objet]} fois")
+        brouillon = en_base.get(e.objet)
+        if brouillon is None:
+            anomalies.append("brouillon absent de la base")
+        elif brouillon.statut is not StatutBrouillon.ENVOYEE:
+            anomalies.append(f"brouillon au statut {brouillon.statut.value} en base, pas envoyee")
+        elif _cle_nom(brouillon.valide_par) != _cle_nom(str(e.details.get("valide_par", ""))):
+            anomalies.append(f"`valide_par` en base ({brouillon.valide_par!r}) different du journal "
+                             f"({e.details.get('valide_par')!r})")
         envoye_par = e.details.get("envoye_par")
-        if envoye_par is not None and str(envoye_par).casefold() not in autorises:
+        if e.action == "envoi_effectue" and (envoye_par is None or not str(envoye_par).strip()):
+            anomalies.append("envoi non nominatif (`envoye_par` absent : qui l'a declenche ?)")
+        elif envoye_par is not None and _cle_nom(str(envoye_par)) not in autorises:
             anomalies.append(f"envoye par {envoye_par!r}, absent de validateurs.txt et responsables.txt")
         lignes.append(LigneControleEnvoi(
             id_relance=e.objet, destinataire=str(e.details.get("destinataire", "")), valide_par=valide_par,
             envoye_le=e.horodatage, envoye_par=str(envoye_par) if envoye_par is not None else "",
             nature=types_d_envoi[e.action], anomalies=tuple(anomalies)))
-    return ControleEnvois(verification.ok, verification.raison, len(entrees), tuple(lignes))
+
+    ecarts: list[str] = []
+    traces = {e.objet for e in envois}
+    for fichier in sorted(inst.outbox.glob("*.eml")):
+        if fichier.stem in traces:
+            continue
+        b = en_base.get(fichier.stem)
+        if b is not None and b.statut is StatutBrouillon.EN_COURS:
+            ecarts.append(f"outbox/{fichier.name} : envoi incertain non tranche (brouillon EN_COURS), "
+                          "a trancher par un responsable")
+        else:
+            ecarts.append(f"outbox/{fichier.name} : .eml sans trace dans le journal "
+                          "(aucune entree d'envoi pour ce brouillon)")
+    validees = {e.objet for e in entrees if e.action == "valide"}
+    for id_relance, b in sorted(en_base.items()):
+        if b.statut is not StatutBrouillon.ENVOYEE:
+            continue
+        manque = [nom for nom, present in (("valide", id_relance in validees),
+                                           ("envoi_effectue", id_relance in traces)) if not present]
+        if manque:
+            ecarts.append(f"brouillon {id_relance} ENVOYEE en base sans entree {' ni '.join(manque)} au journal")
+    return ControleEnvois(verification.ok, verification.raison, len(entrees), tuple(lignes), tuple(ecarts))
 
 
 @dataclass(frozen=True)
@@ -2301,6 +2468,12 @@ def reparer_audit(instance: Instance | Path | str, par: str, *,
     (idempotent). Journal altere AILLEURS qu'en fin : `audit.JournalCorrompu` remonte
     tel quel, sans rien modifier (reparer effacerait la preuve d'une falsification)."""
     inst = Instance.de(instance)
+    enregistre, demande = mode_instance(inst), mode_demande(inst, mode_test)
+    if enregistre is not None and enregistre != demande:     # avant tout, comme `_ouvrir`
+        raise ModeInstanceIncompatible(
+            f"cette instance a ete creee en mode {enregistre} (operation demandee en mode {demande}) ; "
+            "pour changer, creer une nouvelle instance"
+        )
     nom, repli = _nom_responsable(inst, par, mode_test)     # operation de RESPONSABLE (A14)
     if not isinstance(maintenant, dt.datetime) or maintenant.utcoffset() is None:
         raise ValueError("maintenant doit etre un datetime avec fuseau")
@@ -2349,6 +2522,7 @@ __all__ = [
     "JournalNonSain",
     "LigneControleEnvoi",
     "LigneSuivi",
+    "ModeInstanceIncompatible",
     "ReparationAudit",
     "ResumeCycle",
     "STRATEGIES_ISOLATION",
@@ -2380,6 +2554,9 @@ __all__ = [
     "lire_responsables",
     "lire_validateurs",
     "lister_file",
+    "mode_demande",
+    "mode_instance",
+    "normaliser_nom",
     "pieces",
     "rattacher_piece",
     "reglages_envoi",
