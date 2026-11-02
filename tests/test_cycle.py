@@ -1605,7 +1605,13 @@ def test_entrees_illisibles_refus_lisible(tmp_path, capsys, inst):
 # ---------------------------------------------------------------------------
 
 import multiprocessing  # noqa: E402
-import resource  # noqa: E402
+try:
+    import resource  # noqa: E402  (POSIX seulement : absent sous Windows)
+except ImportError:                                     # pragma: no cover - Windows
+    resource = None
+
+posix_seulement = pytest.mark.skipif(
+    sys.platform == "win32", reason="isolation par fork et limites rlimit : POSIX seulement")
 
 MEMOIRE_TEST = 256 * 1024 ** 2
 CPU_TEST = 2
@@ -1634,7 +1640,7 @@ def _enfants_vivants() -> list[str]:
 
 
 def _rss_parent_ko() -> int:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if resource else 0
 
 
 def lancer_borne(entree: Path, inst: cycle.Instance, d: dt.date = J0) -> cycle.ResumeCycle:
@@ -1642,6 +1648,7 @@ def lancer_borne(entree: Path, inst: cycle.Instance, d: dt.date = J0) -> cycle.R
                                 limite_cpu_eml=CPU_TEST)
 
 
+@posix_seulement
 def test_attaques_mesurees_en_quarantaine_le_reste_du_lot_traite(entree, inst):
     attaques = {
         "a-partie-109k.eml": _partie_nom_encode(8000, "p109@x"),
@@ -1674,6 +1681,7 @@ def test_attaques_mesurees_en_quarantaine_le_reste_du_lot_traite(entree, inst):
 
 
 @pytest.mark.parametrize("n", [8000, 16000])                         # 112 Ko puis 224 Ko
+@posix_seulement
 def test_from_quadratique_borne_meme_sans_le_premier_filtre(entree, inst, monkeypatch, n):
     monkeypatch.setattr(cycle, "TAILLE_MAX_EN_TETES_EML", 10 * 1024 * 1024)   # 2e ligne de defense seule
     (inst.entrant / "lourd.eml").write_bytes(
@@ -1697,6 +1705,7 @@ def test_from_quadratique_borne_meme_sans_le_premier_filtre(entree, inst, monkey
     "de la lecture isolee, l'en-tete From quadratique n'est pas mis en quarantaine mais lu comme "
     "un expediteur vide (DOSSIER_INCONNU, file humaine). Sans danger pour le routage, mais "
     "l'epuisement de ressources est deguise en en-tete malforme."))
+@posix_seulement
 def test_defaut_routage_avale_memoryerror_de_l_en_tete_from(entree, inst, monkeypatch):
     monkeypatch.setattr(cycle, "TAILLE_MAX_EN_TETES_EML", 10 * 1024 * 1024)
     (inst.entrant / "lourd.eml").write_bytes(
@@ -1711,6 +1720,7 @@ def test_defaut_routage_avale_memoryerror_de_l_en_tete_from(entree, inst, monkey
     ("memoire", "MemoryError"),
     ("sortie", "code de sortie 3"),
 ])
+@posix_seulement
 def test_lecture_isolee_chaque_echec_devient_une_quarantaine(entree, inst, monkeypatch,
                                                            comportement, attendu):
     from rapprochement import routage
