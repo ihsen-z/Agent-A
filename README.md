@@ -161,8 +161,13 @@ py -3.11 scripts\cycle.py valider --instance instance --par "Alice Durand" <id_b
 py -3.11 scripts\cycle.py envoyer --instance instance --par "Alice Durand" <id_brouillon>
 ```
 
-La lecture isolée des e-mails est limitée en temps (pas en mémoire) sous Windows, et
-elle n'y a été **simulée** que sous Linux, jamais exécutée sur Windows : voir
+La lecture isolée des e-mails est limitée en temps (pas en mémoire) sous Windows. La suite
+de tests a été exécutée sur de vrais runners Windows (GitHub Actions, `windows-latest`,
+Python 3.11 et 3.13) : elle y passe, mais avec trois réserves. Les cycles hors mode test y
+sont testés avec la lecture « directe » (le produit les refuse sous Windows : utilisez
+le mode test). Une quinzaine de tests propres à POSIX (`fork`, `/proc`, `fcntl`, noms de
+fichier illégaux sous Windows) y sont ignorés. Et personne n'a encore déroulé la procédure
+ci-dessus à la main sur un poste Windows : voir
 [docs/application_web.md](docs/application_web.md) et le workflow d'intégration
 continue (`.github/workflows/tests.yml`), qui exécute la suite sur Windows à chaque
 poussée.
@@ -171,6 +176,7 @@ poussée.
 
 ```bash
 python3 scripts/web.py creer-utilisateur --instance instance --identifiant alice --nom "Alice Durand" --role responsable
+# (le mot de passe est demandé deux fois, au clavier)
 python3 scripts/web.py servir --instance instance        # puis ouvrir http://127.0.0.1:8000
 ```
 
