@@ -12,6 +12,7 @@ Les tests marques `xfail(strict=True)` reproduisent un defaut d'un AUTRE module.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import io
@@ -1297,10 +1298,9 @@ def test_config_invalide_signalee_sur_chaque_page(app, inst):
     for chemin in ("/", "/pieces", "/inexistant"):
         texte = alice.get(chemin).texte
         assert 'class="bandeau-alerte"' in texte and "config.json" in texte and "MODE TEST" not in texte
-    r = alice.action(f"/brouillons/{ID_BROUILLON}/valider")
-    assert r.statut == 303                                         # valider ne lit pas la configuration
-    r = alice.action(f"/brouillons/{ID_BROUILLON}/envoyer", {"confirmation": "oui"})
-    assert r.statut == 409 and "config.json" in r.texte and emls(inst) == []
+    r = alice.action(f"/brouillons/{ID_BROUILLON}/valider")       # le mode demande se lit dans config.json
+    assert r.statut == 409 and "config.json" in r.texte and "Traceback" not in r.texte
+    assert brouillon(inst).statut is StatutBrouillon.BROUILLON and emls(inst) == []
 
 
 def test_roles_alignes_web_et_cycle_defense_en_profondeur(app, inst):
@@ -1356,3 +1356,124 @@ def test_roles_et_listes_du_cycle(tmp_path, monkeypatch, capsys):
     assert cycle.lire_responsables(inst) == () and cycle.lire_validateurs(inst) == ("Rita Roy",)
     assert cli.main(["changer-role", *base, "--identifiant", "personne", "--role", "comptable"]) == 1
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# Noyau durci : mode fige par instance, id_piece unique, ecarts, refus de lecture, noms NFC
+# ---------------------------------------------------------------------------
+
+
+def _figer_mode(inst: cycle.Instance, *modes: str) -> None:
+    """Simule le marqueur que le premier cycle pose dans le depot (`cycle.CLE_MODE_INSTANCE`)."""
+    with Depot(inst.depot) as d:
+        for m in modes:
+            d.marquer_vu(cycle.CLE_MODE_INSTANCE + m)
+
+
+def test_mode_de_l_instance_affiche(app, inst):
+    alice = connecte(app, ALICE)
+    assert "Instance : mode non figé (aucun cycle)" in alice.get("/").texte
+    _figer_mode(inst, "reel")
+    for r in (alice.get("/"), alice.get("/pieces"), Client(app).get("/connexion")):
+        assert "Instance : mode réel" in r.texte and "MODE TEST" not in r.texte
+
+
+def test_mode_incompatible_refus_lisible_jamais_500(app, inst):
+    _figer_mode(inst, "reel")
+    (inst.racine / "config.json").write_text(json.dumps({"mode_test": True}), encoding="utf-8")
+    alice = connecte(app, ALICE)
+    texte = alice.get("/").texte
+    assert "créée en mode reel mais config.json demande le mode test" in texte
+    avant = instantane(inst)
+    for chemin, donnees in ((f"/brouillons/{ID_BROUILLON}/valider", {}),
+                            (f"/brouillons/{ID_BROUILLON}/rejeter", {"motif": "x"}),
+                            ("/pieces/bloquer", {"dossier": "ALPHA", "reference": "A-001", "motif": "m"}),
+                            ("/pieces/arbitrer", {"dossier": "BETA", "reference": "B-001", "motif": "m"}),
+                            ("/non-rattaches/confirmer", {"cle": cle_entree("<m2@gamma-eurl.fr>", EMPREINTE_PR)})):
+        r = alice.action(chemin, donnees)
+        assert r.statut == 409, chemin
+        assert "figé depuis son premier cycle" in r.texte and "créée en mode reel" in r.texte, chemin
+    etat, *_ = instantane(inst)
+    assert etat[:4] == avant[0][:4]
+
+
+def test_instance_de_test_garde_son_bandeau(app, inst):
+    _figer_mode(inst, "test")
+    alice = connecte(app, ALICE)
+    texte = alice.get("/").texte
+    assert "MODE TEST : DONNEES FICTIVES" in texte and "Instance : mode test" in texte
+    assert "créée en mode test mais config.json demande le mode reel" in texte
+
+
+def test_mode_incoherent_signale(app, inst):
+    _figer_mode(inst, "test", "reel")
+    alice = connecte(app, ALICE)
+    texte = alice.get("/").texte
+    assert 'class="bandeau-alerte"' in texte and "incoherent" in texte
+    assert alice.action(f"/brouillons/{ID_BROUILLON}/valider").statut == 409
+
+
+def test_id_piece_deja_rattachee_a_un_autre_dossier_meme_force(app, inst):
+    deja = dataclasses.replace(piece(inst, "BETA", "B-001"),
+                               pieces_rattachees=(f"facture-2026-09.pdf#{EMPREINTE_PR[:12]}",))
+    with Depot(inst.depot) as d:
+        d.sauver_pieces([deja])
+    alice = connecte(app, ALICE)
+    cle = cle_entree("<m2@gamma-eurl.fr>", EMPREINTE_PR)
+    r = alice.action("/non-rattaches/confirmer", {"cle": cle, "dossier": "ALPHA", "reference": "A-001",
+                                                   "forcer": "oui", "motif": "transfert voulu"})
+    assert r.statut == 409 and "deja rattachee au dossier BETA" in r.texte and "Traceback" not in r.texte
+    assert piece(inst, "ALPHA", "A-001").etat is EtatPiece.ATTENDUE
+    r = alice.action("/non-rattaches/confirmer", {"cle": cle})
+    assert r.statut == 409 and "BETA" in r.texte
+    assert piece(inst, "GAMMA", "G-001").etat is EtatPiece.ATTENDUE
+
+
+def test_ecarts_du_controle_des_envois_affiches(app, inst):
+    (inst.outbox / "orphelin.eml").write_bytes(b"From: x\n\nsans trace")
+    cycle.valider_relance(inst, ID_BROUILLON, NOM_BOB, maintenant=LUNDI_10H)
+    cycle.envoyer_relance(inst, ID_BROUILLON, maintenant=LUNDI_10H)        # sans `par` : non nominatif
+    page = connecte(app, ALICE).get("/audit").texte
+    assert "Écarts hors journal" in page and "outbox/orphelin.eml : .eml sans trace dans le journal" in page
+    assert "envoi non nominatif" in page and "Anomalie" in page
+
+
+def test_fichier_d_entree_refuse_affiche_lisiblement(inst, horloge, tmp_path):
+    entree = tmp_path / "entree"
+    entree.mkdir()
+    (entree / "dossiers.csv").write_text(
+        "dossier,raison_sociale,email_contact,nom_contact,jour_echeance_tva,ton_relance\n"
+        "ALPHA,Alpha,a@x.fr,M,15,courtois\nALPHA,Alpha bis,b@x.fr,M,15,courtois\n", encoding="utf-8")
+    app = Application(inst, horloge=horloge, entree=entree)
+    try:
+        r = connecte(app, ALICE).get(f"/brouillons/{ID_BROUILLON}")
+        assert r.statut == 200 and "Fichier d’entrée refusé" in r.texte and "declare deux fois" in r.texte
+        assert "inconnu (ALPHA)" in r.texte
+    finally:
+        app.fermer()
+
+
+def test_erreur_de_format_pendant_une_action_donne_409(app, monkeypatch):
+    from rapprochement.parseurs import ErreurFormat
+
+    def refus(*a, **k):
+        raise ErreurFormat("exclusions_dossier.csv : colonne inconnue <b>statu</b>")
+
+    monkeypatch.setattr(cycle, "valider_relance", refus)
+    r = connecte(app, BOB).action(f"/brouillons/{ID_BROUILLON}/valider")
+    assert r.statut == 409 and "fichier d’entrée est illisible" in r.texte
+    assert "colonne inconnue &lt;b&gt;statu&lt;/b&gt;" in r.texte and "Traceback" not in r.texte
+
+
+def test_noms_normalises_nfc(tmp_path):
+    import unicodedata
+
+    inst = cycle.Instance(tmp_path / "inst")
+    inst.preparer()
+    nfd = unicodedata.normalize("NFD", "  Hélène Côté ")
+    inst.validateurs.write_text(unicodedata.normalize("NFD", "Hélène Côté") + "\n", encoding="utf-8")
+    u = comptes.creer_utilisateur(inst, "helene", nfd, comptes.RESPONSABLE, "un-long-mot-de-passe")
+    assert u.nom == "Hélène Côté" and unicodedata.is_normalized("NFC", u.nom)
+    assert len(cycle.lire_validateurs(inst)) == 1                  # pas de doublon NFC/NFD
+    assert cycle.lire_responsables(inst) == ("Hélène Côté",)
+    assert cycle.exiger_responsable(inst, nfd) == "Hélène Côté"

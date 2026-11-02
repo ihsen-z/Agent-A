@@ -126,6 +126,9 @@ a:hover { color: var(--accent-fonce); }
   font-weight: 600;
   box-shadow: inset 0 -2px 0 var(--accent);
 }
+.mode-instance { margin: 0; font-size: .85rem; color: var(--encre-douce); border: 1px dashed var(--bord); border-radius: var(--rayon); padding: .1rem .5rem; }
+.ecarts li { margin: .35rem 0; }
+h3 { font-size: 1rem; margin: .75rem 0 .25rem; }
 .compte { margin-left: auto; display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
 .compte p { margin: 0; }
 .compte-nom { font-weight: 600; }

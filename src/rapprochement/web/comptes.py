@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import etats
-from ..cycle import Instance
+from ..cycle import Instance, normaliser_nom
 
 FICHIER_UTILISATEURS = "utilisateurs.json"
 ALGORITHME = "pbkdf2_sha256"
@@ -124,7 +124,7 @@ def exiger_nom(nom: str) -> str:
     """Le nom affiche devient une ligne de validateurs.txt : une seule ligne, sans controle."""
     if not isinstance(nom, str):
         raise ErreurCompte("nom affiche obligatoire")
-    propre = unicodedata.normalize("NFC", nom.strip())
+    propre = normaliser_nom(nom)                 # NFC et espaces de bord : meme forme que le cycle
     if not propre:
         raise ErreurCompte("nom affiche obligatoire")
     if len(propre) > LONGUEUR_MAX_NOM:
@@ -219,10 +219,10 @@ def _lignes(chemin: Path) -> list[str]:
 def _ajouter_nom(chemin: Path, nom: str) -> bool:
     """Ajoute `nom` a une liste de noms s'il n'y est pas (insensible a la casse). True si ajoute."""
     lignes = _lignes(chemin)
-    cherche = nom.strip().casefold()
-    if any(l.strip().casefold() == cherche for l in lignes if not l.strip().startswith("#")):
+    cherche = normaliser_nom(nom).casefold()
+    if any(normaliser_nom(l).casefold() == cherche for l in lignes if not l.strip().startswith("#")):
         return False
-    lignes.append(nom.strip())
+    lignes.append(normaliser_nom(nom))
     ecrire_atomique(chemin, ("\n".join(lignes) + "\n").encode("utf-8"))
     return True
 
@@ -230,8 +230,8 @@ def _ajouter_nom(chemin: Path, nom: str) -> bool:
 def _retirer_nom(chemin: Path, nom: str) -> bool:
     """Retire toute ligne egale a `nom` (insensible a la casse ; commentaires gardes). True si retire."""
     lignes = _lignes(chemin)
-    cherche = nom.strip().casefold()
-    gardees = [l for l in lignes if l.strip().startswith("#") or l.strip().casefold() != cherche]
+    cherche = normaliser_nom(nom).casefold()
+    gardees = [l for l in lignes if l.strip().startswith("#") or normaliser_nom(l).casefold() != cherche]
     if len(gardees) == len(lignes):
         return False
     ecrire_atomique(chemin, ("\n".join(gardees) + "\n" if gardees else "").encode("utf-8"))

@@ -70,6 +70,7 @@ _NONCE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 ERREURS_DOMAINE: tuple[type[BaseException], ...] = (
     cycle.ErreurCycle, EnvoiNonValide, EnvoiHorsCreneau, ErreurEnvoi, TransitionInterdite,
     JournalCorrompu, ErreurBase, VersionSchemaInconnue, ErreurCompte,
+    ErreurFormat,              # fichier d'entree illisible (exclusions, avoir, doublon de dossier...)
 )
 
 
@@ -413,16 +414,32 @@ class Application:
             return False
         return isinstance(donnees, dict) and donnees.get("mode_test") is True
 
-    def _cadre(self) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
-        """(mode test, garde-fous d'envoi coupes, alertes) pour le bandeau de CHAQUE page.
+    def _cadre(self) -> tuple[bool, tuple[str, ...], tuple[str, ...], str | None]:
+        """(mode test, garde-fous d'envoi coupes, alertes, mode fige de l'instance) pour le
+        cadre de CHAQUE page.
 
-        Les garde-fous coupes et l'avertissement sur les roles viennent de `cycle`
-        (`garde_fous_mode_test`, `avertissement_roles`) : memes regles que l'envoi."""
+        Le mode fige (`cycle.mode_instance`), les garde-fous coupes et l'avertissement sur les
+        roles viennent de `cycle` : memes regles que les operations d'ecriture."""
         mode = self.mode_test()
         garde_fous: tuple[str, ...] = ()
         alertes: list[str] = []
+        fige: str | None = None
+        try:
+            fige = cycle.mode_instance(self.instance)          # lecture seule ; None avant le 1er cycle
+        except cycle.ModeInstanceIncompatible as exc:
+            alertes.append(f"{exc}. Toute écriture est refusée.")
+        except Exception:  # noqa: BLE001 - le cadre ne doit jamais empecher d'afficher une page
+            self.journal.warning("cadre : mode de l'instance illisible", exc_info=True)
+        if fige == "test":
+            mode = True                                         # une instance de test reste de test
         try:
             cycle.charger_config(self.instance)               # valide config.json (ConfigInvalide)
+            demande = cycle.mode_demande(self.instance)
+            if fige is not None and fige != demande:
+                alertes.append(
+                    f"Cette instance a été créée en mode {fige} mais config.json demande le mode {demande} : "
+                    "toute décision est refusée. Le mode d’une instance ne change jamais ; pour changer, "
+                    "créer une nouvelle instance (ou rétablir config.json).")
             if mode:
                 garde_fous = tuple(cycle.garde_fous_mode_test(self.instance))
             avertissement = cycle.avertissement_roles(self.instance)
@@ -432,14 +449,15 @@ class Application:
             alertes.append(f"{exc} Les envois et décisions sont refusés tant qu’il n’est pas corrigé.")
         except Exception:  # noqa: BLE001 - le bandeau ne doit jamais empecher d'afficher une page
             self.journal.warning("bandeau : lecture de la configuration impossible", exc_info=True)
-        return mode, garde_fous, tuple(alertes)
+        return mode, garde_fous, tuple(alertes), fige
 
     def _contexte(self, req: Requete | None, actif: str = "", csrf: str | None = None) -> Contexte:
         utilisateur = req.utilisateur if req is not None else None
         if csrf is None:
             csrf = req.session.csrf if req is not None and req.session is not None else ""
-        mode, garde_fous, alertes = self._cadre()
-        return Contexte(utilisateur, csrf, mode, actif, garde_fous=garde_fous, alertes=alertes)
+        mode, garde_fous, alertes, fige = self._cadre()
+        return Contexte(utilisateur, csrf, mode, actif, garde_fous=garde_fous, alertes=alertes,
+                        mode_instance=fige)
 
     def _html(self, contenu: str, statut: int = 200, entetes: list[tuple[str, str]] | None = None) -> Reponse:
         return Reponse(statut, contenu.encode("utf-8"), entetes=entetes or [])
@@ -499,14 +517,17 @@ class Application:
     def _aujourdhui(self) -> dt.date:
         return self.horloge().astimezone(FUSEAU).date()
 
-    def _dossiers(self) -> dict[str, Dossier]:
-        """Referentiel des dossiers (circuit, raison sociale), lu dans `--entree` s'il est fourni."""
-        if self.entree is None:
-            return {}
+    def _dossiers(self) -> tuple[dict[str, Dossier], str]:
+        """(referentiel des dossiers, message d'erreur) lu dans `--entree` s'il est fourni. Un
+        fichier refuse par `parseurs` (doublon de dossier...) donne un message lisible, jamais 500."""
+        if self.entree is None or not (self.entree / "dossiers.csv").exists():
+            return {}, ""
         try:
-            return lire_dossiers(self.entree / "dossiers.csv")
-        except (ErreurFormat, OSError, ValueError, KeyError):
-            return {}
+            return lire_dossiers(self.entree / "dossiers.csv"), ""
+        except ErreurFormat as exc:
+            return {}, f"Fichier d’entrée refusé : {exc}. Circuit et raison sociale non affichés."
+        except (OSError, ValueError, KeyError) as exc:
+            return {}, f"dossiers.csv illisible ({type(exc).__name__}) : circuit et raison sociale non affichés."
 
     def _action(self, req: Requete, nom: str, retour: str, appel: Callable[[], Any]) -> Any:
         """Execute une decision deleguee a `cycle` ; une erreur attendue devient une page 409."""
@@ -534,8 +555,9 @@ class Application:
         nonce = req.cookies.get(COOKIE_PRE, "")
         if not _NONCE.fullmatch(nonce):
             nonce = secrets.token_urlsafe(24)
-        mode, garde_fous, alertes = self._cadre()
-        ctx = Contexte(None, self._jeton_pre_session(nonce), mode, garde_fous=garde_fous, alertes=alertes)
+        mode, garde_fous, alertes, fige = self._cadre()
+        ctx = Contexte(None, self._jeton_pre_session(nonce), mode, garde_fous=garde_fous, alertes=alertes,
+                       mode_instance=fige)
         corps = pages.page_connexion(ctx, erreur=erreur, identifiant=identifiant)
         return self._html(corps, statut, [self._cookie(COOKIE_PRE, nonce)])
 
@@ -621,8 +643,9 @@ class Application:
 
     def get_brouillon(self, req: Requete, ident: str) -> Reponse:
         b, pieces = self._brouillon(ident)
-        contenu = pages.page_brouillon(self._contexte(req), b, pieces=pieces, dossiers=self._dossiers(),
-                                       envoye_par=self._envoye_par(ident))
+        dossiers, erreur_dossiers = self._dossiers()
+        contenu = pages.page_brouillon(self._contexte(req), b, pieces=pieces, dossiers=dossiers,
+                                       envoye_par=self._envoye_par(ident), erreur_dossiers=erreur_dossiers)
         return self._page(req, "brouillons", "Brouillon de relance", contenu)
 
     def get_envoyer(self, req: Requete, ident: str) -> Reponse:
@@ -835,6 +858,10 @@ _MESSAGES_TYPE = {
     "ValidateurRefuse": "Votre nom n’est pas déclaré dans la liste qu’exige cette opération (validateurs.txt ; "
                         "responsables.txt pour arbitrer, trancher un envoi ou réparer le journal) : décision refusée.",
     "ConfigInvalide": "config.json de l’instance est invalide : action refusée tant qu’il n’est pas corrigé.",
+    "ModeInstanceIncompatible": "Le mode de cette instance (test ou réel) est figé depuis son premier cycle et "
+                                "ne correspond pas au mode demandé : rien n’a été écrit.",
+    "ErreurFormat": "Un fichier d’entrée est illisible ou mal formé : corrigez-le puis recommencez. "
+                    "Rien n’a été écrit.",
     "EnvoiHorsCreneau": "Envoi hors créneau : les relances ne partent que les jours ouvrés, de 8 h à 18 h "
                         "(heure de Paris). Le brouillon reste validé.",
     "EnvoiLimiteHebdomadaire": "Limite d’un e-mail par destinataire sur 7 jours glissants atteinte.",

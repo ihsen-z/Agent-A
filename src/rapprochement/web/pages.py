@@ -201,7 +201,8 @@ class Contexte:
     mode_test: bool
     actif: str = ""
     garde_fous: tuple[str, ...] = ()      # garde-fous d'envoi coupes par le mode test
-    alertes: tuple[str, ...] = ()         # config.json invalide, repli des roles...
+    alertes: tuple[str, ...] = ()         # config.json invalide, repli des roles, mode incoherent...
+    mode_instance: str | None = None      # mode fige par le premier cycle (« test », « reel ») ou None
 
 
 _NAVIGATION = (
@@ -250,12 +251,14 @@ def document(ctx: Contexte, titre: str, contenu: Html, *, message: Html | None =
         '<link rel="stylesheet" href="/style.css"></head>'
         '<body><a class="evitement" href="#contenu">Aller au contenu</a>{bandeau}'
         '<header class="entete"><div class="entete-int">'
-        '<p class="marque"><a href="/">{app}</a></p>{nav}{compte}</div></header>'
+        '<p class="marque"><a href="/">{app}</a></p>{mode}{nav}{compte}</div></header>'
         '<main id="contenu" class="contenu"><h1>{titre}</h1>{message}{contenu}</main>'
         '<footer class="pied"><p>Aucun e-mail ne part sans la validation d’une personne nommée. '
         "Les envois sont déposés dans le dossier outbox/ de l’instance.</p></footer>"
         "</body></html>\n",
         titre=titre, app=NOM_APPLICATION, bandeau=bandeau, nav=navigation, compte=compte,
+        mode=gabarit('<p class="mode-instance">Instance : {m}</p>', m={
+            "test": "mode test", "reel": "mode réel"}.get(ctx.mode_instance or "", "mode non figé (aucun cycle)")),
         message=message if message is not None else Html(""), contenu=contenu,
     )
 
@@ -409,7 +412,7 @@ def _lignes_pieces_reclamees(b: Brouillon, pieces: Mapping[tuple[str, str], Piec
 
 
 def page_brouillon(ctx: Contexte, b: Brouillon, *, pieces: Mapping[tuple[str, str], PieceAttendue],
-                   dossiers: Mapping[str, Dossier], envoye_par: str = "") -> Html:
+                   dossiers: Mapping[str, Dossier], envoye_par: str = "", erreur_dossiers: str = "") -> Html:
     fiche = definitions([
         ("Statut", badge_brouillon(b.statut)),
         ("Destinataire", b.destinataire),
@@ -431,6 +434,7 @@ def page_brouillon(ctx: Contexte, b: Brouillon, *, pieces: Mapping[tuple[str, st
         _lignes_pieces_reclamees(b, pieces)))
     return joindre([
         gabarit('<p class="fil">{l}</p>', l=lien("/brouillons", "← Tous les brouillons")),
+        avis(erreur_dossiers, "erreur") if erreur_dossiers else Html(""),
         gabarit('<div class="deux-colonnes"><section class="carte"><h2>Fiche</h2>{f}</section>{a}</div>',
                 f=fiche, a=_actions_brouillon(ctx, b)),
         message, reclamees,
@@ -686,7 +690,12 @@ def _carte_controle_envois(controle: ControleEnvois) -> Html:
                    gabarit('<span class="etat etat-alerte">Anomalie</span> {a}', a=" ; ".join(l.anomalies)))
         lignes.append(ligne(l.id_relance, l.destinataire, l.valide_par or "—", l.envoye_par or "—", l.envoye_le,
                             "envoi effectué" if l.nature == "effectue" else "tranché comme parti", verdict))
-    return carte("Contrôle des envois", joindre([resume, tableau(
+    ecarts = tuple(getattr(controle, "ecarts", ()))
+    bloc_ecarts = (gabarit('<h3>{t}</h3><ul class="liste ecarts">{l}</ul>', t="Écarts hors journal",
+                           l=joindre(gabarit('<li><span class="etat etat-alerte">Écart</span> {e}</li>', e=e)
+                                     for e in ecarts))
+                   if ecarts else Html(""))
+    return carte("Contrôle des envois", joindre([resume, bloc_ecarts, tableau(
         "Contrôle des envois", ["Brouillon", "Destinataire", "Validé par", "Envoyé par", "Envoyé le", "Nature",
                                 "Verdict"], lignes, vide="Aucun envoi dans le journal.")]))
 

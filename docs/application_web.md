@@ -31,7 +31,10 @@ journal d'audit porte `envoye_par` (qui a déclenché l'envoi) en plus de
 `valide_par` (qui a validé). La fiche d'un brouillon envoyé affiche les deux, et
 l'écran Audit affiche le **contrôle des envois** (`cycle.controler_envois`) : pour
 chaque envoi, une validation antérieure par une personne déclarée, le même
-destinataire, aucun double envoi, un `envoye_par` déclaré.
+destinataire, aucun double envoi, un `envoye_par` présent et déclaré (un envoi
+sans `par` est une anomalie), un brouillon présent et ENVOYEE en base, jamais
+rejeté avant l'envoi. Les **écarts hors journal** sont listés à part : `.eml` de
+`outbox\` sans trace au journal, brouillon ENVOYEE en base sans entrée au journal.
 - L'interface **lit** le dépôt SQLite (une connexion par requête) et n'y écrit
   jamais elle-même.
 - Bibliothèque standard uniquement (`wsgiref`, `hashlib`, `secrets`...), aucun
@@ -82,8 +85,18 @@ false` coupe aussi la limite d'un e-mail par semaine. Tout envoi est réadressé
 l'adresse de test (objet préfixé `[TEST]`). Hors mode test, ces deux clés n'ont
 aucun effet.
 
+**Le mode est figé par instance.** Le premier cycle enregistre le mode (« test »
+ou « réel ») ; il ne change plus jamais. L'en-tête de chaque page affiche
+« Instance : mode test », « mode réel » ou « mode non figé (aucun cycle) » ; une
+instance de test garde le bandeau même si `config.json` ne dit plus `mode_test`.
+Si `config.json` demande l'autre mode, un bandeau d'alerte le signale et toute
+décision est refusée par le cycle (`ModeInstanceIncompatible`), affichée comme un
+refus lisible (409), rien n'étant écrit. Pour changer de mode : créer une nouvelle
+instance.
+
 Un `config.json` invalide (JSON cassé, `"mode_test": "oui"`...) est signalé par un
-bandeau d'alerte sur chaque page ; le cycle refuse alors les envois. De même, en
+bandeau d'alerte sur chaque page ; le cycle refuse alors toute décision, validation
+comprise (il lit le mode demandé dans ce fichier). De même, en
 mode test sans `responsables.txt`, un bandeau rappelle que les opérations de
 responsable sont ouvertes aux validateurs (repli journalisé `repli_roles_mode_test`).
 
@@ -106,6 +119,9 @@ py -3.11 scripts\web.py supprimer-utilisateur --instance C:\cabinet\demo --ident
 - Les comptes sont dans `<instance>\utilisateurs.json`, écrit de façon atomique
   (`os.replace`). Mot de passe haché par PBKDF2-HMAC-SHA256, sel aléatoire de
   16 octets, 600 000 itérations ; paramètres stockés avec le hachage.
+- Les noms sont normalisés comme dans le cycle (`cycle.normaliser_nom` : forme
+  Unicode NFC, espaces de bord retirés) : un nom saisi sous macOS (NFD) et le même
+  nom dans `validateurs.txt` édité sous Windows (NFC) sont reconnus comme un seul.
 - `creer-utilisateur` ajoute le **nom affiché** (une ligne, sans caractère de
   contrôle, ne commençant pas par `#`) à `validateurs.txt`, et **aussi à
   `responsables.txt` pour le rôle `responsable`**. `changer-role` met
@@ -151,6 +167,12 @@ refus, erreurs internes avec leur trace ; jamais de mot de passe ni de jeton).
 | `/audit` | vérification de la chaîne, contrôle des envois (verdict par envoi), 200 dernières entrées (responsable) | exporter le dépôt en JSON (`<instance>\exports\`), réparer une dernière ligne tronquée |
 | `/deconnexion` | confirmation | se déconnecter |
 
+Un fichier d'entrée refusé par le cycle (`exclusions_dossier.csv` avec une colonne
+inconnue, un statut vide ou une expression régulière imbriquée ; pièce à montant
+négatif ; débit et crédit sur la même ligne ; code dossier en double) apparaît
+comme un message lisible : refus 409 si une action l'a rencontré, avis sur la
+fiche du brouillon quand `dossiers.csv` (option `--entree`) est refusé.
+
 Après une action, un message confirme ce qui a été fait. Une règle du domaine qui
 refuse l'action (transition interdite, validateur non déclaré, envoi hors créneau,
 limite d'un e-mail par semaine, journal non sain...) s'affiche en clair dans la page,
@@ -177,7 +199,9 @@ ligne de commande `--forcer`) ; seule l'interface le réserve au responsable.
 Un rattachement vers un dossier différent de celui de la décision de routage est
 refusé par le cycle (CA-03, journal `rattachement_refuse`) : la page l'explique et
 indique le dossier d'origine et le dossier saisi. Un responsable peut cocher
-« Forcer » et doit donner un motif (journal `rattachement_force`).
+« Forcer » et doit donner un motif (journal `rattachement_force`). Un fichier
+déjà rattaché à un autre dossier est refusé dans tous les cas, forçage compris
+(un fichier n'appartient qu'à un dossier).
 
 L'état du journal (intègre / altéré) reste visible de tous sur l'accueil.
 
