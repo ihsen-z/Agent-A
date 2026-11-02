@@ -154,16 +154,16 @@
   <header class="masthead">
     <div class="top">
       <div class="brand"><span class="sq"></span><b>COLLECTE ET RELANCE DES PIÈCES JUSTIFICATIVES</b></div>
-      <span class="eyebrow">Cahier des charges &middot; v1.0</span>
+      <span class="eyebrow">Cahier des charges &middot; v1.1</span>
     </div>
     <h1>Ce que le produit doit faire, et comment nous prouverons qu'il le fait.</h1>
     <p class="lede">Ce document est la référence contractuelle du projet. Toute fonction décrite ici est
       assortie d'une mesure et d'un seuil ; toute fonction sans mesure n'est pas dans le périmètre.
       Il remplace toute note de cadrage antérieure, y compris le cahier des charges « AI Client Chaser v2.0 ».</p>
     <dl class="ident">
-      <div><dt>Version</dt><dd>1.0</dd></div>
-      <div><dt>Date</dt><dd>29 septembre 2026</dd></div>
-      <div><dt>Statut</dt><dd>Proposition — en attente de validation</dd></div>
+      <div><dt>Version</dt><dd>1.1</dd></div>
+      <div><dt>Date</dt><dd>2 novembre 2026</dd></div>
+      <div><dt>Statut</dt><dd>Amendé après audit de conformité indépendant · MVP de test</dd></div>
       <div><dt>Rédacteur</dt><dd><span class="todo">nom à compléter</span></dd></div>
       <div><dt>Propriétaire du document</dt><dd><span class="todo">nom à compléter</span></dd></div>
       <div><dt>Prochaine revue</dt><dd>À la sortie de la phase 0</dd></div>
@@ -191,6 +191,7 @@
       <li><a href="#s16"><span>16</span>Feuille de route</a></li>
       <li><a href="#s17"><span>17</span>État du code existant</a></li>
       <li><a href="#s18"><span>18</span>Validation</a></li>
+      <li><a href="#s19"><span>19</span>Écarts assumés de la v1.1</a></li>
     </ol>
   </nav>
 
@@ -356,14 +357,14 @@
       <div class="box entity"><b>Période</b><p>Un mois ou un trimestre comptable. Son état est <em>calculé</em> à partir de ses pièces attendues, jamais saisi.</p><span class="keys">clé : code_dossier + AAAA-MM</span></div>
       <div class="box entity"><b>OperationBancaire</b><p>Une ligne de relevé : date, libellé brut, montant, sens, devise, référence stable.</p><span class="keys">clé : code_dossier + reference · déjà implémentée</span></div>
       <div class="box entity"><b>PieceAttendue</b><p>Créée par le moteur quand une opération exige un justificatif. Porte son propre état (§9) et le motif de sa création.</p><span class="keys">clé : reference_operation · 0–N pièces reçues</span></div>
-      <div class="box entity"><b>PieceRecue</b><p>Un fichier entré dans le système : origine, empreinte, date de réception, rattachement proposé ou confirmé.</p><span class="keys">clé : empreinte SHA-256 du fichier</span></div>
-      <div class="box entity"><b>Relance</b><p>Un message : dossier, destinataire, liste des pièces réclamées, statut (brouillon, validée, envoyée), horodatage.</p><span class="keys">clé : uuid · 1–N pièces attendues</span></div>
-      <div class="box entity"><b>RegleExclusion</b><p>Générale ou propre au dossier. Porte son nom, son motif en français, son auteur et sa date d'activation.</p><span class="keys">clé : nom + portée · partiellement implémentée</span></div>
+      <div class="box entity"><b>PieceRecue</b><p>Un fichier entré dans le système : origine, empreinte, date de réception, rattachement proposé ou confirmé.</p><span class="keys">identité : empreinte SHA-256 · idempotence : (message, empreinte) · expéditeur, date et objet conservés dans la file humaine</span></div>
+      <div class="box entity"><b>Relance</b><p>Un message : dossier, destinataire, liste des pièces réclamées, statut (brouillon, validée, envoyée), horodatage.</p><span class="keys">clé : identifiant déterministe (destinataire, pièces, niveau, jour) · 1–N pièces attendues</span></div>
+      <div class="box entity"><b>RegleExclusion</b><p>Générale ou propre au dossier. Porte son nom, son motif en français, son auteur et sa date d'activation.</p><span class="keys">clé : nom + portée · nom, auteur, date et statut (validée ou proposée) implémentés</span></div>
     </div>
     <div class="note">
       <b>Invariants à faire respecter par la base, pas par le code applicatif</b>
       <p>Une pièce reçue ne peut être rattachée qu'à des pièces attendues d'un <strong>même dossier</strong>.
-        Une relance ne peut référencer que des pièces attendues d'un même dossier et d'un même destinataire.
+        Une relance ne référence que des pièces attendues d'un <strong>même destinataire</strong> : chaque ligne est rattachée à sa pièce et à son dossier, avec une section par dossier. <em>Ces invariants sont tenus par le code applicatif ; la base ne les impose pas encore (§19).</em>
         Une opération exclue ne peut pas porter de pièce attendue. Toute écriture est horodatée et
         attribuée à un acteur nommé, humain ou système.</p>
     </div>
@@ -375,11 +376,11 @@
     <ol class="rules">
       <li><strong>Normalisation</strong> du libellé bancaire : suppression des préfixes de canal, des références techniques et de la ponctuation, avec conservation de la forme préfixée — « VIREMENT INTERNE » perd son sens si l'on retire « virement ».</li>
       <li><strong>Exclusions</strong> appliquées avant tout appariement, règles propres au dossier d'abord, règles générales ensuite.</li>
-      <li><strong>Appariement au centime</strong>, avec tolérance d'arrondi de 0,02 € ou 0,5 % du montant, <strong>la plus grande des deux s'appliquant</strong> (soit 5 € sur une facture de 1 000 €). Les paiements groupés, eux, n'admettent que le centime.</li>
-      <li><strong>Affectation globale</strong> : les couples les plus sûrs sont affectés en premier, afin qu'un paiement traité tôt ne consomme pas la pièce d'un autre.</li>
-      <li><strong>Paiements groupés</strong> (une opération pour 2 à 4 factures) : acceptés seulement si le total tombe au centime, si la combinaison est unique et si le libellé porte un indice de groupement.</li>
+      <li><strong>Appariement au centime</strong>, avec tolérance d'arrondi de 0,02 € ou 0,5 % du montant, <strong>la plus grande des deux s'appliquant</strong> (soit 5 € sur une facture de 1 000 €). Les paiements groupés, eux, n'admettent que le centime. Un montant identique au centime l'emporte <strong>toujours</strong> sur un montant seulement toléré, même plus proche en date ; un montant seulement toléré n'est jamais une certitude (au mieux « probable », à confirmer par un humain).</li>
+      <li><strong>Affectation globale</strong> : les couples les plus sûrs sont affectés en premier, afin qu'un paiement traité tôt ne consomme pas la pièce d'un autre. Ordre : correspondances <em>certaines</em>, puis règlements groupés et acomptes, puis seulement les correspondances <em>probables</em>, avec ce qui reste. Une décision incertaine ne l'emporte jamais sur une décision certaine ; la classe de montant (identique, à deux centimes, toléré) est la première clé de tri, avant la date.</li>
+      <li><strong>Paiements groupés</strong> (une opération pour 2 à 4 factures) : acceptés seulement si le total est <strong>exact au centime</strong> (écart nul), si la combinaison est unique <strong>et</strong> si le libellé porte un indice de groupement, quel que soit le nombre de factures. Un groupe non reconnu coûte une relance en trop, jamais une pièce perdue.</li>
       <li><strong>Acomptes</strong> : acceptés seulement si le libellé l'annonce explicitement.</li>
-      <li><strong>Cas ambigu</strong> : jamais tranché automatiquement. Une combinaison incertaine reste signalée comme manquante — relancer un client qui a déjà envoyé la pièce coûte un e-mail, ne pas le relancer coûte une déclaration incomplète.</li>
+      <li><strong>Cas ambigu</strong> : jamais tranché automatiquement. Une facture que deux paiements équivalents se disputent (même classe de montant, scores à moins de 0,02) n'est attribuée à aucun des deux : les deux sont signalés manquants (<code>ambiguite_non_tranchee</code>) — relancer un client qui a déjà envoyé la pièce coûte un e-mail, ne pas le relancer coûte une déclaration incomplète. Les statuts « à vérifier » (correspondance probable) et « partiel » (acompte) sont traités par un humain et <strong>ne produisent pas de relance</strong> (§19).</li>
       <li><strong>Reproductibilité</strong> : l'ordre d'évaluation est déterministe ; deux exécutions sur les mêmes entrées produisent des sorties identiques au bit près.</li>
     </ol>
   </section>
@@ -391,12 +392,12 @@
       client à un autre. L'algorithme est volontairement conservateur : en cas de doute, il ne tranche pas.</p>
     <ol class="rules">
       <li><strong>Idempotence d'abord.</strong> Clé = empreinte du fichier + identifiant du message. Un e-mail rejoué ne crée rien et ne déclenche rien.</li>
-      <li><strong>Dossier</strong> : adresse de l'expéditeur présente dans les contacts d'un dossier. À défaut, domaine de l'expéditeur rattaché à un seul dossier. Deux dossiers candidats ou plus → file non routée, sans exception.</li>
+      <li><strong>Dossier</strong> : adresse de l'expéditeur présente dans les contacts d'un dossier. À défaut, domaine de l'expéditeur <strong>déclaré par le cabinet</strong> pour un seul dossier (jamais déduit, jamais une messagerie grand public ; correspondance exacte, sous-domaine exclu, ASCII ou punycode). La partie qui suit un <code>+</code> dans l'adresse est ignorée. Deux dossiers candidats ou plus → file non routée, sans exception. L'adresse de relais (C-RELAIS) et le contact interne n'identifient aucun dossier : une même adresse y envoie les pièces de plusieurs clients.</li>
       <li><strong>Période</strong> : période ouverte du dossier. Si deux périodes sont ouvertes, la date de la pièce arbitre ; si elle est absente → file non routée.</li>
       <li><strong>Opération</strong> : parmi les pièces attendues du dossier et de la période, celles dont le montant correspond (tolérance §6) dans une fenêtre de −60 à +15 jours autour de la date d'opération. Exactement un candidat → rattachement <em>proposé</em>. Zéro ou plusieurs → file humaine.</li>
       <li><strong>Jamais de rattachement inter-dossiers</strong>, quelle que soit la qualité de la correspondance de montant. Règle de sécurité, non contournable par configuration.</li>
       <li><strong>Aucune pièce n'est perdue</strong> : tout ce qui n'est pas routé apparaît dans la file humaine au cycle suivant, avec son e-mail d'origine.</li>
-      <li><strong>Le rattachement reste une proposition</strong> tant qu'un humain ne l'a pas confirmé, en v1. La confirmation est un clic dans le tableau de suivi.</li>
+      <li><strong>Le rattachement reste une proposition</strong> tant qu'un humain ne l'a pas confirmé, en v1. La confirmation est un geste humain nommé (commande ou écran). Une confirmation vers un dossier <strong>différent</strong> du dossier routé est refusée, sauf forçage réservé au responsable, avec motif obligatoire et trace d'audit.</li>
     </ol>
   </section>
 
@@ -417,8 +418,7 @@
       <span class="st end">ACTIVE</span><span class="ar">→</span>
       <span class="st">RÉVISÉE OU RETIRÉE</span>
     </div>
-    <p class="small muted">Une règle proposée s'applique dès le cycle suivant mais reste signalée comme
-      provisoire dans le tableau de suivi jusqu'à validation. Toute règle porte son auteur et sa date :
+    <p class="small muted">Une règle <strong>proposée ne s'applique pas</strong> : elle est seulement listée (<code>regles_provisoires.csv</code>) jusqu'à validation par le responsable, parce qu'un état terminal ne doit jamais venir d'une règle non validée (§9). Toute règle porte son auteur et sa date :
       une exclusion abusive doit pouvoir être remontée à la personne qui l'a créée.</p>
     <div class="note">
       <b>Contre-exemple à ne jamais avaler</b>
@@ -447,16 +447,18 @@
       <table>
         <thead><tr><th>État</th><th>Événement</th><th>Garde</th><th>État cible</th><th>Effet</th></tr></thead>
         <tbody>
-          <tr><td class="id">ATTENDUE</td><td>Relance envoyée</td><td>Relance validée par un humain (v1)</td><td class="id">DEMANDÉE</td><td>Départ du délai T+3</td></tr>
+          <tr><td class="id">ATTENDUE</td><td>Relance envoyée</td><td>Relance validée par un humain (v1)</td><td class="id">DEMANDÉE</td><td>Départ des délais de relance</td></tr>
           <tr><td class="id">ATTENDUE</td><td>Règle d'exclusion créée</td><td>Règle validée, applicable au dossier</td><td class="id">HORS PÉRIMÈTRE</td><td>Terminal, motif journalisé</td></tr>
           <tr><td class="id">DEMANDÉE</td><td>Pièce rattachée</td><td>Rattachement confirmé par un humain</td><td class="id">REÇUE</td><td>Délai suspendu</td></tr>
           <tr><td class="id">DEMANDÉE</td><td>Promesse saisie</td><td>Date de promesse dans les 15 jours</td><td class="id">PROMISE</td><td>Délai reporté à la date promise + 2 j</td></tr>
-          <tr><td class="id">DEMANDÉE</td><td>Délai dépassé</td><td>Compteur de relances &lt; plafond</td><td class="id">DEMANDÉE</td><td>Relance suivante mise en brouillon</td></tr>
-          <tr><td class="id">DEMANDÉE</td><td>Délai dépassé</td><td>Plafond de relances atteint</td><td class="id">ESCALADÉE</td><td>Alerte au responsable</td></tr>
+          <tr><td class="id">DEMANDÉE</td><td>Délai d'escalade dépassé</td><td>Décidé par la cadence (§10) : toutes les relances prévues sont parties, ou plafond atteint</td><td class="id">ESCALADÉE</td><td>Alerte au responsable (<code>escalades.csv</code>)</td></tr>
           <tr><td class="id">PROMISE</td><td>Date promise dépassée</td><td>Aucune pièce reçue</td><td class="id">DEMANDÉE</td><td>Relance, ton adapté</td></tr>
           <tr><td class="id">REÇUE</td><td>Contrôle comptable</td><td>Pièce conforme</td><td class="id">VALIDÉE</td><td>Terminal</td></tr>
           <tr><td class="id">REÇUE</td><td>Contrôle comptable</td><td>Pièce non conforme ou illisible</td><td class="id">DEMANDÉE</td><td>Relance avec motif du rejet</td></tr>
           <tr><td class="id">ESCALADÉE</td><td>Arbitrage du responsable</td><td>Décision de classement</td><td class="id">CLOSE SANS SUITE</td><td>Terminal, motif obligatoire</td></tr>
+          <tr><td class="id">ATTENDUE</td><td>Pièce rattachée</td><td>Rattachement confirmé par un humain</td><td class="id">REÇUE</td><td>Pièce arrivée avant toute relance</td></tr>
+          <tr><td class="id">PROMISE, ESCALADÉE</td><td>Règle d'exclusion créée</td><td>Règle validée, applicable au dossier</td><td class="id">HORS PÉRIMÈTRE</td><td>Terminal, motif journalisé</td></tr>
+          <tr><td class="id">ESCALADÉE, PROMISE</td><td>Pièce rattachée</td><td>Rattachement confirmé par un humain</td><td class="id">REÇUE</td><td>Délai suspendu</td></tr>
         </tbody>
       </table>
     </div>
@@ -484,11 +486,11 @@
       <table>
         <thead><tr><th>Jalon</th><th>Déclencheur</th><th>Action</th><th>Paramétrable</th></tr></thead>
         <tbody>
-          <tr><td class="id">T0</td><td>Pièce attendue créée</td><td>Demande initiale, groupée par dossier</td><td>Oui</td></tr>
-          <tr><td class="id">T+3 j ouvrés</td><td>Aucune réponse</td><td>Relance 1</td><td>Oui</td></tr>
-          <tr><td class="id">T+7 j ouvrés</td><td>Toujours incomplet</td><td>Relance 2</td><td>Oui</td></tr>
-          <tr><td class="id">T+14 j ouvrés</td><td>Toujours incomplet</td><td>Escalade au responsable</td><td>Oui</td></tr>
-          <tr><td class="id">J−5 échéance</td><td>Échéance TVA (15 ou 24) approchant</td><td>Relance prioritaire, ton renforcé</td><td>Oui</td></tr>
+          <tr><td class="id">T0</td><td>Pièce attendue créée</td><td>Demande initiale, groupée par destinataire (une section par dossier)</td><td>Non (§19)</td></tr>
+          <tr><td class="id">Jalon T+3 j ouvrés</td><td>Aucune réponse</td><td>Relance 1, <strong>envoyée au plus tôt 7 jours après l'envoi précédent</strong> (garde-fou hebdomadaire)</td><td>Non (§19)</td></tr>
+          <tr><td class="id">Jalon T+7 j ouvrés</td><td>Toujours incomplet</td><td>Relance 2, au plus tôt 7 jours après la relance 1</td><td>Non (§19)</td></tr>
+          <tr><td class="id">T+14 j ouvrés</td><td>Toujours incomplet</td><td>Escalade au responsable</td><td>Non (§19)</td></tr>
+          <tr><td class="id">J−5 échéance</td><td>Échéance TVA (15 ou 24) approchant</td><td>Relance prioritaire, ton renforcé</td><td>Non livré (§19)</td></tr>
         </tbody>
       </table>
     </div>
@@ -497,7 +499,8 @@
       <li><strong>Un seul e-mail par destinataire et par semaine</strong>, toutes pièces et tous dossiers confondus. Les demandes sont groupées, jamais fractionnées.</li>
       <li><strong>Aucun envoi hors jours et heures ouvrés</strong> du fuseau du destinataire.</li>
       <li><strong>Jamais deux relances pour la même pièce dans le même cycle</strong>, quelle que soit la configuration.</li>
-      <li><strong>Plafond de 4 relances</strong> par pièce, puis escalade obligatoire. Au-delà, le problème n'est plus documentaire.</li>
+      <li><strong>Cadence par défaut : trois envois par pièce</strong> (demande initiale comprise), puis escalade. <strong>Plafond absolu de quatre envois</strong> par pièce, que la cadence par défaut n'atteint pas. Au-delà, le problème n'est plus documentaire.</li>
+      <li><strong>Un garde-fou prime toujours sur un jalon.</strong> Le jalon T+3 ne peut donc jamais s'exécuter seul : la cadence réelle est la demande, puis une relance à 7 jours au plus tôt, puis une à 14 jours, puis l'escalade vers J+18.</li>
     </ul>
   </section>
 
@@ -513,11 +516,11 @@
           <tr><td class="id">CA-01</td><td>Ne pas crier au loup</td><td>Fausses alertes <strong>&lt; 2 %</strong></td><td>1 mois de relevé réel + liste des manquants établie indépendamment par le comptable ; comparaison ligne à ligne</td><td>Comptable référent</td></tr>
           <tr><td class="id">CA-02</td><td>Ne rien laisser passer</td><td>Manques ratés <strong>= 0</strong></td><td>Même jeu que CA-01</td><td>Comptable référent</td></tr>
           <tr><td class="id">CA-03</td><td>Ne jamais se tromper de client</td><td>Rattachements inter-dossiers <strong>= 0</strong></td><td>Rejeu de 200 pièces réelles sur un portefeuille d'au moins 10 dossiers</td><td>Responsable de portefeuille</td></tr>
-          <tr><td class="id">CA-04</td><td>Router sans travail humain</td><td>Pièces routées automatiquement <strong>≥ 85 %</strong></td><td>Même jeu que CA-03</td><td>Responsable de portefeuille</td></tr>
+          <tr><td class="id">CA-04</td><td>Router sans travail humain</td><td>Pièces routées automatiquement <strong>≥ 85 %</strong>, circuits C-DIRECT et C-INTERNE seulement (en C-RELAIS, aucun routage automatique : tout passe par la file humaine)</td><td>Même jeu que CA-03</td><td>Responsable de portefeuille</td></tr>
           <tr><td class="id">CA-05</td><td>Ne jamais envoyer deux fois</td><td>Doublons d'envoi <strong>= 0</strong> sur 30 jours</td><td>Rejeu de 3 e-mails identiques + contrôle du journal d'envoi</td><td>Journal d'audit</td></tr>
-          <tr><td class="id">CA-06</td><td>Rien ne part sans relecture</td><td>Envois sans validation <strong>= 0</strong></td><td>Contrôle exhaustif du journal sur la période de recette</td><td>Journal d'audit</td></tr>
+          <tr><td class="id">CA-06</td><td>Rien ne part sans relecture</td><td>Envois sans validation <strong>= 0</strong></td><td>Contrôle exhaustif du journal sur la période de recette, outillé par la commande <code>controler-envois</code></td><td>Journal d'audit</td></tr>
           <tr><td class="id">CA-07</td><td>Justifier chaque ligne réclamée</td><td>Lignes reliées à une opération du relevé <strong>= 100 %</strong></td><td>Contrôle automatique bloquant à la génération</td><td>Automatique</td></tr>
-          <tr><td class="id">CA-08</td><td>Reproductibilité</td><td>Sorties identiques (empreinte)</td><td>Deux exécutions sur les mêmes entrées, en intégration continue</td><td>Automatique</td></tr>
+          <tr><td class="id">CA-08</td><td>Reproductibilité</td><td>Sorties identiques (empreinte)</td><td>Deux exécutions sur les mêmes entrées, à chaque modification, en intégration continue. Couvre les sorties, l'outbox, l'audit et le contenu du dépôt, pas l'horloge de l'export (§19)</td><td>Automatique</td></tr>
           <tr><td class="id">CA-09</td><td>Tenir la charge d'un cabinet</td><td>Cycle de 20 dossiers / 5 000 opérations <strong>&lt; 10 min</strong></td><td>Banc de mesure sur corpus généré</td><td>Automatique</td></tr>
           <tr><td class="id">CA-10</td><td>Reprise après panne</td><td>Aucune perte, aucun doublon</td><td>Interruption injectée au milieu d'un cycle, puis relance</td><td>Automatique</td></tr>
           <tr><td class="id">CA-11</td><td>Réversibilité</td><td>Export complet <strong>&lt; 1 h</strong>, format documenté</td><td>Test de restitution trimestriel</td><td>Cabinet</td></tr>
@@ -530,7 +533,7 @@
       <p>CA-01, CA-02, CA-03 et CA-06 sont <strong>bloquants</strong> : un échec sur l'un d'eux interdit la
         mise en production, sans compensation possible par les autres. Les seuils sont mesurés sur données
         réelles du cabinet, jamais sur le corpus synthétique — celui-ci sert à détecter les régressions,
-        pas à prouver l'exactitude.</p>
+        pas à prouver l'exactitude. Il est balayé sur plusieurs graines et plusieurs taux de pièces manquantes à chaque modification (<code>scripts/balayage_graines.py</code>) : tout manque raté sur le corpus synthétique est une régression bloquante.</p>
     </div>
   </section>
 
@@ -604,6 +607,10 @@
       <li><strong>Après 60 jours</strong> d'exploitation, le même relevé est refait à l'identique, sur le même portefeuille.</li>
       <li>Le produit conserve la méthode de calcul et les valeurs d'entrée, de sorte que tout chiffre communiqué puisse être reconstitué.</li>
     </ol>
+    <div class="note">
+      <b>Non fourni par le MVP</b>
+      <p>Le produit ne conserve ni la méthode de calcul ni les valeurs d'entrée du ROI : c'est un livrable de la phase P2, nécessaire avant tout pilote payant. Aucun chiffre de ROI ne peut être annoncé à partir du produit tel qu'il est.</p>
+    </div>
     <p class="small muted">Le chiffre qui vend n'est pas le nombre de minutes économisées, mais le nombre de
       dossiers qu'un collaborateur peut suivre sans embauche. C'est celui-là qu'il faut mesurer.</p>
   </section>
@@ -615,7 +622,7 @@
       <table>
         <thead><tr><th>Risque</th><th>Impact</th><th>Parade</th><th>Signal d'alerte précoce</th></tr></thead>
         <tbody>
-          <tr><td>Pas de mandat pour écrire au client final</td><td>Critique</td><td>Circuit C-RELAIS par défaut (D6), question posée en phase 0</td><td>Le cabinet hésite à répondre « qui écrit au client ? »</td></tr>
+          <tr><td>Pas de mandat pour écrire au client final</td><td>Critique</td><td>Circuit de relance obligatoire (D6), refusé hors mode test s'il manque ; question posée en phase 0</td><td>Le cabinet hésite à répondre « qui écrit au client ? »</td></tr>
           <tr><td>Pas de vérité terrain disponible</td><td>Critique</td><td>Aucune vente avant CA-01 et CA-02 mesurés</td><td>Le cabinet propose un relevé sans la liste des manquants</td></tr>
           <tr><td>Fausses alertes en production</td><td>Élevé</td><td>Référentiel d'exclusions à deux niveaux, seuil bloquant en recette</td><td>Le comptable commence à ignorer les lignes signalées</td></tr>
           <tr><td>Erreur de routage entre deux clients</td><td>Critique</td><td>Interdiction structurelle inter-dossiers (§7, règle 5)</td><td>Toute pièce routée avec un score faible</td></tr>
@@ -711,16 +718,18 @@
       <table>
         <thead><tr><th>Brique</th><th>État</th><th>Reste à faire</th></tr></thead>
         <tbody>
-          <tr><td>Normalisation des libellés</td><td>Implémentée</td><td>Alias fournisseurs alimentés par un vrai portefeuille</td></tr>
-          <tr><td>Référentiel d'exclusions général</td><td>Implémenté</td><td>Cycle de vie des règles apprises (§8)</td></tr>
-          <tr><td>Moteur d'appariement</td><td>Implémenté</td><td>Aucun écart connu ; à confronter à un relevé réel</td></tr>
-          <tr><td>Génération des relances</td><td>Implémentée</td><td>Groupement par destinataire, garde-fous §10</td></tr>
-          <tr><td>Tableau de suivi et statistiques</td><td>Implémentés</td><td>Publication dans Google Sheets</td></tr>
-          <tr><td>Corpus synthétique et évaluation</td><td>Implémentés</td><td>Jeu de test issu de données réelles</td></tr>
-          <tr><td>Machines d'états</td><td>Absentes</td><td>Tout §9</td></tr>
-          <tr><td>Routage des pièces entrantes</td><td>Absent</td><td>Tout §7 — poste le plus lourd de la phase 1</td></tr>
-          <tr><td>Journal d'audit</td><td>Absent</td><td>Tout §12</td></tr>
-          <tr><td>Connexion Gmail / Drive</td><td>Absente</td><td>Phase 1</td></tr>
+          <tr><td>Normalisation des libellés et alias</td><td>Implémentés ; alias branchés (<code>alias_fournisseurs.csv</code>)</td><td>Alimenter les alias avec un vrai portefeuille</td></tr>
+          <tr><td>Référentiel d'exclusions</td><td>Implémenté ; règles apprises avec nom, auteur, date et statut</td><td>Commande de validation par le responsable</td></tr>
+          <tr><td>Moteur d'appariement</td><td>Implémenté et corrigé après audit : 0 manque raté sur 330 corpus synthétiques jamais vus</td><td>Confronter à un relevé réel (CA-01, CA-02)</td></tr>
+          <tr><td>Génération des relances</td><td>Implémentée : groupement par destinataire, garde-fous §10</td><td>Texte adapté au motif de rejet, signature du cabinet (§19)</td></tr>
+          <tr><td>Machines d'états</td><td>Implémentées, table vérifiée couple par couple</td><td>Clôture de période, cadence par dossier (§19)</td></tr>
+          <tr><td>Routage des pièces entrantes</td><td>Implémenté, prudent par construction</td><td>Règle de période du §7 (§19), copie du fichier de la pièce</td></tr>
+          <tr><td>Journal d'audit et dépôt</td><td>Implémentés : chaîne SHA-256, verrou portable, export complet</td><td>Ancrage externe du dernier hash</td></tr>
+          <tr><td>Validation et envoi</td><td>Implémentés : validation humaine nommée, aucun double envoi</td><td>Connecteur d'envoi réel (aujourd'hui, un fichier <code>.eml</code>)</td></tr>
+          <tr><td>Cycle, ligne de commande, mode test</td><td>Implémentés ; exécutable sous Windows en mode test</td><td>Vérification sur Windows réel (simulée, non exécutée)</td></tr>
+          <tr><td>Application web de test</td><td>Implémentée : comptes, sessions, rôles, échappement systématique</td><td>Revue de sécurité complète avant tout usage réel</td></tr>
+          <tr><td>Intégration continue</td><td>Workflow Linux et Windows, balayage de graines</td><td>Première exécution sur GitHub</td></tr>
+          <tr><td>Connexion Gmail / Drive / Sheets</td><td>Absente</td><td>Phase 1</td></tr>
         </tbody>
       </table>
     </div>
@@ -742,6 +751,35 @@
         <thead><tr><th>Version</th><th>Date</th><th>Auteur</th><th>Nature de la modification</th></tr></thead>
         <tbody>
           <tr><td class="id">1.0</td><td>29/09/2026</td><td><span class="todo">à compléter</span></td><td>Première version opposable. Remplace les notes de cadrage antérieures.</td></tr>
+          <tr><td class="id">1.1</td><td>02/11/2026</td><td><span class="todo">à compléter</span></td><td>Amendé après audit de conformité indépendant : §5, §6, §7, §8, §9, §10, §11, §14 et §17 alignés sur le code construit ; §19 ajouté (écarts assumés).</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s19">
+    <div class="sec-head"><span class="eyebrow"><span class="num">19</span> &middot; Écarts assumés</span>
+      <h2>Ce que le MVP de test ne fait pas, dit sans l'adoucir</h2></div>
+    <p>Cette version décrit ce qui est construit. Ce qui suit est soit recommandé par l'audit de conformité
+      (<code>docs/conformite_mvp.md</code>), soit prévu plus haut dans ce document, et <strong>n'est pas livré</strong>.
+      Les exigences légales et réglementaires du §13 sont hors périmètre d'un MVP de test à données fictives ; elles
+      redeviennent bloquantes à l'entrée de toute donnée réelle.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Sujet</th><th>État dans le MVP</th><th>Conséquence</th></tr></thead>
+        <tbody>
+          <tr><td>Précision réelle (CA-01, CA-02, CA-04)</td><td>Mesurée uniquement sur corpus synthétique</td><td>Absence de défaut structurel démontrée, exactitude réelle non démontrée</td></tr>
+          <tr><td>§7, période d'une pièce</td><td>La fenêtre −60/+15 jours ne s'applique que si le nom du fichier porte une date</td><td>Simulation : environ 5 % des pièces favorables partent en file humaine</td></tr>
+          <tr><td>§10, paramétrage et J−5</td><td>Délais en constantes ; ni relance prioritaire avant l'échéance TVA, ni fuseau du destinataire</td><td>Adapter la cadence à un client demande de modifier le code</td></tr>
+          <tr><td>§9, périodes</td><td>L'état CLÔTURÉE n'est jamais atteint ; périodicité mensuelle seulement</td><td>Une période ne peut pas être déclarée close dans l'outil</td></tr>
+          <tr><td>§6, statuts « à vérifier » et « partiel »</td><td>Pas de relance automatique</td><td>Traités par un humain ; une relance en moins, jamais une pièce déclarée reçue</td></tr>
+          <tr><td>§9, pièce escaladée</td><td>Aucune sortie vers « demandée »</td><td>Le responsable peut la classer ou la rattacher, pas relancer à nouveau</td></tr>
+          <tr><td>§1, formats d'entrée</td><td>CSV pivot seul ; OFX et CAMT.053 non lus</td><td>Un cabinet sans export CSV ne peut pas démarrer</td></tr>
+          <tr><td>§5, invariants</td><td>Tenus par le code, pas par la base ; copie du fichier de la pièce non conservée</td><td>Les pièces restent dans <code>entrant/</code> tant qu'il n'est pas purgé</td></tr>
+          <tr><td>§4 et §12, identité et rôles</td><td>Deux rôles grossiers ; identité non authentifiée en ligne de commande</td><td>La protection est l'accès au disque de l'instance</td></tr>
+          <tr><td>§14, ROI</td><td>Non fourni</td><td>Aucun chiffre de ROI ne peut être annoncé (phase P2)</td></tr>
+          <tr><td>§10, texte des relances</td><td>Identique dans tous les cas ; sans signature de cabinet</td><td>Un client relancé après un rejet ne voit pas le motif</td></tr>
+          <tr><td>Envoi réel</td><td>Un fichier <code>.eml</code> ; aucun connecteur de messagerie</td><td>Quelqu'un doit expédier les e-mails à la main</td></tr>
         </tbody>
       </table>
     </div>
@@ -749,7 +787,7 @@
 
   <footer>
     <p class="small muted">Cahier des charges &middot; collecte et relance des pièces justificatives &middot;
-      v1.0 du 29 septembre 2026. Les mentions encadrées en pointillés sont des emplacements à compléter
+      v1.1 du 2 novembre 2026 (v1.0 du 29 septembre 2026). Les mentions encadrées en pointillés sont des emplacements à compléter
       avant diffusion.</p>
   </footer>
 </div>

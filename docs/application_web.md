@@ -14,11 +14,24 @@ sont hors périmètre.
   fonction de `rapprochement.cycle` que la ligne de commande `scripts/cycle.py`
   (`valider_relance`, `rejeter_relance`, `envoyer_relance`, `trancher_envoi`,
   `rattacher_piece`, `controler_piece`, `saisir_promesse`, `arbitrer_piece`,
-  `bloquer_piece`, `debloquer_piece`, `verifier_audit`, `reparer_audit`,
-  `exporter`), avec `par` = le **nom affiché de l'utilisateur connecté**.
-- **`validateurs.txt` reste la seule barrière.** Le cycle refuse toute décision
-  d'un nom absent de ce fichier, que la demande vienne du terminal ou du
-  navigateur. Créer un compte web y ajoute le nom ; le supprimer l'en retire.
+  `bloquer_piece`, `debloquer_piece`, `verifier_audit`, `controler_envois`,
+  `reparer_audit`, `exporter`), avec `par` = le **nom affiché de l'utilisateur
+  connecté**, y compris pour l'envoi (voir 1.1).
+- **`validateurs.txt` et `responsables.txt` restent la seule barrière.** Le cycle
+  refuse toute décision d'un nom absent de `validateurs.txt` (ou de
+  `responsables.txt`), et toute opération de responsable (arbitrer, trancher un
+  envoi incertain, réparer le journal) d'un nom absent de `responsables.txt`, que
+  la demande vienne du terminal ou du navigateur. Les comptes web tiennent ces deux
+  listes à jour (section 4).
+
+### 1.1 Envoi nominatif
+
+« Envoyer » passe `par` = l'utilisateur connecté à `cycle.envoyer_relance` : le
+journal d'audit porte `envoye_par` (qui a déclenché l'envoi) en plus de
+`valide_par` (qui a validé). La fiche d'un brouillon envoyé affiche les deux, et
+l'écran Audit affiche le **contrôle des envois** (`cycle.controler_envois`) : pour
+chaque envoi, une validation antérieure par une personne déclarée, le même
+destinataire, aucun double envoi, un `envoye_par` déclaré.
 - L'interface **lit** le dépôt SQLite (une connexion par requête) et n'y écrit
   jamais elle-même.
 - Bibliothèque standard uniquement (`wsgiref`, `hashlib`, `secrets`...), aucun
@@ -56,13 +69,23 @@ Une instance est un répertoire par cabinet (voir `cycle.py`) : `depot.sqlite`,
 brouillons) se lance avec `scripts\cycle.py` ; **l'interface ne lance jamais le
 cycle**, elle exploite ce qu'il a produit.
 
-Pour afficher le bandeau de test sur chaque page, créer `<instance>\config.json` :
+Pour un essai, créer `<instance>\config.json` :
 
 ```json
-{"mode_test": true}
+{"mode_test": true, "creneau_envoi_libre": true, "limite_hebdomadaire": true}
 ```
 
-Fichier absent, illisible, ou valeur autre que `true` : pas de bandeau.
+En mode test, chaque page porte le bandeau « MODE TEST : DONNEES FICTIVES » et la
+liste des **garde-fous d'envoi coupés** (`cycle.garde_fous_mode_test`) : par défaut
+le créneau d'envoi est libre (heures et jours ouvrés ignorés) ; `"limite_hebdomadaire":
+false` coupe aussi la limite d'un e-mail par semaine. Tout envoi est réadressé à
+l'adresse de test (objet préfixé `[TEST]`). Hors mode test, ces deux clés n'ont
+aucun effet.
+
+Un `config.json` invalide (JSON cassé, `"mode_test": "oui"`...) est signalé par un
+bandeau d'alerte sur chaque page ; le cycle refuse alors les envois. De même, en
+mode test sans `responsables.txt`, un bandeau rappelle que les opérations de
+responsable sont ouvertes aux validateurs (repli journalisé `repli_roles_mode_test`).
 
 ## 4. Créer les comptes
 
@@ -76,16 +99,21 @@ py -3.11 scripts\web.py creer-utilisateur --instance C:\cabinet\demo --identifia
 py -3.11 scripts\web.py creer-utilisateur --instance C:\cabinet\demo --identifiant bob --nom "Bob Martin" --role comptable
 py -3.11 scripts\web.py lister-utilisateurs --instance C:\cabinet\demo
 py -3.11 scripts\web.py changer-mot-de-passe --instance C:\cabinet\demo --identifiant bob
+py -3.11 scripts\web.py changer-role --instance C:\cabinet\demo --identifiant bob --role responsable
 py -3.11 scripts\web.py supprimer-utilisateur --instance C:\cabinet\demo --identifiant bob
 ```
 
 - Les comptes sont dans `<instance>\utilisateurs.json`, écrit de façon atomique
   (`os.replace`). Mot de passe haché par PBKDF2-HMAC-SHA256, sel aléatoire de
   16 octets, 600 000 itérations ; paramètres stockés avec le hachage.
-- `creer-utilisateur` ajoute le **nom affiché** à `validateurs.txt` (une ligne,
-  sans caractère de contrôle, ne commençant pas par `#`) ; `supprimer-utilisateur`
-  l'en retire. Retirer un nom à la main de `validateurs.txt` suffit à retirer à ce
-  compte tout pouvoir de décision : l'interface affiche alors un refus.
+- `creer-utilisateur` ajoute le **nom affiché** (une ligne, sans caractère de
+  contrôle, ne commençant pas par `#`) à `validateurs.txt`, et **aussi à
+  `responsables.txt` pour le rôle `responsable`**. `changer-role` met
+  `responsables.txt` en accord (une rétrogradation en retire d'abord le nom) ;
+  `supprimer-utilisateur` retire le nom des deux listes.
+- Retirer un nom à la main de l'une des listes suffit à retirer le pouvoir
+  correspondant : l'interface affiche alors le refus du cycle. **Hors mode test,
+  sans `responsables.txt`, personne ne peut arbitrer, trancher ni réparer.**
 - Changer un mot de passe ou supprimer un compte ferme les sessions ouvertes de ce
   compte à leur requête suivante.
 
@@ -115,12 +143,12 @@ refus, erreurs internes avec leur trace ; jamais de mot de passe ni de jeton).
 | `/connexion` | identifiant et mot de passe | se connecter |
 | `/` | tableau de bord : brouillons à relire (et validés, envois incertains), messages non rattachés, escalades, pièces par état, état du journal d'audit | — |
 | `/brouillons` | liste filtrable par statut | — |
-| `/brouillons/<id>` | destinataire, circuit, dossiers, niveau, validation, objet, **corps** (texte brut), pièces réclamées avec leur opération bancaire | valider, rejeter (motif), envoyer, trancher un envoi incertain |
+| `/brouillons/<id>` | destinataire, circuit, dossiers, niveau, validé par, envoyé par, objet, **corps** (texte brut), pièces réclamées avec leur opération bancaire | valider, rejeter (motif), envoyer, trancher un envoi incertain |
 | `/brouillons/<id>/envoyer` | **page de confirmation** (pas de JavaScript) : rien ne part avant « Confirmer l'envoi » | confirmer l'envoi |
-| `/non-rattaches` | file humaine : chaque pièce reçue, sa proposition de rattachement ou la raison pour laquelle elle n'a pas été routée | confirmer la proposition ; pour un message non routé, saisir dossier et référence |
+| `/non-rattaches` | file humaine : chaque pièce reçue, son origine (expéditeur, date de réception, objet, Message-ID, quand le cycle les a conservés), sa proposition de rattachement ou la raison pour laquelle elle n'a pas été routée | confirmer la proposition, rattacher à une autre opération ; pour un message non routé, saisir dossier et référence ; forcer vers un autre dossier (responsable, motif obligatoire) |
 | `/pieces` | pièces attendues, filtrables par dossier et état ; échéance et prochaine étape calculées par le cycle | contrôler (conforme / non conforme), saisir une promesse, bloquer, débloquer, classer sans suite (responsable) |
 | `/escalades` | pièces escaladées et envois incertains | classer sans suite (responsable) |
-| `/audit` | vérification de la chaîne, 200 dernières entrées (responsable) | exporter le dépôt en JSON (`<instance>\exports\`), réparer une dernière ligne tronquée |
+| `/audit` | vérification de la chaîne, contrôle des envois (verdict par envoi), 200 dernières entrées (responsable) | exporter le dépôt en JSON (`<instance>\exports\`), réparer une dernière ligne tronquée |
 | `/deconnexion` | confirmation | se déconnecter |
 
 Après une action, un message confirme ce qui a été fait. Une règle du domaine qui
@@ -133,15 +161,25 @@ sans trace technique.
 | Action | comptable | responsable |
 |---|:-:|:-:|
 | Valider, rejeter, envoyer un brouillon | oui | oui |
-| Confirmer un rattachement | oui | oui |
+| Confirmer un rattachement (même dossier que la décision) | oui | oui |
+| Forcer un rattachement vers un autre dossier, avec motif | — | oui |
 | Contrôler, promesse, bloquer, débloquer une pièce | oui | oui |
 | Classer sans suite une escalade | — | oui |
 | Trancher un envoi incertain | — | oui |
 | Journal d'audit : voir, vérifier, exporter, réparer | — | oui |
 
 Une action de responsable demandée par un comptable (formulaire forgé compris)
-reçoit `403`. L'état du journal (intègre / altéré) reste visible de tous sur
-l'accueil.
+reçoit `403`. **Défense en profondeur** : arbitrer, trancher et réparer sont
+refusés aussi par le cycle si le nom n'est pas dans `responsables.txt`. Exception
+assumée : `cycle.rattacher_piece` accepte `forcer` de tout validateur (comme la
+ligne de commande `--forcer`) ; seule l'interface le réserve au responsable.
+
+Un rattachement vers un dossier différent de celui de la décision de routage est
+refusé par le cycle (CA-03, journal `rattachement_refuse`) : la page l'explique et
+indique le dossier d'origine et le dossier saisi. Un responsable peut cocher
+« Forcer » et doit donner un motif (journal `rattachement_force`).
+
+L'état du journal (intègre / altéré) reste visible de tous sur l'accueil.
 
 ## 7. Ce que l'application ne fait pas
 
@@ -187,8 +225,10 @@ l'accueil.
 - Corps de requête plafonné à 64 Kio, formulaires classiques uniquement, méthodes
   inattendues : `405`. La feuille de style est lue à un chemin fixe au démarrage.
 - Écoute sur `127.0.0.1` par défaut.
-- Les décisions sont sérialisées dans le processus web (un verrou d'écriture) :
-  sous Windows, le journal d'audit n'a pas de verrou de fichier (voir 9).
+- Les décisions sont sérialisées dans le processus web (un verrou d'écriture), en
+  plus du verrou de fichier du journal d'audit.
+- Les textes du contexte de la file (expéditeur, objet...) viennent de l'e-mail
+  reçu : ils passent par le même échappement que tout le reste.
 
 ## 9. Limites de sécurité assumées (MVP de test)
 
@@ -205,17 +245,12 @@ l'accueil.
   envoie `Origin: null` sur un POST de la même origine ; la protection repose
   alors sur le jeton CSRF et le cookie `SameSite=Strict` (et `Sec-Fetch-Site`
   quand le navigateur l'envoie).
-- **L'envoi n'est pas nominatif dans le journal d'audit.** `cycle.envoyer_relance`
-  ne prend pas de `par` : le journal nomme la personne qui a **validé**
-  (`valide_par`), pas celle qui a cliqué sur « Envoyer ». Le journal technique
-  `logs\web.log` garde l'identifiant de l'auteur du clic, mais il n'est pas chaîné.
 - **Accès au disque = tous les droits.** Quiconque peut écrire dans le
   répertoire de l'instance peut modifier `utilisateurs.json`,
   `validateurs.txt` ou la base. L'instance doit rester sur un disque local, dans
   un profil Windows non partagé.
-- **Concurrence sous Windows** : sans `fcntl`, le journal d'audit ne se protège
-  pas contre deux écrivains simultanés (défaut d'`audit.py` reproduit par un test
-  `xfail` dans `tests/test_web.py`). L'interface sérialise ses propres écritures,
-  mais **ne pas lancer de commande `scripts\cycle.py` d'écriture pendant que des
-  utilisateurs agissent dans l'interface**.
+- **Rôles en deux endroits** : le rôle du compte web (`utilisateurs.json`) et
+  `responsables.txt` doivent concorder ; les commandes de `scripts\web.py` les
+  tiennent ensemble. Une modification à la main de l'un sans l'autre donne soit un
+  `403` de l'interface, soit un refus du cycle : jamais un droit en plus.
 - Le journal technique `web.log` n'est ni tourné ni chaîné.

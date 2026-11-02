@@ -170,7 +170,7 @@
     <dl class="who">
       <div><dt>Pour qui</dt><dd>Cabinets d'expertise comptable et centres de production offshore</dd></div>
       <div><dt>Périmètre</dt><dd>Dossiers d'entreprises françaises (PME, TPE)</dd></div>
-      <div><dt>Entrées</dt><dd>Relevé CSV, OFX ou CAMT.053 + inventaire des pièces</dd></div>
+      <div><dt>Entrées</dt><dd>Relevé au format CSV pivot + inventaire des pièces (OFX et CAMT.053 : convertisseurs à venir)</dd></div>
       <div><dt>Ce que ça ne touche pas</dt><dd>Ni grand livre, ni saisie, ni déclaration</dd></div>
     </dl>
   </header>
@@ -307,12 +307,14 @@
       <div class="tile">
         <span class="k">Décisions correctes</span>
         <span class="v">284<span style="font-size:20px; color:var(--ink-3)">/284</span></span>
-        <span class="d">Vérifié contre la vérité terrain du corpus, à travers plusieurs graines et deux taux de pièces manquantes.</span>
+        <span class="d">Sur le corpus de démonstration. Le moteur est aussi mesuré sur 330 autres corpus (voir l'encadré ci-dessous).</span>
       </div>
     </div>
     <div class="note">
       <b>Ce que ces chiffres prouvent, et ce qu'ils ne prouvent pas</b>
       <p>Ils sont mesurés sur un <strong>corpus synthétique</strong>, conçu par le même auteur que le moteur.
+        Sur 330 corpus de graines et de taux de pièces manquantes différents (18 %, 40 % et 70 %), le moteur
+        ne rate aucune des 13 292 pièces manquantes et ne produit aucune fausse alerte sur 83 181 opérations.
         Ils démontrent l'absence de défaut structurel — pas une exactitude sur vos données. Le chiffre que
         nous accepterons d'annoncer en clientèle sera mesuré sur un relevé réel accompagné de la liste des
         pièces manquantes établie par un comptable. C'est exactement l'objet du pilote décrit plus bas.</p>
@@ -415,6 +417,7 @@ Un envoi par retour de cet email suffit
           <li>Les relances partent depuis <strong>Gmail</strong>, après relecture.</li>
           <li>Les pièces reçues restent dans <strong>Drive</strong>, selon votre nomenclature.</li>
           <li>Déclenchement par <span class="mono">cron</span> quotidien, calé sur l'échéance TVA du 15 ou du 24.</li>
+          <li><em>État actuel : la version de démonstration écrit des fichiers (tableau de suivi, e-mails prêts à partir) et propose une application web de test. Les connecteurs Google ne sont pas encore livrés.</em></li>
         </ul>
       </div>
       <div style="display:flex; flex-direction:column; gap:10px">

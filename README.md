@@ -71,12 +71,23 @@ python3 -m pytest tests/ -q
 
 `scripts/evaluer.py` sort en code d'erreur si l'une des deux cibles est ratée.
 
-**Sur les chiffres actuels** : le système atteint 100 % de décisions correctes
-sur le corpus synthétique, à travers plusieurs graines et deux taux de pièces
-manquantes (un cas à 99,5 %). Cela démontre l'absence de défaut structurel, **pas
-une exactitude sur données réelles** — le corpus a été conçu par le même auteur
-que le moteur. Le chiffre vendable ne pourra être annoncé qu'après mesure sur un
-relevé réel accompagné de sa vérité terrain (voir
+**Sur les chiffres actuels** : sur le corpus de démonstration, 284 décisions sur
+284 sont correctes. Surtout, le moteur est mesuré sur des centaines de corpus
+générés avec des graines et des taux de pièces manquantes différents
+(`python3 scripts/balayage_graines.py`) : sur 330 corpus jamais utilisés pour le
+corriger (taux de 18 %, 40 % et 70 %), **0 manque raté sur 13 292 pièces
+manquantes et 0 fausse alerte sur 83 181 opérations**.
+
+Cela n'a pas toujours été vrai. L'affirmation d'origine de ce fichier (« 100 % à
+travers plusieurs graines ») était inexacte : un audit indépendant a montré que le
+premier moteur ratait des pièces manquantes (0,89 % sur 60 graines), ce que le
+cahier des charges interdit. Les causes ont été corrigées une à une et sont
+gardées par des tests de non-régression.
+
+Cela démontre l'absence de défaut structurel sur ce type de données, **pas une
+exactitude sur données réelles** — le corpus a été conçu par le même auteur que le
+moteur. Le chiffre vendable ne pourra être annoncé qu'après mesure sur un relevé
+réel accompagné de sa vérité terrain (voir
 [docs/donnees_a_collecter.md](docs/donnees_a_collecter.md)).
 
 ## Cas traités
