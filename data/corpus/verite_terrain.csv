@@ -283,3 +283,5 @@ OP010280,justifie,P-G000 + P-G001 + P-G002,paiement groupe de 3 factures
 OP010281,partiel,P-A001,acompte de 30 % sur facture 4800 EUR
 OP010282,justifie,P-CB01,credit-bail : facture obligatoire malgre le libelle d'echeance
 OP010283,justifie,P-R001,"ecart d'arrondi de 0,01 EUR"
+OP010284,hors_perimetre,,apprise:MARTIN-BTP
+OP010285,hors_perimetre,,apprise:MARTIN-BTP

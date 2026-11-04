@@ -52,10 +52,17 @@ def lire_montant(valeur: str) -> Decimal:
 def _exiger(entetes: set[str], attendues: set[str], fichier: str) -> None:
     manquantes = attendues - entetes
     if manquantes:
-        raise ErreurFormat(
-            f"{fichier} : colonnes manquantes {sorted(manquantes)}. "
-            f"Colonnes trouvees : {sorted(entetes)}"
+        message = (
+            f"{fichier} : colonnes manquantes : {', '.join(sorted(manquantes))}. "
+            f"Colonnes trouvées : {', '.join(sorted(entetes)) or 'aucune'}."
         )
+        if len(entetes) == 1 and ";" in next(iter(entetes)):
+            message += (
+                " Le fichier utilise le point-virgule comme séparateur (export Excel "
+                "français) : enregistrez-le en CSV séparé par des virgules, avec les "
+                "colonnes du modèle."
+            )
+        raise ErreurFormat(message)
 
 
 def lire_releve(chemin: Path | str, dossier_defaut: str | None = None) -> list[OperationBancaire]:
@@ -148,3 +155,22 @@ def lire_dossiers(chemin: Path | str) -> dict[str, Dossier]:
                 ton_relance=(ligne.get("ton_relance") or "courtois").strip(),
             )
     return dossiers
+
+
+def lire_alias(chemin: Path | str | None) -> dict[str, str]:
+    """alias_fournisseurs.csv : alias,fournisseur. Fichier optionnel.
+
+    Associe un libelle bancaire abrege au nom du fournisseur tel qu'il figure
+    sur ses factures ("amzn mktplace" -> "Amazon EU Sarl").
+    """
+    if not chemin or not Path(chemin).exists():
+        return {}
+    chemin = Path(chemin)
+    with open(chemin, newline="", encoding="utf-8-sig") as f:
+        lecteur = csv.DictReader(f)
+        _exiger(set(lecteur.fieldnames or []), {"alias", "fournisseur"}, chemin.name)
+        return {
+            ligne["alias"].strip(): (ligne["fournisseur"] or "").strip()
+            for ligne in lecteur
+            if (ligne.get("alias") or "").strip()
+        }

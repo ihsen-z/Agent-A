@@ -57,6 +57,13 @@ RATIO_ACOMPTE_MAX = 0.95
 SEUIL_CONFIANCE = 0.55
 SEUIL_CERTITUDE = 0.80
 MAX_PIECES_GROUPEES = 4
+# Bonus de classement (pas de confiance) pour un montant identique au centime.
+# Sans lui, deux factures d'un meme fournisseur de montants voisins (OVH a
+# 95,53 et 95,62) s'echangent entre deux paiements quand les dates favorisent
+# le croisement : chaque paiement est "justifie" par la facture de l'autre.
+# Il reste inferieur au poids du libelle, pour qu'une facture exacte d'un autre
+# fournisseur ne l'emporte pas sur la bonne facture a l'arrondi pres.
+BONUS_MONTANT_EXACT = 0.10
 
 
 def _montants_compatibles(a: Decimal, b: Decimal) -> bool:
@@ -176,7 +183,7 @@ class Moteur:
                 Rapprochement(
                     operation=operation,
                     statut=Statut.MANQUANT,
-                    motif="Aucune piece justificative recue pour ce paiement",
+                    motif="Aucune pièce justificative reçue pour ce paiement",
                     regle="aucun_candidat",
                 ),
             )
@@ -198,7 +205,7 @@ class Moteur:
             return Rapprochement(
                 operation=operation,
                 statut=Statut.A_VERIFIER,
-                motif="Encaissement non identifie : a rattacher a une facture de vente",
+                motif="Encaissement non identifié : à rattacher à une facture de vente",
                 regle="credit_non_identifie",
             )
         return None
@@ -254,10 +261,15 @@ class Moteur:
                 score = self._score(operation, [piece])
                 if score < SEUIL_CONFIANCE:
                     continue
+                rang = score + (
+                    BONUS_MONTANT_EXACT
+                    if _montants_identiques(operation.montant, piece.montant_ttc)
+                    else 0.0
+                )
                 ecart_jours = abs((operation.date_operation - piece.date_facture).days)
                 # Cles de tri supplementaires pour un resultat deterministe.
                 couples.append(
-                    (-score, ecart_jours, operation.reference, piece.id_piece, operation, piece)
+                    (-rang, ecart_jours, operation.reference, piece.id_piece, operation, piece)
                 )
 
         for _, _, _, _, operation, piece in sorted(couples, key=lambda c: c[:4]):
@@ -271,7 +283,7 @@ class Moteur:
                 statut=Statut.JUSTIFIE if certain else Statut.A_VERIFIER,
                 pieces=[piece],
                 confiance=round(score, 3),
-                motif="" if certain else "Rapprochement probable a confirmer",
+                motif="" if certain else "Rapprochement probable, à confirmer",
                 regle="appariement_1_1",
             )
 
@@ -333,8 +345,8 @@ class Moteur:
                 statut=Statut.JUSTIFIE if certain else Statut.A_VERIFIER,
                 pieces=list(lot),
                 confiance=round(score, 3),
-                motif=f"Reglement groupe de {len(lot)} factures"
-                + ("" if certain else " - a confirmer"),
+                motif=f"Règlement groupé de {len(lot)} factures"
+                + ("" if certain else " – à confirmer"),
                 regle=f"paiement_groupe_{len(lot)}",
             )
 
@@ -381,7 +393,7 @@ class Moteur:
                 confiance=round(similarite, 3),
                 motif=(
                     f"Paiement partiel de la facture {piece.montant_ttc} "
-                    f"{piece.devise} ({piece.fournisseur}) : solde a suivre"
+                    f"{piece.devise} ({piece.fournisseur}) : solde à suivre"
                 ),
                 regle="acompte",
             )

@@ -1,0 +1,6 @@
+*.bat text eol=crlf
+
+# Skills tiers (.claude/skills) : octets conserves tels quels. Le skill
+# ui-ux-pro-max verifie des empreintes sha256 de ses donnees ; une conversion
+# CRLF a l extraction sous Windows les casserait.
+.claude/skills/** -text

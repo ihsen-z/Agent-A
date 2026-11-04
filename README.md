@@ -46,7 +46,43 @@ identifier un fournisseur derrière un libellé abrégé inconnu, adapter le ton
 relances par dossier, et classer les réponses entrantes. Cela suppose une clé API
 (un abonnement Claude Pro ne donne pas d'accès programmatique).
 
-## Utilisation
+## Interface graphique
+
+Pour une démonstration ou un usage au cabinet, sans ligne de commande :
+
+- **Windows** : double-cliquer sur `Demarrer_interface.bat`.
+- **Autres systèmes** : `python3 scripts/interface.py`.
+
+Le navigateur s'ouvre sur `http://127.0.0.1:8765/`. Python 3.11 ou plus récent
+suffit : aucune dépendance à installer, aucune ressource chargée depuis Internet
+(la démonstration fonctionne hors connexion), et le serveur n'écoute que sur le
+poste lui-même : les relevés bancaires n'en sortent pas.
+
+| Écran | Ce qu'il montre |
+|---|---|
+| Accueil | Les données chargées et le bouton « Lancer le rapprochement » |
+| Tableau de bord | Taux traité sans intervention, pièces manquantes, répartition du relevé, cas difficiles résolus, synthèse par dossier |
+| Opérations | Chaque ligne du relevé, sa décision et sa règle ; filtres, recherche, détail ; « ne plus réclamer » apprend une règle au dossier |
+| Relances | L'e-mail de chaque client, à ouvrir dans la messagerie, copier ou télécharger |
+| Règles du cabinet | Règles générales, règles apprises (ajout et retrait), contre-exemples, alias |
+| Qualité mesurée | Fausses alertes et manques ratés contre la vérité terrain, avec l'avertissement sur les données fictives |
+
+Thèmes clair et sombre : l'interface suit le réglage du système, et le sélecteur
+Clair / Sombre / Auto de la barre latérale le force. Les animations
+(compteurs, barres, entrées échelonnées, tiroir) ne se jouent que lorsqu'un
+résultat vient d'être calculé, et disparaissent si le système demande de
+réduire les animations. Couleurs, typographie (IBM Plex, embarquée), espacements
+et mouvement sont définis dans
+[design-system/relance-des-justificatifs/MASTER.md](design-system/relance-des-justificatifs/MASTER.md),
+établi avec le skill `ui-ux-pro-max` (`.claude/skills/`).
+
+L'interface travaille sur une copie (`data/sorties/interface/`) : le corpus
+versionné n'est jamais modifié. Elle repart des données de démonstration à
+chaque lancement (`--conserver` pour reprendre l'espace précédent). L'import
+attend le format pivot décrit ci-dessous ; un export bancaire brut (PDF, ou CSV
+au point-virgule avec d'autres colonnes) est refusé avec un message explicite.
+
+## Utilisation en ligne de commande
 
 ```bash
 # 1. Générer un corpus synthétique (sert à construire et mesurer sans accès cabinet)
@@ -73,7 +109,9 @@ python3 -m pytest tests/ -q
 
 **Sur les chiffres actuels** : le système atteint 100 % de décisions correctes
 sur le corpus synthétique, à travers plusieurs graines et deux taux de pièces
-manquantes (un cas à 99,5 %). Cela démontre l'absence de défaut structurel, **pas
+manquantes, et chaque pièce est rattachée au bon paiement (mesure ajoutée après
+qu'un échange de deux factures OVH voisines est passé inaperçu de l'évaluation
+par action). Cela démontre l'absence de défaut structurel, **pas
 une exactitude sur données réelles** — le corpus a été conçu par le même auteur
 que le moteur. Le chiffre vendable ne pourra être annoncé qu'après mesure sur un
 relevé réel accompagné de sa vérité terrain (voir
@@ -111,11 +149,21 @@ src/rapprochement/
   moteur.py         appariement
   relances.py       génération des emails
   rapport.py        tableau de suivi et statistiques
+  cycle.py          lecture d'un dossier d'entrée complet (alias et règles apprises compris)
+  evaluation.py     mesure contre la vérité terrain
+  interface/        serveur web local + pages (HTML, CSS, JS sans dépendance)
 scripts/
   generer_corpus.py corpus synthétique + vérité terrain
   lancer.py         cycle complet
   evaluer.py        mesure contre la vérité terrain
+  interface.py      lance l'interface graphique
+Demarrer_interface.bat   lancement par double-clic sous Windows
 ```
+
+Un dossier d'entrée contient `releve_bancaire.csv`, `pieces_recues.csv` et
+`dossiers.csv`, plus, s'ils existent, `alias_fournisseurs.csv`,
+`exclusions_dossier.csv` et `verite_terrain.csv`. Les trois commandes et
+l'interface lisent ces fichiers de la même façon.
 
 ## Déploiement prévu
 

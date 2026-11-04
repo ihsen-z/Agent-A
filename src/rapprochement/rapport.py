@@ -26,10 +26,14 @@ ENTETES_SUIVI = (
 
 
 def ecrire_suivi(rapprochements: list[Rapprochement], chemin: Path | str) -> Path:
-    """Tableau de suivi a importer dans Google Sheets."""
+    """Tableau de suivi a importer dans Google Sheets ou Excel.
+
+    Encode en UTF-8 avec BOM : sans lui, Excel sous Windows lit les accents
+    des motifs comme "Ã©". Google Sheets ignore le BOM.
+    """
     chemin = Path(chemin)
     chemin.parent.mkdir(parents=True, exist_ok=True)
-    with open(chemin, "w", newline="", encoding="utf-8") as f:
+    with open(chemin, "w", newline="", encoding="utf-8-sig") as f:
         ecrivain = csv.writer(f)
         ecrivain.writerow(ENTETES_SUIVI)
         for r in sorted(
@@ -81,15 +85,15 @@ def resume(rapprochements: list[Rapprochement]) -> str:
     s = statistiques(rapprochements)
     return "\n".join(
         [
-            f"Operations analysees        : {s['operations']}",
-            f"  hors perimetre (sans piece): {s['hors_perimetre']}",
-            f"  justifiees                 : {s['justifie']}",
-            f"  a verifier                 : {s['a_verifier']}",
+            f"Opérations analysées        : {s['operations']}",
+            f"  hors périmètre (sans pièce): {s['hors_perimetre']}",
+            f"  justifiées                 : {s['justifie']}",
+            f"  à vérifier                 : {s['a_verifier']}",
             f"  paiements partiels         : {s['partiel']}",
-            f"  PIECES MANQUANTES          : {s['manquant']}"
+            f"  PIÈCES MANQUANTES          : {s['manquant']}"
             f"  ({s['montant_manquant']:.2f} EUR)",
             "",
-            f"Traite sans intervention    : {s['taux_automatisation']} %",
+            f"Traité sans intervention    : {s['taux_automatisation']} %",
             f"Lignes restant au comptable : {s['lignes_a_traiter']}",
         ]
     )

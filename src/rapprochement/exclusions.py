@@ -55,7 +55,7 @@ class RegleExclusion:
 REGLES: tuple[RegleExclusion, ...] = (
     RegleExclusion(
         nom="salaires",
-        motif="Salaire ou acompte de paie : justifie par le bulletin de paie",
+        motif="Salaire ou acompte de paie : justifié par le bulletin de paie",
         motifs_regex=(
             r"\bvir(ement)?\s+(de\s+)?salaire",
             r"\bsalaire[s]?\b",
@@ -67,7 +67,7 @@ REGLES: tuple[RegleExclusion, ...] = (
     ),
     RegleExclusion(
         nom="charges_sociales",
-        motif="Charge sociale : justifiee par le bordereau de l'organisme",
+        motif="Charge sociale : justifiée par le bordereau de l'organisme",
         motifs_regex=(
             r"\burssaf\b", r"\bmsa\b", r"\bagirc\b", r"\barrco\b",
             r"\bmalakoff\b", r"\bag2r\b", r"\bklesia\b", r"\bpro\s?btp\b",
@@ -79,7 +79,7 @@ REGLES: tuple[RegleExclusion, ...] = (
     ),
     RegleExclusion(
         nom="impots_taxes",
-        motif="Impot ou taxe : justifie par l'avis ou la declaration",
+        motif="Impôt ou taxe : justifié par l'avis ou la déclaration",
         motifs_regex=(
             r"\bdgfip\b", r"\bd\.?g\.?f\.?i\.?p\b", r"\btresor\s+public\b",
             r"\bimpot[s]?\b", r"\bsie\b", r"\bcfe\b",
@@ -91,7 +91,7 @@ REGLES: tuple[RegleExclusion, ...] = (
     ),
     RegleExclusion(
         nom="frais_bancaires",
-        motif="Frais bancaire : justifie par le releve lui-meme",
+        motif="Frais bancaires : justifiés par le relevé lui-même",
         motifs_regex=(
             r"\bfrais\s+(bancaire|de\s+tenue|sur\s+virement)",
             r"\bcommission[s]?\s+(d[\'e]|de\s+)?",
@@ -103,7 +103,7 @@ REGLES: tuple[RegleExclusion, ...] = (
     ),
     RegleExclusion(
         nom="emprunts",
-        motif="Echeance d'emprunt : justifiee par le tableau d'amortissement",
+        motif="Échéance d'emprunt : justifiée par le tableau d'amortissement",
         motifs_regex=(
             r"\bech(eance)?\s+(pret|emprunt|credit)",
             r"\bremboursement\s+(pret|emprunt)",
@@ -140,7 +140,7 @@ REGLES: tuple[RegleExclusion, ...] = (
     ),
     RegleExclusion(
         nom="rejets_et_annulations",
-        motif="Rejet ou annulation technique : sans piece propre",
+        motif="Rejet ou annulation technique : sans pièce propre",
         motifs_regex=(
             r"\brejet\s+(prelevement|cheque|virement)",
             r"\bannulation\b", r"\bcontre[\s-]?passation\b",
@@ -169,6 +169,19 @@ def _contre_exemple(operation: OperationBancaire) -> bool:
     )
 
 
+def regle_apprise_correspond(motif_regex: str, operation: OperationBancaire) -> bool:
+    """La regle apprise `motif_regex` s'appliquerait-elle a cette operation ?
+
+    Ignore les regles generales : sert a mesurer la portee d'une seule regle.
+    """
+    if _contre_exemple(operation):
+        return False
+    return any(re.search(motif_regex, forme) for forme in _formes(operation.libelle))
+
+
+MOTIF_APPRIS = "Exclu par le cabinet"
+
+
 class Referentiel:
     """Regles generales + exclusions apprises par dossier."""
 
@@ -181,12 +194,54 @@ class Referentiel:
         """Charge exclusions_dossier.csv : dossier,motif_regex,motif."""
         apprises: dict[str, list[tuple[str, str]]] = {}
         if chemin and Path(chemin).exists():
-            with open(chemin, newline="", encoding="utf-8") as f:
-                for ligne in csv.DictReader(f):
-                    apprises.setdefault(ligne["dossier"], []).append(
-                        (ligne["motif_regex"], ligne.get("motif", "Exclu par le cabinet"))
+            with open(chemin, newline="", encoding="utf-8-sig") as f:
+                for numero, ligne in enumerate(csv.DictReader(f), start=2):
+                    dossier = (ligne.get("dossier") or "").strip()
+                    motif_regex = (ligne.get("motif_regex") or "").strip()
+                    if not dossier or not motif_regex:
+                        continue
+                    try:
+                        re.compile(motif_regex)
+                    except re.error as exc:
+                        raise ValueError(
+                            f"{Path(chemin).name} ligne {numero} : expression "
+                            f"invalide {motif_regex!r} ({exc})"
+                        ) from exc
+                    apprises.setdefault(dossier, []).append(
+                        (motif_regex, (ligne.get("motif") or "").strip() or MOTIF_APPRIS)
                     )
         return cls(apprises)
+
+    # -- regles apprises : ajout et retrait par le comptable ----------------
+
+    def ajouter(self, dossier: str, motif_regex: str, motif: str = "") -> None:
+        re.compile(motif_regex)  # leve re.error si l'expression est invalide
+        regles = self.apprises.setdefault(dossier, [])
+        if any(r == motif_regex for r, _ in regles):
+            return
+        regles.append((motif_regex, motif.strip() or MOTIF_APPRIS))
+
+    def retirer(self, dossier: str, motif_regex: str) -> bool:
+        regles = self.apprises.get(dossier, [])
+        restantes = [(r, m) for r, m in regles if r != motif_regex]
+        if len(restantes) == len(regles):
+            return False
+        if restantes:
+            self.apprises[dossier] = restantes
+        else:
+            self.apprises.pop(dossier, None)
+        return True
+
+    def ecrire_csv(self, chemin: Path | str) -> Path:
+        chemin = Path(chemin)
+        chemin.parent.mkdir(parents=True, exist_ok=True)
+        with open(chemin, "w", newline="", encoding="utf-8") as f:
+            ecrivain = csv.writer(f)
+            ecrivain.writerow(("dossier", "motif_regex", "motif"))
+            for dossier in sorted(self.apprises):
+                for motif_regex, motif in self.apprises[dossier]:
+                    ecrivain.writerow((dossier, motif_regex, motif))
+        return chemin
 
     def exclure(self, operation: OperationBancaire) -> tuple[bool, str, str]:
         """Renvoie (exclue, motif lisible, nom de la regle)."""

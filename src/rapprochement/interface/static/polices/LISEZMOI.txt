@@ -1,0 +1,4 @@
+IBM Plex Sans 5.2.8 et IBM Plex Mono 5.2.7, sous-ensemble latin, poids normaux.
+Source : paquets npm @fontsource/ibm-plex-sans et @fontsource/ibm-plex-mono.
+Licence : SIL Open Font License 1.1 (fichiers OFL-*.txt).
+Embarquees localement pour que l interface fonctionne hors connexion.

@@ -8,40 +8,22 @@ commercialement :
     pas. C'est ce qui fait abandonner l'outil. Objectif : < 2 %.
   - manques rates   : une piece reellement manquante non signalee. C'est ce qui
     fait rater une declaration. Objectif : 0 %.
+
+Les alias et les exclusions apprises du dossier d'entree sont pris en compte,
+comme dans scripts/lancer.py et dans l'interface.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
-from collections import Counter
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RACINE / "src"))
 
-from rapprochement.exclusions import Referentiel          # noqa: E402
-from rapprochement.modeles import Statut                   # noqa: E402
-from rapprochement.moteur import Moteur                    # noqa: E402
-from rapprochement.parseurs import lire_pieces, lire_releve  # noqa: E402
-
-# Le comptable ne distingue pas "justifie" de "a verifier" : dans les deux cas
-# il ne relance pas le client. On evalue donc sur l'action, pas sur l'etiquette.
-def action(statut: Statut) -> str:
-    if statut is Statut.MANQUANT:
-        return "relancer"
-    if statut is Statut.HORS_PERIMETRE:
-        return "ignorer"
-    return "traiter"
-
-
-ACTION_ATTENDUE = {
-    "manquant": "relancer",
-    "hors_perimetre": "ignorer",
-    "justifie": "traiter",
-    "partiel": "traiter",
-}
+from rapprochement.cycle import FICHIERS, executer         # noqa: E402
+from rapprochement.evaluation import evaluer, lire_verite   # noqa: E402
 
 
 def main() -> int:
@@ -51,73 +33,45 @@ def main() -> int:
     args = parseur.parse_args()
 
     entree = Path(args.entree)
-    operations = lire_releve(entree / "releve_bancaire.csv")
-    pieces = lire_pieces(entree / "pieces_recues.csv")
+    cycle = executer(entree, exiger_dossiers=False)
+    ev = evaluer(cycle.rapprochements, lire_verite(entree / FICHIERS["verite"]))
 
-    with open(entree / "verite_terrain.csv", newline="", encoding="utf-8") as f:
-        verite = {l["reference"]: l for l in csv.DictReader(f)}
-
-    moteur = Moteur(Referentiel.depuis_csv(entree / "exclusions_dossier.csv"))
-    rapprochements = moteur.rapprocher(operations, pieces)
-
-    matrice: Counter[tuple[str, str]] = Counter()
-    erreurs: list[str] = []
-    par_statut_attendu: Counter[str] = Counter()
-    justes_par_statut: Counter[str] = Counter()
-
-    for r in rapprochements:
-        attendu_brut = verite.get(r.operation.reference, {}).get("statut")
-        if attendu_brut is None:
-            continue
-        attendu = ACTION_ATTENDUE[attendu_brut]
-        obtenu = action(r.statut)
-        matrice[(attendu, obtenu)] += 1
-        par_statut_attendu[attendu_brut] += 1
-        if attendu == obtenu:
-            justes_par_statut[attendu_brut] += 1
-        else:
-            erreurs.append(
-                f"  {r.operation.reference}  attendu={attendu_brut:14s} "
-                f"obtenu={r.statut.value:14s} regle={r.regle:22s} "
-                f"| {r.operation.libelle[:52]}"
-            )
-
-    total = sum(matrice.values()) or 1
-    justes = sum(v for (a, o), v in matrice.items() if a == o)
-
-    fausses_alertes = matrice[("ignorer", "relancer")] + matrice[("traiter", "relancer")]
-    a_relancer = sum(v for (a, _), v in matrice.items() if a == "relancer") or 1
-    manques_rates = sum(
-        v for (a, o), v in matrice.items() if a == "relancer" and o != "relancer"
-    )
-    non_relancer = total - a_relancer
-
-    print(f"Operations evaluees : {total}")
-    print(f"Decisions correctes : {justes} ({100 * justes / total:.1f} %)")
+    print(f"Operations evaluees : {ev.total}")
+    print(f"Decisions correctes : {ev.justes} ({100 * ev.taux_correct:.1f} %)")
     print()
     print("Par categorie attendue :")
-    for statut, n in sorted(par_statut_attendu.items()):
-        print(f"  {statut:16s} {justes_par_statut[statut]:4d}/{n:<4d}  "
-              f"({100 * justes_par_statut[statut] / n:5.1f} %)")
+    for statut, (justes, n) in ev.par_statut.items():
+        print(f"  {statut:16s} {justes:4d}/{n:<4d}  ({100 * justes / n:5.1f} %)")
     print()
     print("Les deux chiffres qui comptent :")
     print(
-        f"  Fausses alertes  : {fausses_alertes}/{non_relancer} "
-        f"({100 * fausses_alertes / max(non_relancer, 1):.2f} %)   cible < 2 %"
+        f"  Fausses alertes  : {ev.fausses_alertes}/{ev.non_relancer} "
+        f"({100 * ev.taux_fausses_alertes:.2f} %)   cible < 2 %"
     )
     print(
-        f"  Manques rates    : {manques_rates}/{a_relancer} "
-        f"({100 * manques_rates / a_relancer:.2f} %)   cible 0 %"
+        f"  Manques rates    : {ev.manques_rates}/{ev.a_relancer} "
+        f"({100 * ev.taux_manques_rates:.2f} %)   cible 0 %"
     )
 
-    if args.detail and erreurs:
-        print(f"\nDetail des {len(erreurs)} erreurs :")
-        for ligne in erreurs[:40]:
-            print(ligne)
-        if len(erreurs) > 40:
-            print(f"  ... et {len(erreurs) - 40} autres")
+    if ev.pieces_controlees:
+        print(
+            f"  Pieces rattachees : {ev.pieces_controlees - ev.pieces_erronees}/"
+            f"{ev.pieces_controlees} conformes a la verite terrain"
+        )
 
-    return 0 if fausses_alertes / max(non_relancer, 1) < 0.02 and manques_rates == 0 else 1
+    if args.detail and ev.erreurs:
+        print(f"\nDetail des {len(ev.erreurs)} erreurs :")
+        for e in ev.erreurs[:40]:
+            r = e.rapprochement
+            print(
+                f"  {r.operation.reference}  attendu={e.attendu:14s} "
+                f"obtenu={r.statut.value:14s} regle={r.regle:22s} "
+                f"| {r.operation.libelle[:52]}"
+            )
+        if len(ev.erreurs) > 40:
+            print(f"  ... et {len(ev.erreurs) - 40} autres")
+
+    return 0 if ev.cibles_atteintes else 1
 
 
 if __name__ == "__main__":
