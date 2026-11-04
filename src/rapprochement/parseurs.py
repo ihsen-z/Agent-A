@@ -52,10 +52,17 @@ def lire_montant(valeur: str) -> Decimal:
 def _exiger(entetes: set[str], attendues: set[str], fichier: str) -> None:
     manquantes = attendues - entetes
     if manquantes:
-        raise ErreurFormat(
-            f"{fichier} : colonnes manquantes {sorted(manquantes)}. "
-            f"Colonnes trouvees : {sorted(entetes)}"
+        message = (
+            f"{fichier} : colonnes manquantes : {', '.join(sorted(manquantes))}. "
+            f"Colonnes trouvées : {', '.join(sorted(entetes)) or 'aucune'}."
         )
+        if len(entetes) == 1 and ";" in next(iter(entetes)):
+            message += (
+                " Le fichier utilise le point-virgule comme séparateur (export Excel "
+                "français) : enregistrez-le en CSV séparé par des virgules, avec les "
+                "colonnes du modèle."
+            )
+        raise ErreurFormat(message)
 
 
 def lire_releve(chemin: Path | str, dossier_defaut: str | None = None) -> list[OperationBancaire]:

@@ -59,6 +59,10 @@ class Evaluation:
     non_relancer: int = 0
     manques_rates: int = 0
     a_relancer: int = 0
+    # Rapprochements dont l'action est juste mais la piece rattachee n'est
+    # pas celle de la verite terrain (deux factures echangees, par exemple).
+    pieces_controlees: int = 0
+    pieces_erronees: int = 0
     # statut attendu -> (decisions justes, total)
     par_statut: dict[str, tuple[int, int]] = field(default_factory=dict)
     erreurs: list[Erreur] = field(default_factory=list)
@@ -91,6 +95,7 @@ def evaluer(
     par_statut_attendu: Counter[str] = Counter()
     justes_par_statut: Counter[str] = Counter()
     erreurs: list[Erreur] = []
+    pieces_controlees = pieces_erronees = 0
 
     for r in rapprochements:
         attendu_brut = verite.get(r.operation.reference, {}).get("statut")
@@ -102,6 +107,15 @@ def evaluer(
         par_statut_attendu[attendu_brut] += 1
         if attendu == obtenu:
             justes_par_statut[attendu_brut] += 1
+            attendues = {
+                x.strip()
+                for x in (verite[r.operation.reference].get("id_piece_rattachee") or "").split("+")
+                if x.strip()
+            }
+            if attendues and r.pieces:
+                pieces_controlees += 1
+                if {p.id_piece for p in r.pieces} != attendues:
+                    pieces_erronees += 1
         else:
             erreurs.append(Erreur(r, attendu_brut))
 
@@ -116,6 +130,8 @@ def evaluer(
             v for (a, o), v in matrice.items() if a == "relancer" and o != "relancer"
         ),
         a_relancer=a_relancer,
+        pieces_controlees=pieces_controlees,
+        pieces_erronees=pieces_erronees,
         par_statut={
             s: (justes_par_statut[s], n) for s, n in sorted(par_statut_attendu.items())
         },

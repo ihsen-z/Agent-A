@@ -190,10 +190,6 @@ def prochaine_echeance(jour: int, aujourdhui: dt.date) -> dt.date:
     return dt.date(annee, 1 if mois > 12 else mois, jour)
 
 
-# Ancien nom, conserve pour compatibilite.
-_prochaine_echeance = prochaine_echeance
-
-
 def construire_toutes(
     dossiers: dict[str, Dossier],
     rapprochements: list[Rapprochement],

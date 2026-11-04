@@ -169,6 +169,16 @@ def _contre_exemple(operation: OperationBancaire) -> bool:
     )
 
 
+def regle_apprise_correspond(motif_regex: str, operation: OperationBancaire) -> bool:
+    """La regle apprise `motif_regex` s'appliquerait-elle a cette operation ?
+
+    Ignore les regles generales : sert a mesurer la portee d'une seule regle.
+    """
+    if _contre_exemple(operation):
+        return False
+    return any(re.search(motif_regex, forme) for forme in _formes(operation.libelle))
+
+
 MOTIF_APPRIS = "Exclu par le cabinet"
 
 

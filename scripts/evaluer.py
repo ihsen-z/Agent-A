@@ -53,6 +53,12 @@ def main() -> int:
         f"({100 * ev.taux_manques_rates:.2f} %)   cible 0 %"
     )
 
+    if ev.pieces_controlees:
+        print(
+            f"  Pieces rattachees : {ev.pieces_controlees - ev.pieces_erronees}/"
+            f"{ev.pieces_controlees} conformes a la verite terrain"
+        )
+
     if args.detail and ev.erreurs:
         print(f"\nDetail des {len(ev.erreurs)} erreurs :")
         for e in ev.erreurs[:40]:

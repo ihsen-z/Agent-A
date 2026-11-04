@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relance des justificatifs</title>
+  <meta name="description" content="Rapprochement bancaire et relance des pièces justificatives manquantes">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230B5563'/%3E%3Cpath d='M10 8h8l4 4v12H10z' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='m13 18 2.5 2.5L20 15' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="barre" aria-label="Navigation principale">
+      <a class="marque" href="#/accueil" aria-label="Accueil">
+        <span class="marque-logo" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M10 8h8l4 4v12H10z"/><path d="m13 18 2.5 2.5L20 15"/></svg>
+        </span>
+        <span class="marque-texte">
+          <strong>Relance des justificatifs</strong>
+          <small>Rapprochement bancaire</small>
+        </span>
+      </a>
+      <nav class="nav" id="nav"></nav>
+      <div class="barre-pied">
+        <div id="source"></div>
+        <p class="local">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+          Traitement 100 % local : aucune donnée ne quitte ce poste.
+        </p>
+      </div>
+    </aside>
+    <main class="contenu" id="contenu" tabindex="-1">
+      <div id="vue" class="vue"><p class="chargement">Chargement…</p></div>
+    </main>
+  </div>
+  <div id="couche"></div>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
