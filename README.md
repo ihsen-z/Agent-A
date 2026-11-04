@@ -76,6 +76,12 @@ et mouvement sont définis dans
 [design-system/relance-des-justificatifs/MASTER.md](design-system/relance-des-justificatifs/MASTER.md),
 établi avec le skill `ui-ux-pro-max` (`.claude/skills/`).
 
+Une **version en ligne**, en lecture seule, se construit avec
+`python3 scripts/construire_demo_en_ligne.py` : un seul fichier HTML qui
+embarque l'analyse du jeu de démonstration, publiable comme page statique sans
+serveur. Elle sert à faire essayer l'interface sans rien installer ; l'import,
+les règles apprises et les exports restent dans l'application installée.
+
 L'interface travaille sur une copie (`data/sorties/interface/`) : le corpus
 versionné n'est jamais modifié. Elle repart des données de démonstration à
 chaque lancement (`--conserver` pour reprendre l'espace précédent). L'import

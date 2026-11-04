@@ -3,6 +3,19 @@
    l'analyse renvoyee par /api/analyse et transmettre les actions. */
 "use strict";
 
+// -- mode en ligne -------------------------------------------------------------
+// La version publiee en ligne (scripts/construire_demo_en_ligne.py) embarque
+// l'analyse du jeu de demonstration : lecture seule, sans serveur Python.
+const EN_LIGNE = typeof window.ANALYSE_EMBARQUEE === "object" && window.ANALYSE_EMBARQUEE !== null;
+const MESSAGE_EN_LIGNE =
+  "Disponible dans l'application installée sur votre PC (Demarrer_interface.bat) : la version en ligne est en lecture seule.";
+const siLocal = (html) => (EN_LIGNE ? "" : html);
+
+// Adresse d'un ecran : "#tableau", "#operations--manquant", "#relances--MARTIN-BTP".
+// Lettres, chiffres et tirets seulement, pour passer partout (y compris en ligne).
+const lien = (nom, param) => `#${nom}${param ? `--${String(param).replace(/_/g, "-")}` : ""}`;
+const memeCle = (a, b) => String(a).replace(/_/g, "-") === String(b).replace(/_/g, "-");
+
 // -- etat ------------------------------------------------------------------
 
 const etat = {
@@ -146,6 +159,10 @@ const raisonSociale = (code) =>
 // -- echanges avec le serveur local -------------------------------------------
 
 async function api(chemin, corps) {
+  if (EN_LIGNE) {
+    if (corps === undefined && chemin === "/api/analyse") return structuredClone(window.ANALYSE_EMBARQUEE);
+    throw new Error(MESSAGE_EN_LIGNE);
+  }
   const options = corps === undefined ? {} : {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -263,8 +280,9 @@ const VUES = {
 };
 
 function route() {
-  const [nom, ...reste] = location.hash.replace(/^#\/?/, "").split("/");
-  return { nom: VUES[nom] ? nom : "accueil", param: reste.map(decodeURIComponent).join("/") };
+  const brut = location.hash.replace(/^#\/?/, "");
+  const [nom, ...reste] = brut.includes("/") ? brut.split("/") : brut.split("--");
+  return { nom: VUES[nom] ? nom : "accueil", param: reste.map(decodeURIComponent).join("--") };
 }
 
 function rendreNav(courante) {
@@ -274,7 +292,7 @@ function rendreNav(courante) {
     relances: a ? `<span class="compteur">${a.relances.length}</span>` : "",
   };
   document.getElementById("nav").innerHTML = Object.entries(VUES)
-    .map(([nom, v]) => `<a href="#/${nom}" ${nom === courante ? 'aria-current="page"' : ""}>${ico(v.icone)}<span>${v.titre}</span>${compteurs[nom] || ""}</a>`)
+    .map(([nom, v]) => `<a href="${lien(nom)}" ${nom === courante ? 'aria-current="page"' : ""}>${ico(v.icone)}<span>${v.titre}</span>${compteurs[nom] || ""}</a>`)
     .join("");
 }
 
@@ -289,10 +307,11 @@ function rendreSource() {
         <span>${demo ? "Données de démonstration" : "Fichiers importés"}
           <small>${pluriel(a.volumes.dossiers, "dossier")} · ${esc(periode(a.periode))}</small></span>
       </div>
-      <div class="source-actions">
+      ${EN_LIGNE ? `<p class="source-note">Version en ligne, en lecture seule. Import, règles et exports : dans l'application installée sur le PC.</p>` : ""}
+      ${siLocal(`<div class="source-actions">
         <button class="btn btn-petit" data-action="importer">${ico("upload")} Importer</button>
         <button class="btn btn-petit" data-action="revenir-demo" title="Recharger les données de démonstration et oublier les règles ajoutées">${ico("remise")} Réinitialiser</button>
-      </div>
+      </div>`)}
     </div>`;
 }
 
@@ -360,7 +379,7 @@ function vueAccueil() {
         ${volumes}
         <div class="actions">
           <button class="btn btn-primaire btn-grand" data-action="lancer">${ico("play")} Lancer le rapprochement</button>
-          <button class="btn btn-secondaire btn-grand" data-action="importer">${ico("upload")} Importer vos fichiers</button>
+          ${siLocal(`<button class="btn btn-secondaire btn-grand" data-action="importer">${ico("upload")} Importer vos fichiers</button>`)}
         </div>
         <div id="etapes"></div>
       </div>
@@ -411,7 +430,7 @@ async function lancer(bouton) {
   }
   await pause(delai);
   etat.reveler = true;
-  location.hash = "#/tableau";
+  location.hash = lien("tableau");
 }
 
 // -- vue : tableau de bord ----------------------------------------------------------
@@ -461,7 +480,7 @@ function vueTableau() {
       <td class="num ${d.manquant ? "rouge" : ""}">${nb(d.manquant)}</td>
       <td class="num">${eur(d.montant_manquant)}</td>
       <td>${d.echeance_tva ? `${dateFr(d.echeance_tva)} <span class="attenue">· ${ech <= 0 ? "aujourd'hui" : `dans ${ech} j`}</span>` : "—"}</td>
-      <td class="num">${d.a_une_relance ? `<a class="btn btn-fantome btn-petit" href="#/relances/${encodeURIComponent(d.code)}">Voir la relance</a>` : '<span class="attenue">Complet</span>'}</td>
+      <td class="num">${d.a_une_relance ? `<a class="btn btn-fantome btn-petit" href="${lien("relances", d.code)}">Voir la relance</a>` : '<span class="attenue">Complet</span>'}</td>
     </tr>`;
   }).join("");
 
@@ -472,7 +491,7 @@ function vueTableau() {
         <p class="sous-titre">${esc(periode(a.periode))} · ${pluriel(a.volumes.dossiers, "dossier client", "dossiers clients")} · analysé le ${dateHeure(a.genere_le)}</p>
       </div>
       <div class="entete-actions">
-        <a class="btn btn-secondaire" href="/api/export/tableau_suivi.csv" download>${ico("download")} Exporter le tableau de suivi</a>
+        ${siLocal(`<a class="btn btn-secondaire" href="/api/export/tableau_suivi.csv" download>${ico("download")} Exporter le tableau de suivi</a>`)}
       </div>
     </header>
 
@@ -487,7 +506,7 @@ function vueTableau() {
         <p class="kpi-libelle">Pièces manquantes</p>
         <p class="kpi-valeur"><span data-compteur="${s.manquant}">${nb(s.manquant)}</span></p>
         <p class="kpi-note">${eur(s.montant_manquant)} de paiements à justifier</p>
-        <a class="kpi-lien" href="#/operations/manquant">Voir la liste →</a>
+        <a class="kpi-lien" href="${lien("operations", "manquant")}">Voir la liste →</a>
       </article>
       <article class="kpi">
         <p class="kpi-libelle">Reste au comptable</p>
@@ -498,7 +517,7 @@ function vueTableau() {
         <p class="kpi-libelle">Relances prêtes</p>
         <p class="kpi-valeur"><span data-compteur="${a.relances.length}">${nb(a.relances.length)}</span></p>
         <p class="kpi-note">Un seul e-mail par client, toutes pièces regroupées</p>
-        <a class="kpi-lien" href="#/relances">Voir les e-mails →</a>
+        <a class="kpi-lien" href="${lien("relances")}">Voir les e-mails →</a>
       </article>
     </section>
 
@@ -541,7 +560,8 @@ function vueTableau() {
 function vueOperations(param) {
   const a = etat.analyse;
   if (!a) return "";
-  if (param && (STATUTS[param] || param === "tous")) etat.filtres.statut = param;
+  const statutDemande = Object.keys(STATUTS).find((s) => memeCle(s, param));
+  if (statutDemande || param === "tous") etat.filtres.statut = statutDemande || "tous";
   const compte = { tous: a.operations.length };
   for (const o of a.operations) compte[o.statut] = (compte[o.statut] || 0) + 1;
 
@@ -560,7 +580,7 @@ function vueOperations(param) {
         <p class="sous-titre">Chaque ligne du relevé, sa décision et la règle qui l'a tranchée. Cliquez sur une ligne pour le détail.</p>
       </div>
       <div class="entete-actions">
-        <a class="btn btn-secondaire" href="/api/export/tableau_suivi.csv" download>${ico("download")} Exporter</a>
+        ${siLocal(`<a class="btn btn-secondaire" href="/api/export/tableau_suivi.csv" download>${ico("download")} Exporter</a>`)}
       </div>
     </header>
     <section class="carte">
@@ -670,7 +690,7 @@ function ouvrirOperation(reference) {
           <b>${eur(p.montant, p.devise)}</b>
         </div>`).join("")}
     </section>` : "";
-  const apprendre = o.statut === "manquant" ? `
+  const apprendre = o.statut === "manquant" && !EN_LIGNE ? `
     <details class="apprendre">
       <summary>Cette opération n'exige pas de facture ?</summary>
       <div class="apprendre-corps">
@@ -745,7 +765,8 @@ function vueRelances(param) {
   if (!a.relances.length) {
     return `${entete}<section class="carte"><div class="vide"><span class="ico">${ico("check")}</span><strong>Aucune pièce manquante</strong><span>Tous les paiements sont justifiés : aucune relance à envoyer ce mois-ci.</span></div></section>`;
   }
-  const choisie = a.relances.find((r) => r.dossier === param) || a.relances.find((r) => r.dossier === etat.relance) || a.relances[0];
+  const choisie = (param && a.relances.find((r) => memeCle(r.dossier, param)))
+    || a.relances.find((r) => r.dossier === etat.relance) || a.relances[0];
   etat.relance = choisie.dossier;
 
   const liste = a.relances.map((r) => `
@@ -773,9 +794,9 @@ function vueRelances(param) {
         </header>
         <div class="mail-corps">${esc(choisie.corps)}</div>
         <footer class="mail-actions">
-          <a class="btn btn-primaire" href="${mailto}">${ico("envoi")} Ouvrir dans ma messagerie</a>
-          <button class="btn btn-secondaire" data-action="copier-relance">${ico("copie")} Copier le texte</button>
-          <a class="btn btn-fantome" href="/api/export/relance/${encodeURIComponent(choisie.dossier)}.txt" download>${ico("download")} Télécharger (.txt)</a>
+          ${siLocal(`<a class="btn btn-primaire" href="${mailto}">${ico("envoi")} Ouvrir dans ma messagerie</a>`)}
+          <button class="btn ${EN_LIGNE ? "btn-primaire" : "btn-secondaire"}" data-action="copier-relance">${ico("copie")} Copier le texte</button>
+          ${siLocal(`<a class="btn btn-fantome" href="/api/export/relance/${encodeURIComponent(choisie.dossier)}.txt" download>${ico("download")} Télécharger (.txt)</a>`)}
         </footer>
       </article>
     </div>`;
@@ -814,7 +835,7 @@ function vueRegles() {
             <td><code>${esc(r.motif_regex)}</code></td>
             <td>${esc(r.motif)}</td>
             <td class="num">${nb(r.operations)}</td>
-            <td class="num"><button class="btn btn-danger btn-petit" data-action="oublier" data-dossier="${esc(r.dossier)}" data-regle="${esc(r.motif_regex)}">${ico("poubelle")} Retirer</button></td>
+            <td class="num">${siLocal(`<button class="btn btn-danger btn-petit" data-action="oublier" data-dossier="${esc(r.dossier)}" data-regle="${esc(r.motif_regex)}">${ico("poubelle")} Retirer</button>`)}</td>
           </tr>`).join("")}
         </tbody>
       </table>
@@ -843,12 +864,12 @@ function vueRegles() {
         <p>Opérations récurrentes propres à un dossier : syndic, cotisations ordinales, redevances… Une règle se crée en un clic depuis une opération réclamée à tort.</p>
       </div>
       ${apprises}
-      <form class="formulaire-regle" data-form="regle">
+      ${siLocal(`<form class="formulaire-regle" data-form="regle">
         <label class="champ">Dossier<select class="saisie" name="dossier">${options}</select></label>
         <label class="champ">Mots du libellé<input class="saisie" name="expr" placeholder="ex. : redevance occupation" required autocomplete="off"></label>
         <label class="champ">Justification<input class="saisie" name="motif" placeholder="ex. : redevance annuelle, justifiée par la convention" autocomplete="off"></label>
         <button class="btn btn-primaire" type="submit">Ajouter</button>
-      </form>
+      </form>`)}
     </section>
 
     <div class="grille-2">
@@ -1043,7 +1064,7 @@ async function validerImport(bouton) {
     etat.reveler = true;
     toast(`Fichiers importés : ${pluriel(etat.analyse.volumes.operations, "opération")} analysées.`);
     fermerCouche();
-    location.hash = "#/tableau";
+    location.hash = lien("tableau");
     await rendre();
   } catch (e) {
     erreur.textContent = e.message;
@@ -1112,12 +1133,12 @@ document.addEventListener("click", async (ev) => {
     case "copier-relance": return copierRelance();
     case "filtrer":
       etat.filtres.statut = el.dataset.statut;
-      location.hash = `#/operations/${el.dataset.statut}`;
+      location.hash = lien("operations", el.dataset.statut);
       return;
     case "statut":
       etat.filtres.statut = el.dataset.statut;
       document.querySelectorAll(".puce").forEach((p) => p.setAttribute("aria-pressed", p.dataset.statut === etat.filtres.statut));
-      history.replaceState(null, "", `#/operations/${etat.filtres.statut}`);
+      history.replaceState(null, "", lien("operations", etat.filtres.statut));
       majTableOperations();
       return fondu(document.getElementById("corps-ops"), 0);
     case "trier": {
@@ -1132,7 +1153,7 @@ document.addEventListener("click", async (ev) => {
     }
     case "choisir-relance":
       etat.relance = el.dataset.dossier;
-      history.replaceState(null, "", `#/relances/${encodeURIComponent(el.dataset.dossier)}`);
+      history.replaceState(null, "", lien("relances", el.dataset.dossier));
       document.getElementById("vue").innerHTML = vueRelances(el.dataset.dossier);
       return fondu(document.querySelector(".mail"));
   }
