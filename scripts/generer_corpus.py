@@ -22,7 +22,7 @@ from pathlib import Path
 RACINE = Path(__file__).resolve().parents[1]
 
 DOSSIERS = [
-    ("MARTIN-BTP", "Martin Batiment SARL", "compta@martin-batiment.fr", "M. Martin", 15, "direct"),
+    ("MARTIN-BTP", "Martin Bâtiment SARL", "compta@martin-batiment.fr", "M. Martin", 15, "direct"),
     ("LOPEZ-CONSEIL", "Lopez Conseil SAS", "s.lopez@lopez-conseil.fr", "Sophie Lopez", 24, "courtois"),
     ("ATELIER-9", "Atelier 9 SASU", "contact@atelier9.fr", "", 15, "courtois"),
 ]
@@ -67,6 +67,20 @@ ENCAISSEMENTS = [
     ("VIR RECU CLIENT {ref}", (800, 12000)),
     ("REMISE DE CHEQUES {ref}", (400, 6500)),
     ("VIR SEPA RECU STRIPE PAYMENTS", (120, 3100)),
+]
+
+# Libelles bancaires abreges -> nom du fournisseur sur ses factures.
+ALIAS = [
+    ("amzn mktplace", "Amazon EU Sarl"),
+    ("axa france iard", "Assurance AXA Pro"),
+    ("sg credit bail", "Societe Generale Credit-Bail"),
+]
+
+# Regles apprises par le cabinet sur ses propres dossiers : operations
+# recurrentes sans facture fournisseur que les regles generales ignorent.
+EXCLUSIONS_APPRISES = [
+    ("MARTIN-BTP", "syndic copropriete", "Appel de fonds du syndic - justifié par l'appel annuel"),
+    ("MARTIN-BTP", "cotisation ordre", "Cotisation ordinale - justifiée par l'avis annuel"),
 ]
 
 MOIS_FR = ("JANV", "FEVR", "MARS", "AVRIL", "MAI", "JUIN",
@@ -394,6 +408,36 @@ def injecter_cas_difficiles(
         }
     )
 
+    # e) Operations propres au dossier, sans facture fournisseur, que seules
+    # les regles apprises par le cabinet reconnaissent. Sans elles, ce sont
+    # deux fausses alertes.
+    for jour, libelle, somme in (
+        (dt.date(2026, 3, 5), "PRLV SEPA SYNDIC COPROPRIETE LES TILLEULS ID730118", "480.00"),
+        (dt.date(2026, 2, 20), "PRLV SEPA CNOA COTISATION ORDRE 2026 ID118204", "395.00"),
+    ):
+        compteur += 1
+        reference = f"OP{compteur:06d}"
+        operations.append(
+            {
+                "dossier": "MARTIN-BTP",
+                "date_operation": jour.isoformat(),
+                "date_valeur": jour.isoformat(),
+                "libelle": libelle,
+                "debit": somme,
+                "credit": "",
+                "devise": "EUR",
+                "reference": reference,
+            }
+        )
+        verite.append(
+            {
+                "reference": reference,
+                "statut": "hors_perimetre",
+                "id_piece_rattachee": "",
+                "motif": "apprise:MARTIN-BTP",
+            }
+        )
+
 
 def ecrire(chemin: Path, lignes: list[dict], entetes: tuple[str, ...]) -> None:
     chemin.parent.mkdir(parents=True, exist_ok=True)
@@ -453,6 +497,17 @@ def main() -> None:
             for code, raison, email, contact, echeance, ton in DOSSIERS
         ],
         ("dossier", "raison_sociale", "email_contact", "nom_contact", "jour_echeance_tva", "ton_relance"),
+    )
+
+    ecrire(
+        sortie / "alias_fournisseurs.csv",
+        [{"alias": a, "fournisseur": f} for a, f in ALIAS],
+        ("alias", "fournisseur"),
+    )
+    ecrire(
+        sortie / "exclusions_dossier.csv",
+        [{"dossier": d, "motif_regex": r, "motif": m} for d, r, m in EXCLUSIONS_APPRISES],
+        ("dossier", "motif_regex", "motif"),
     )
 
     print(f"Corpus genere dans {sortie}")

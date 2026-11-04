@@ -6,6 +6,10 @@ filtrer par le client.
 
 Aucun modele de langage : un gabarit suffit et reste previsible. Le passage a
 une redaction generee (v2) n'a d'interet que pour adapter le ton par dossier.
+
+Les textes destines au client sont en francais correct (accents, elision,
+accords) : c'est le premier contact du cabinet avec son client, une faute s'y
+voit plus que partout ailleurs.
 """
 
 from __future__ import annotations
@@ -19,6 +23,9 @@ from .modeles import Dossier, Rapprochement, Statut
 # Cadence de relance, en jours depuis la premiere demande.
 CADENCE = (0, 3, 7, 14)
 
+# Nombre de jours avant l'echeance TVA a partir duquel le ton devient urgent.
+JOURS_URGENCE = 5
+
 
 @dataclass
 class Relance:
@@ -29,33 +36,87 @@ class Relance:
     nombre_pieces: int
     montant_total: Decimal
     niveau: int          # 1 = premiere demande, 2+ = relance
+    ton: str = "courtois"
+    echeance: dt.date | None = None
 
     @property
     def est_relance(self) -> bool:
         return self.niveau > 1
 
 
-_EN_TETE = {
-    1: "Nous finalisons la comptabilite de {societe} et il nous manque "
-       "{nombre} justificatif(s) pour boucler la periode.",
-    2: "Sauf erreur, nous n'avons pas encore recu les {nombre} justificatif(s) "
-       "ci-dessous, demandes le {date_demande}.",
-}
+_VOYELLES = set("aeiouyàâäéèêëîïôöùûüÿœæ")
 
-_PIED = {
-    "courtois": "Un grand merci d'avance,",
-    "direct": "Merci de nous les transmettre des que possible,",
-    "urgent": "Ces pieces conditionnent le depot de la declaration : "
-              "merci de nous les faire parvenir avant le {echeance}.",
-}
+
+def de(nom: str) -> str:
+    """Preposition "de" avec elision : "d'Atelier 9", "de Lopez Conseil"."""
+    nom = nom.strip()
+    if nom and nom[0].lower() in _VOYELLES:
+        return f"d'{nom}"
+    return f"de {nom}"
+
+
+def justificatifs(nombre: int) -> str:
+    """"1 justificatif" / "4 justificatifs"."""
+    return f"{nombre} justificatif" + ("s" if nombre > 1 else "")
+
+
+def _en_tete(niveau: int, societe: str, nombre: int, date_demande: dt.date) -> str:
+    if niveau <= 1:
+        return (
+            f"Nous finalisons la comptabilité {de(societe)} et il nous manque "
+            f"{justificatifs(nombre)} pour clôturer la période."
+        )
+    if nombre == 1:
+        return (
+            "Sauf erreur de notre part, nous n'avons pas encore reçu le "
+            f"justificatif ci-dessous, demandé le {date_demande:%d/%m/%Y}."
+        )
+    return (
+        "Sauf erreur de notre part, nous n'avons pas encore reçu les "
+        f"{justificatifs(nombre)} ci-dessous, demandés le {date_demande:%d/%m/%Y}."
+    )
+
+
+def _introduction(nombre: int) -> str:
+    if nombre == 1:
+        return (
+            "Il s'agit d'un paiement visible sur votre compte bancaire pour lequel "
+            "nous n'avons pas reçu la facture correspondante :"
+        )
+    return (
+        "Il s'agit de paiements visibles sur votre compte bancaire pour lesquels "
+        "nous n'avons pas reçu la facture correspondante :"
+    )
+
+
+def _pied(ton: str, nombre: int, echeance: dt.date) -> str:
+    seul = nombre == 1
+    if ton == "urgent":
+        if seul:
+            return (
+                "Cette pièce conditionne le dépôt de la déclaration de TVA : merci "
+                f"de nous la faire parvenir avant le {echeance:%d/%m/%Y}."
+            )
+        return (
+            "Ces pièces conditionnent le dépôt de la déclaration de TVA : merci "
+            f"de nous les faire parvenir avant le {echeance:%d/%m/%Y}."
+        )
+    if ton == "direct":
+        return f"Merci de nous {'le' if seul else 'les'} transmettre dès que possible."
+    return "Un grand merci d'avance,"
+
+
+def formater_montant(montant: Decimal) -> str:
+    """1238.97 -> "1 238,97" (separateurs francais)."""
+    return f"{montant:,.2f}".replace(",", " ").replace(".", ",")
 
 
 def _ligne_piece(rapprochement: Rapprochement) -> str:
     operation = rapprochement.operation
-    montant = f"{operation.montant:,.2f}".replace(",", " ").replace(".", ",")
     return (
-        f"  - {operation.date_operation.strftime('%d/%m/%Y')}  "
-        f"{montant} {operation.devise}  -  {operation.libelle_court}"
+        f"  - {operation.date_operation:%d/%m/%Y}  "
+        f"{formater_montant(operation.montant)} {operation.devise}  -  "
+        f"{operation.libelle_court}"
     )
 
 
@@ -74,57 +135,52 @@ def construire_relance(
     aujourdhui = aujourdhui or dt.date.today()
     manquants = sorted(manquants, key=lambda r: r.operation.date_operation)
     total = sum((r.operation.montant for r in manquants), Decimal("0"))
+    nombre = len(manquants)
 
-    echeance = _prochaine_echeance(dossier.jour_echeance_tva, aujourdhui)
-    urgence = (echeance - aujourdhui).days <= 5
+    echeance = prochaine_echeance(dossier.jour_echeance_tva, aujourdhui)
+    urgence = (echeance - aujourdhui).days <= JOURS_URGENCE
     ton = "urgent" if urgence else dossier.ton_relance
-
-    en_tete = _EN_TETE[min(niveau, 2)].format(
-        societe=dossier.raison_sociale,
-        nombre=len(manquants),
-        date_demande=(date_demande or aujourdhui).strftime("%d/%m/%Y"),
-    )
+    if ton not in ("courtois", "direct", "urgent"):
+        ton = "courtois"
 
     salutation = f"Bonjour {dossier.nom_contact}," if dossier.nom_contact else "Bonjour,"
-    pied = _PIED.get(ton, _PIED["courtois"]).format(
-        echeance=echeance.strftime("%d/%m/%Y")
-    )
 
     corps = "\n".join(
         [
             salutation,
             "",
-            en_tete,
+            _en_tete(niveau, dossier.raison_sociale, nombre, date_demande or aujourdhui),
             "",
-            "Il s'agit de paiements visibles sur le compte bancaire pour lesquels "
-            "nous n'avons pas la facture correspondante :",
+            _introduction(nombre),
             "",
             *[_ligne_piece(r) for r in manquants],
             "",
-            "Un envoi par retour de cet email suffit (photo lisible acceptee).",
+            "Un simple envoi en réponse à cet e-mail suffit (une photo lisible est acceptée).",
             "",
-            pied,
+            _pied(ton, nombre, echeance),
         ]
     )
 
-    prefixe = "Relance" if niveau > 1 else "Justificatifs"
-    objet = (
-        f"{prefixe} - {len(manquants)} justificatif(s) manquant(s) "
-        f"- {dossier.raison_sociale}"
-    )
+    sujet = f"{justificatifs(nombre)} manquant{'s' if nombre > 1 else ''}"
+    if niveau > 1:
+        objet = f"Relance : {sujet} – {dossier.raison_sociale}"
+    else:
+        objet = f"{sujet[0].upper()}{sujet[1:]} – {dossier.raison_sociale}"
 
     return Relance(
         dossier=dossier.code,
         destinataire=dossier.email_contact,
         objet=objet,
         corps=corps,
-        nombre_pieces=len(manquants),
+        nombre_pieces=nombre,
         montant_total=total,
         niveau=niveau,
+        ton=ton,
+        echeance=echeance,
     )
 
 
-def _prochaine_echeance(jour: int, aujourdhui: dt.date) -> dt.date:
+def prochaine_echeance(jour: int, aujourdhui: dt.date) -> dt.date:
     """Prochaine echeance TVA mensuelle du dossier."""
     jour = max(1, min(28, jour))
     if aujourdhui.day < jour:
@@ -132,6 +188,10 @@ def _prochaine_echeance(jour: int, aujourdhui: dt.date) -> dt.date:
     mois = aujourdhui.month + 1
     annee = aujourdhui.year + (1 if mois > 12 else 0)
     return dt.date(annee, 1 if mois > 12 else mois, jour)
+
+
+# Ancien nom, conserve pour compatibilite.
+_prochaine_echeance = prochaine_echeance
 
 
 def construire_toutes(

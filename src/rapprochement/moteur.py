@@ -176,7 +176,7 @@ class Moteur:
                 Rapprochement(
                     operation=operation,
                     statut=Statut.MANQUANT,
-                    motif="Aucune piece justificative recue pour ce paiement",
+                    motif="Aucune pièce justificative reçue pour ce paiement",
                     regle="aucun_candidat",
                 ),
             )
@@ -198,7 +198,7 @@ class Moteur:
             return Rapprochement(
                 operation=operation,
                 statut=Statut.A_VERIFIER,
-                motif="Encaissement non identifie : a rattacher a une facture de vente",
+                motif="Encaissement non identifié : à rattacher à une facture de vente",
                 regle="credit_non_identifie",
             )
         return None
@@ -271,7 +271,7 @@ class Moteur:
                 statut=Statut.JUSTIFIE if certain else Statut.A_VERIFIER,
                 pieces=[piece],
                 confiance=round(score, 3),
-                motif="" if certain else "Rapprochement probable a confirmer",
+                motif="" if certain else "Rapprochement probable, à confirmer",
                 regle="appariement_1_1",
             )
 
@@ -333,8 +333,8 @@ class Moteur:
                 statut=Statut.JUSTIFIE if certain else Statut.A_VERIFIER,
                 pieces=list(lot),
                 confiance=round(score, 3),
-                motif=f"Reglement groupe de {len(lot)} factures"
-                + ("" if certain else " - a confirmer"),
+                motif=f"Règlement groupé de {len(lot)} factures"
+                + ("" if certain else " – à confirmer"),
                 regle=f"paiement_groupe_{len(lot)}",
             )
 
@@ -381,7 +381,7 @@ class Moteur:
                 confiance=round(similarite, 3),
                 motif=(
                     f"Paiement partiel de la facture {piece.montant_ttc} "
-                    f"{piece.devise} ({piece.fournisseur}) : solde a suivre"
+                    f"{piece.devise} ({piece.fournisseur}) : solde à suivre"
                 ),
                 regle="acompte",
             )
