@@ -11,6 +11,9 @@ const etat = {
   tri: { col: "date", sens: 1 },
   relance: null,
   fichiers: {},
+  // Vrai quand le resultat vient d'etre calcule (lancement, import, regle
+  // modifiee) : le prochain rendu revele les donnees, une seule fois.
+  reveler: false,
 };
 
 const STATUTS = {
@@ -170,7 +173,82 @@ function toast(message, genre = "ok") {
   el.className = `toast ${genre}`;
   el.innerHTML = `${ico(genre === "erreur" ? "alerte" : "check")}<span>${esc(message)}</span>`;
   zone.appendChild(el);
-  setTimeout(() => el.remove(), genre === "erreur" ? 7000 : 4200);
+  setTimeout(() => {
+    if (moinsDeMouvement()) return el.remove();
+    el.classList.add("sort");
+    setTimeout(() => el.remove(), 190);
+  }, genre === "erreur" ? 7000 : 4200);
+}
+
+// -- theme clair / sombre ---------------------------------------------------------
+
+function choixTheme() {
+  const t = document.documentElement.dataset.theme;
+  return t === "light" || t === "dark" ? t : "auto";
+}
+
+function majBoutonsTheme() {
+  document.querySelectorAll("[data-theme-choix]").forEach((b) =>
+    b.setAttribute("aria-pressed", String(b.dataset.themeChoix === choixTheme())));
+}
+
+function appliquerTheme(choix) {
+  if (choix === choixTheme()) return;
+  const basculer = () => {
+    if (choix === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = choix;
+    try {
+      if (choix === "auto") localStorage.removeItem("theme");
+      else localStorage.setItem("theme", choix);
+    } catch { /* stockage indisponible : le choix vaut pour cette page */ }
+    majBoutonsTheme();
+  };
+  // Fondu enchaine du document entier quand le navigateur sait le faire.
+  if (document.startViewTransition && !moinsDeMouvement()) document.startViewTransition(basculer);
+  else basculer();
+}
+
+// -- mouvement : revelation des donnees ---------------------------------------------
+
+let generationRendu = 0;
+const sortieExpo = (x) => (x >= 1 ? 1 : 1 - Math.pow(2, -10 * x));
+
+// Compteurs des indicateurs : de 0 a la valeur, 700 ms, deceleration. Le texte
+// final est deja dans le DOM ; l'animation est annulee par tout nouveau rendu.
+function animerCompteurs(racine) {
+  if (moinsDeMouvement()) return;
+  const generation = generationRendu;
+  racine.querySelectorAll("[data-compteur]").forEach((el) => {
+    const cible = Number(el.dataset.compteur);
+    const final = el.textContent;
+    const format = el.dataset.format === "pct" ? (v) => pct(v) : (v) => nb(Math.round(v));
+    const debut = performance.now() + 120;
+    el.textContent = format(0);
+    const image = (maintenant) => {
+      if (generation !== generationRendu) { el.textContent = final; return; }
+      const avance = Math.max(0, (maintenant - debut) / 700);
+      if (avance >= 1) { el.textContent = final; return; }
+      el.textContent = format(cible * sortieExpo(avance));
+      requestAnimationFrame(image);
+    };
+    requestAnimationFrame(image);
+  });
+}
+
+// Indices d'echelonnement (--i) des blocs, des cartes et des barres.
+function indexer(racine) {
+  [...racine.children].forEach((el, i) => el.style.setProperty("--i", i));
+  racine.querySelectorAll(".kpis").forEach((g) => [...g.children].forEach((el, i) => el.style.setProperty("--i", i)));
+  racine.querySelectorAll(".barres").forEach((g) =>
+    g.querySelectorAll(".rail > span").forEach((el, i) => el.style.setProperty("--i", i)));
+}
+
+function fondu(el, decalage = 4) {
+  if (!el || moinsDeMouvement() || !el.animate) return;
+  el.animate(
+    [{ opacity: 0, transform: `translateY(${decalage}px)` }, { opacity: 1, transform: "none" }],
+    { duration: 220, easing: "cubic-bezier(.16, 1, .3, 1)" },
+  );
 }
 
 // -- navigation ----------------------------------------------------------------
@@ -227,11 +305,22 @@ async function rendre() {
     vue.innerHTML = '<p class="chargement">Chargement…</p>';
     await charger();
   }
+  generationRendu += 1;
+  vue.classList.remove("revele", "change");
   vue.innerHTML = VUES[nom].rendu(param);
   document.title = `${VUES[nom].titre} · Relance des justificatifs`;
   rendreSource();
   rendreNav(nom);
   apresRendu(nom);
+  void vue.offsetWidth; // relance l'animation CSS sur le nouveau contenu
+  if (etat.reveler && nom !== "accueil") {
+    indexer(vue);
+    vue.classList.add("revele");
+    animerCompteurs(vue);
+    etat.reveler = false;
+  } else {
+    vue.classList.add("change");
+  }
 }
 
 function apresRendu(nom) {
@@ -321,6 +410,7 @@ async function lancer(bouton) {
     li.classList.replace("en-cours", "fait");
   }
   await pause(delai);
+  etat.reveler = true;
   location.hash = "#/tableau";
 }
 
@@ -389,24 +479,24 @@ function vueTableau() {
     <section class="kpis">
       <article class="kpi kpi-accent">
         <p class="kpi-libelle">Traité sans intervention</p>
-        <p class="kpi-valeur">${pct(s.taux_automatisation)}</p>
+        <p class="kpi-valeur"><span data-compteur="${s.taux_automatisation}" data-format="pct">${pct(s.taux_automatisation)}</span></p>
         <div class="jauge"><span style="width:${s.taux_automatisation}%"></span></div>
         <p class="kpi-note">${nb(auto)} opérations sur ${nb(s.operations)} classées automatiquement</p>
       </article>
       <article class="kpi kpi-alerte">
         <p class="kpi-libelle">Pièces manquantes</p>
-        <p class="kpi-valeur">${nb(s.manquant)}</p>
+        <p class="kpi-valeur"><span data-compteur="${s.manquant}">${nb(s.manquant)}</span></p>
         <p class="kpi-note">${eur(s.montant_manquant)} de paiements à justifier</p>
         <a class="kpi-lien" href="#/operations/manquant">Voir la liste →</a>
       </article>
       <article class="kpi">
         <p class="kpi-libelle">Reste au comptable</p>
-        <p class="kpi-valeur">${nb(s.lignes_a_traiter)} <small>sur ${nb(s.operations)}</small></p>
+        <p class="kpi-valeur"><span data-compteur="${s.lignes_a_traiter}">${nb(s.lignes_a_traiter)}</span> <small>sur ${nb(s.operations)}</small></p>
         <p class="kpi-note">${esc(reste)}</p>
       </article>
       <article class="kpi kpi-ok">
         <p class="kpi-libelle">Relances prêtes</p>
-        <p class="kpi-valeur">${nb(a.relances.length)}</p>
+        <p class="kpi-valeur"><span data-compteur="${a.relances.length}">${nb(a.relances.length)}</span></p>
         <p class="kpi-note">Un seul e-mail par client, toutes pièces regroupées</p>
         <a class="kpi-lien" href="#/relances">Voir les e-mails →</a>
       </article>
@@ -629,6 +719,7 @@ async function apprendreRegle(bouton) {
   try {
     const rep = await api("/api/regles/ajouter", { dossier: bouton.dataset.dossier, motif_regex: expr, motif });
     etat.analyse = rep.analyse;
+    etat.reveler = true;
     toast(rep.reclassees
       ? `Règle apprise : ${pluriel(rep.reclassees, "opération reclassée", "opérations reclassées")} « sans pièce nécessaire ».`
       : "Règle enregistrée. Elle s'appliquera aux prochains relevés.");
@@ -787,6 +878,7 @@ async function ajouterRegleFormulaire(form) {
       dossier: donnees.get("dossier"), motif_regex: donnees.get("expr"), motif: donnees.get("motif"),
     });
     etat.analyse = rep.analyse;
+    etat.reveler = true;
     toast(rep.reclassees
       ? `Règle ajoutée : ${pluriel(rep.reclassees, "opération reclassée", "opérations reclassées")}.`
       : "Règle ajoutée. Aucune opération de ce relevé n'est concernée.");
@@ -801,6 +893,7 @@ async function oublierRegle(bouton) {
   bouton.disabled = true;
   try {
     etat.analyse = await api("/api/regles/retirer", { dossier: bouton.dataset.dossier, motif_regex: bouton.dataset.regle });
+    etat.reveler = true;
     toast("Règle retirée : les opérations concernées sont de nouveau réclamées.");
     await rendre();
   } catch (e) {
@@ -947,6 +1040,7 @@ async function validerImport(bouton) {
   bouton.disabled = true;
   try {
     etat.analyse = await api("/api/importer", etat.fichiers);
+    etat.reveler = true;
     toast(`Fichiers importés : ${pluriel(etat.analyse.volumes.operations, "opération")} analysées.`);
     fermerCouche();
     location.hash = "#/tableau";
@@ -961,6 +1055,7 @@ async function validerImport(bouton) {
 async function revenirDemo() {
   try {
     etat.analyse = await api("/api/demo", {});
+    etat.reveler = true;
     etat.filtres = { statut: "tous", dossier: "tous", recherche: "" };
     toast("Données de démonstration rechargées.");
     fermerCouche();
@@ -973,23 +1068,35 @@ async function revenirDemo() {
 // -- couche (tiroir ou modale) -------------------------------------------------------------------
 
 let focusAvant = null;
+let fermeture = null;
 function ouvrirCouche(html) {
+  clearTimeout(fermeture);
   focusAvant = document.activeElement;
   const couche = document.getElementById("couche");
+  couche.classList.remove("sortie");
   couche.innerHTML = html;
   const cible = couche.querySelector("input:not([type=file]), button");
   cible?.focus();
 }
 function fermerCouche() {
   const couche = document.getElementById("couche");
-  if (!couche.innerHTML) return;
-  couche.innerHTML = "";
-  focusAvant?.focus?.();
+  if (!couche.innerHTML || couche.classList.contains("sortie")) return;
+  const finir = () => {
+    couche.classList.remove("sortie");
+    couche.innerHTML = "";
+    if (focusAvant?.isConnected) focusAvant.focus();
+  };
+  if (moinsDeMouvement()) return finir();
+  // L'etat final ne depend pas de la fin de l'animation : minuterie fixe.
+  couche.classList.add("sortie");
+  fermeture = setTimeout(finir, 190);
 }
 
 // -- evenements ----------------------------------------------------------------------------------
 
 document.addEventListener("click", async (ev) => {
+  const choix = ev.target.closest("[data-theme-choix]");
+  if (choix) return appliquerTheme(choix.dataset.themeChoix);
   const el = ev.target.closest("[data-action]");
   if (!el) return;
   const action = el.dataset.action;
@@ -1011,7 +1118,8 @@ document.addEventListener("click", async (ev) => {
       etat.filtres.statut = el.dataset.statut;
       document.querySelectorAll(".puce").forEach((p) => p.setAttribute("aria-pressed", p.dataset.statut === etat.filtres.statut));
       history.replaceState(null, "", `#/operations/${etat.filtres.statut}`);
-      return majTableOperations();
+      majTableOperations();
+      return fondu(document.getElementById("corps-ops"), 0);
     case "trier": {
       const col = el.dataset.col;
       etat.tri = { col, sens: etat.tri.col === col ? -etat.tri.sens : col === "montant" ? -1 : 1 };
@@ -1019,13 +1127,14 @@ document.addEventListener("click", async (ev) => {
         const base = b.dataset.col === "date" ? "Date" : "Montant";
         b.textContent = base + (b.dataset.col === etat.tri.col ? (etat.tri.sens > 0 ? " ↑" : " ↓") : "");
       });
-      return majTableOperations();
+      majTableOperations();
+      return fondu(document.getElementById("corps-ops"), 0);
     }
     case "choisir-relance":
       etat.relance = el.dataset.dossier;
       history.replaceState(null, "", `#/relances/${encodeURIComponent(el.dataset.dossier)}`);
       document.getElementById("vue").innerHTML = vueRelances(el.dataset.dossier);
-      return;
+      return fondu(document.querySelector(".mail"));
   }
 });
 
@@ -1043,6 +1152,7 @@ document.addEventListener("input", (ev) => {
 });
 
 document.addEventListener("change", (ev) => {
+  if (ev.target.matches("select[data-filtre]")) fondu(document.getElementById("corps-ops"), 0);
   if (ev.target.matches("input[type=file][data-fichier]")) {
     choisirFichier(ev.target.dataset.fichier, ev.target.files[0]);
   }
@@ -1075,6 +1185,7 @@ document.addEventListener("drop", (ev) => {
 window.addEventListener("hashchange", rendre);
 
 (async function demarrer() {
+  majBoutonsTheme();
   await charger();
   rendre();
 })();

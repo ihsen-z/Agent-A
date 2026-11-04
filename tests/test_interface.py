@@ -182,3 +182,35 @@ def test_apprendre_par_l_api(serveur):
                         {"dossier": "MARTIN-BTP", "motif_regex": "cotisation ordre", "motif": "Ordinale"})
     assert statut == 200 and rep["reclassees"] == 1
     assert rep["analyse"]["stats"]["manquant"] == 23
+
+
+# --- design system : hors connexion, deux themes ------------------------------
+
+STATIQUE = RACINE / "src" / "rapprochement" / "interface" / "static"
+
+
+def test_aucune_ressource_externe_dans_les_pages():
+    """La demonstration doit marcher sans connexion : ni CDN ni police en ligne."""
+    import re
+    for fichier in ("index.html", "app.css", "app.js"):
+        texte = (STATIQUE / fichier).read_text(encoding="utf-8")
+        externes = [u for u in re.findall(r"https?://[^\s\"')]+", texte)
+                    if "www.w3.org/2000/svg" not in u and "python.org" not in u]
+        assert externes == [], f"{fichier} charge une ressource externe : {externes}"
+
+
+def test_les_deux_themes_definissent_les_memes_jetons():
+    """Un jeton oublie en sombre retomberait sur sa valeur claire."""
+    import re
+    css = (STATIQUE / "app.css").read_text(encoding="utf-8")
+    clair = set(re.findall(r"(--[a-z0-9-]+)\s*:", css.split(":root[data-theme=\"dark\"]")[0].split(":root {")[1].split("\n}")[0]))
+    sombre = set(re.findall(r"(--[a-z0-9-]+)\s*:", css.split(":root[data-theme=\"dark\"] {")[1].split("\n}")[0]))
+    auto = set(re.findall(r"(--[a-z0-9-]+)\s*:", css.split(':root:not([data-theme="light"]) {')[1].split("\n  }")[0]))
+    couleurs = {j for j in clair if not j.startswith(("--esp", "--r", "--duree", "--courbe", "--decalage", "--police"))}
+    assert couleurs <= sombre, f"jetons absents du theme sombre : {sorted(couleurs - sombre)}"
+    assert sombre == auto, "le theme sombre automatique doit reprendre le theme sombre choisi"
+
+
+def test_polices_servies_localement(serveur):
+    statut, type_contenu, corps = _get(serveur + "/static/polices/ibm-plex-sans-latin-400-normal.woff2")
+    assert statut == 200 and type_contenu == "font/woff2" and corps[:4] == b"wOF2"

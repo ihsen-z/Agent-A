@@ -67,6 +67,15 @@ poste lui-même : les relevés bancaires n'en sortent pas.
 | Règles du cabinet | Règles générales, règles apprises (ajout et retrait), contre-exemples, alias |
 | Qualité mesurée | Fausses alertes et manques ratés contre la vérité terrain, avec l'avertissement sur les données fictives |
 
+Thèmes clair et sombre : l'interface suit le réglage du système, et le sélecteur
+Clair / Sombre / Auto de la barre latérale le force. Les animations
+(compteurs, barres, entrées échelonnées, tiroir) ne se jouent que lorsqu'un
+résultat vient d'être calculé, et disparaissent si le système demande de
+réduire les animations. Couleurs, typographie (IBM Plex, embarquée), espacements
+et mouvement sont définis dans
+[design-system/relance-des-justificatifs/MASTER.md](design-system/relance-des-justificatifs/MASTER.md),
+établi avec le skill `ui-ux-pro-max` (`.claude/skills/`).
+
 L'interface travaille sur une copie (`data/sorties/interface/`) : le corpus
 versionné n'est jamais modifié. Elle repart des données de démonstration à
 chaque lancement (`--conserver` pour reprendre l'espace précédent). L'import
