@@ -181,6 +181,7 @@ button, a, select, summary, [data-action] { cursor: pointer; }
 .pastille { width: 9px; height: 9px; border-radius: 50%; background: #fbbf24; flex: none; box-shadow: 0 0 0 3px rgb(251 191 36 / .2); }
 .pastille.import { background: #4ade80; box-shadow: 0 0 0 3px rgb(74 222 128 / .2); }
 .source-actions { display: flex; flex-direction: column; gap: 6px; }
+.source-note { font-size: 12px; line-height: 1.45; color: var(--barre-texte); }
 .source-actions .btn { justify-content: center; color: #fff; border-color: rgb(255 255 255 / .16); background: transparent; }
 .source-actions .btn:hover { background: rgb(255 255 255 / .08); }
 .local { display: flex; gap: 8px; font-size: 12px; line-height: 1.4; color: var(--barre-texte); padding: 0 6px; }

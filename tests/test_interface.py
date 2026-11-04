@@ -214,3 +214,23 @@ def test_les_deux_themes_definissent_les_memes_jetons():
 def test_polices_servies_localement(serveur):
     statut, type_contenu, corps = _get(serveur + "/static/polices/ibm-plex-sans-latin-400-normal.woff2")
     assert statut == 200 and type_contenu == "font/woff2" and corps[:4] == b"wOF2"
+
+
+# --- version en ligne (fichier unique, lecture seule) ---------------------------
+
+def test_version_en_ligne_autonome(tmp_path):
+    import importlib.util
+    import re
+    spec = importlib.util.spec_from_file_location("construire", RACINE / "scripts" / "construire_demo_en_ligne.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    page = module.construire(tmp_path / "demo.html").read_text(encoding="utf-8")
+
+    assert "<title>Relance des justificatifs</title>" in page[:8192]
+    assert not re.search(r"<(html|head|body)\b", page), "l'hebergeur ajoute lui-meme le squelette"
+    assert 'url("data:font/woff2;base64,' in page and "polices/ibm-plex" not in page
+    externes = [u for u in re.findall(r"https?://[^\s\"')<]+", page) if "python.org" not in u]
+    assert externes == []
+    donnees = page.split("window.ANALYSE_EMBARQUEE = ", 1)[1].split(";</script>", 1)[0]
+    analyse = json.loads(donnees.replace("<\\/", "</"))
+    assert analyse["stats"]["manquant"] == 23 and analyse["source"] == "demo"
